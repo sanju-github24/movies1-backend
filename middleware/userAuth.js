@@ -3,8 +3,11 @@ import jwt from 'jsonwebtoken';
 const userAuth = async (req, res, next) => {
     const { token } = req.cookies;
 
+    // Set CORS headers for manual responses (401 errors)
     const setCorsHeaders = () => {
-        res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+        if (req.headers.origin) {
+            res.header('Access-Control-Allow-Origin', req.headers.origin);
+        }
         res.header('Access-Control-Allow-Credentials', 'true');
     };
 
@@ -14,14 +17,14 @@ const userAuth = async (req, res, next) => {
     }
 
     try {
-        const tokenDecode = jwt.verify(token, process.env.JWT_SECRET);
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-        if (tokenDecode.id) {
-            req.user = { userId: tokenDecode.id };
-            return next();
+        if (decoded?.id) {
+            req.user = { userId: decoded.id };
+            next();
         } else {
             setCorsHeaders();
-            return res.status(401).json({ success: false, message: "Not authorized, login again" });
+            return res.status(401).json({ success: false, message: "Invalid token, login again" });
         }
     } catch (error) {
         setCorsHeaders();
@@ -30,3 +33,4 @@ const userAuth = async (req, res, next) => {
 };
 
 export default userAuth;
+
