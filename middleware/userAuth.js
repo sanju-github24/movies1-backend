@@ -2,19 +2,30 @@ import jwt from 'jsonwebtoken';
 
 const userAuth = async (req, res, next) => {
     const { token } = req.cookies;
+
+    const setCorsHeaders = () => {
+        res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+        res.header('Access-Control-Allow-Credentials', 'true');
+    };
+
     if (!token) {
-        return res.json({ success: false, message: "Not authorized, login again" });
+        setCorsHeaders();
+        return res.status(401).json({ success: false, message: "Not authorized, login again" });
     }
+
     try {
         const tokenDecode = jwt.verify(token, process.env.JWT_SECRET);
+
         if (tokenDecode.id) {
-            req.user = { userId: tokenDecode.id }; // ✅ THIS FIXES THE ERROR
-            next();
+            req.user = { userId: tokenDecode.id };
+            return next();
         } else {
-            return res.json({ success: false, message: "Not authorized, login again" });
+            setCorsHeaders();
+            return res.status(401).json({ success: false, message: "Not authorized, login again" });
         }
     } catch (error) {
-        res.json({ success: false, message: error.message });
+        setCorsHeaders();
+        return res.status(401).json({ success: false, message: error.message });
     }
 };
 
