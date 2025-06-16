@@ -2,23 +2,31 @@ import express from 'express';
 import cors from 'cors';
 import 'dotenv/config';
 import cookieParser from 'cookie-parser';
+import axios from 'axios';
 import authRouter from './routes/authRoutes.js';
-import connectDB from './config/mongodb.js';
 import userRouter from './routes/userRoutes.js';
+
+import movieRouter from './routes/movieRoutes.js';
+import { connectDBs } from './config/mongodb.js';
+import aiRoutes from './routes/ai.js';
+import cron from 'node-cron';
+import { deleteOldTorrents } from './utils/cleanup.js';
+
+import { supabase } from '../client/src/utils/supabaseClient.js';
 
 const app = express();
 const port = process.env.PORT || 4000;
 
-// Connect to MongoDB
-connectDB();
+// Connect to MongoDB (for auth/user features)
+
+await connectDBs(); // en
 
 // Allowed origins for CORS
 const allowedOrigins = [
   'http://localhost:5173',
-  'https://auth-2407.netlify.app'
+  'https://auth-2407.netlify.app',
 ];
 
-// Unified CORS options
 const corsOptions = {
   origin: function (origin, callback) {
     if (!origin || allowedOrigins.includes(origin)) {
@@ -30,18 +38,53 @@ const corsOptions = {
   credentials: true,
 };
 
+cron.schedule('0 0 * * *', () => {
+  console.log('🧹 Running cleanup job...');
+  deleteOldTorrents();
+});
+
+
 // Middleware
-app.use(cors(corsOptions));               // Apply CORS to all requests
-app.options('*', cors(corsOptions));      // Handle preflight (OPTIONS) requests
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(cookieParser());
 
-// API Endpoints
-app.get('/', (req, res) => res.send("API WORKING"));
+// Basic route
+app.get('/', (req, res) => res.send('✅ API is live'));
+
+// Auth and user routes
 app.use('/api/auth', authRouter);
 app.use('/api/user', userRouter);
+app.use('/api/movies', movieRouter);
+app.use( aiRoutes);
 
-// Start server
+
+app.get('/proxy-download', async (req, res) => {
+  const { url, filename } = req.query;
+
+  try {
+    const response = await axios.get(url, { responseType: 'stream' });
+
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Content-Type', 'application/x-bittorrent');
+
+    response.data.pipe(res);
+  } catch (error) {
+    console.error('Download error:', error.message);
+    res.status(500).send('Failed to download torrent file');
+  }
+});
+
+
+
+
+// ✅ Universal proxy-download route
+
+
+
+
+// Start the server
 app.listen(port, () => {
-  console.log(`Server is running on port ${port}`);
+  console.log(`🚀 Server running on http://localhost:${port}`);
 });
