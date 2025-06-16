@@ -1,7 +1,7 @@
 import express from 'express';
 import { getMovieModel } from '../models/Movie.js';
 import { moviesConnection } from '../config/mongodb.js';
-import { generateSummary } from '../controllers/aiController.js';
+
 
 const router = express.Router();
 
@@ -46,7 +46,7 @@ router.get('/', async (req, res) => {
   }
 });
 
-router.post('/generate-summary', generateSummary);
+
 
 
 
