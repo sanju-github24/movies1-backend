@@ -12,7 +12,7 @@ import aiRoutes from './routes/ai.js';
 import cron from 'node-cron';
 import { deleteOldTorrents } from './utils/cleanup.js';
 
-import { supabase } from '../client/src/utils/supabaseClient.js';
+
 
 const app = express();
 const port = process.env.PORT || 4000;
