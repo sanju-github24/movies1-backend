@@ -26,6 +26,7 @@ const allowedOrigins = [
   'http://localhost:5173',
   'https://auth-2407.netlify.app',
   'https://movies1-frontend.vercel.app',
+  'https://1anchormovies.vercel.app',
 ];
 
 const corsOptions = {
