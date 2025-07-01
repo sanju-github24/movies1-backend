@@ -63,47 +63,37 @@ app.use('/api/movies', movieRouter);
 
 
 
-app.get('/proxy-download', async (req, res) => {
-  const { url, filename } = req.query;
+app.get('/download/:encoded', async (req, res) => {
+  const encoded = req.params.encoded;
 
-  if (!url || !filename) {
-    return res.status(400).send('Missing URL or filename');
+  // Simple validation
+  if (!encoded || !encoded.endsWith('.torrent')) {
+    return res.status(400).send('Invalid file request.');
   }
+
+  // Reconstruct full original URL
+  const decodedUrl = `https://files.catbox.moe/${encoded}`;
+  const filename = req.query.filename || encoded;
 
   try {
-    // Stream the remote file
-    const fileResponse = await axios({
+    const response = await axios({
       method: 'GET',
-      url: decodeURIComponent(url),
+      url: decodedUrl,
       responseType: 'stream',
       headers: {
-        'User-Agent': 'Mozilla/5.0', // Fake browser header for some hosts
-        'Accept': '*/*',
-      },
+        'User-Agent': 'Mozilla/5.0 (compatible; AnchorBot/1.0)'
+      }
     });
 
-    // Set headers so Seedr and browsers treat it as a file download
     res.setHeader('Content-Type', 'application/x-bittorrent');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Content-Length', fileResponse.headers['content-length'] || '');
 
-    // Pipe the stream from remote to client
-    fileResponse.data.pipe(res);
-
-  } catch (error) {
-    console.error('Proxy download error:', error.message);
-
-    if (error.response) {
-      return res.status(error.response.status).send(`Error from upstream server: ${error.response.statusText}`);
-    }
-
-    res.status(500).send('Failed to proxy download');
+    response.data.pipe(res);
+  } catch (err) {
+    console.error('Error downloading file:', err.message);
+    res.status(500).send('Download failed.');
   }
 });
-
-
-
 
 
 // ✅ Universal proxy-download route
