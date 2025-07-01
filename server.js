@@ -63,27 +63,42 @@ app.use('/api/movies', movieRouter);
 
 
 
-// Example: /download/:slug or /download/:token
-app.get('/download/:id', async (req, res) => {
-  const { id } = req.params;
+app.get('/proxy-download', async (req, res) => {
+  const { url, filename } = req.query;
 
-  // Option 1: Decode/lookup from DB
-  const realUrl = decodeURIComponent(id); // or use DB to get actual file URL
+  if (!url || !filename) {
+    return res.status(400).send('Missing URL or filename');
+  }
 
   try {
-    const response = await fetch(realUrl);
-    if (!response.ok) return res.status(500).send('Download failed');
+    // Stream the remote file
+    const fileResponse = await axios({
+      method: 'GET',
+      url: decodeURIComponent(url),
+      responseType: 'stream',
+      headers: {
+        'User-Agent': 'Mozilla/5.0', // Fake browser header for some hosts
+        'Accept': '*/*',
+      },
+    });
 
-    const contentType = response.headers.get('content-type') || 'application/octet-stream';
-    const filename = 'movie.torrent'; // You can dynamically extract filename
-
+    // Set headers so Seedr and browsers treat it as a file download
     res.setHeader('Content-Type', 'application/x-bittorrent');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Content-Length', fileResponse.headers['content-length'] || '');
 
-    response.body.pipe(res); // stream to client
-  } catch (err) {
-    console.error(err);
-    res.status(500).send('Failed to fetch file.');
+    // Pipe the stream from remote to client
+    fileResponse.data.pipe(res);
+
+  } catch (error) {
+    console.error('Proxy download error:', error.message);
+
+    if (error.response) {
+      return res.status(error.response.status).send(`Error from upstream server: ${error.response.statusText}`);
+    }
+
+    res.status(500).send('Failed to proxy download');
   }
 });
 
