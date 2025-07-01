@@ -63,21 +63,30 @@ app.use('/api/movies', movieRouter);
 
 
 
-app.get('/proxy-download', async (req, res) => {
-  const { url, filename } = req.query;
+// Example: /download/:slug or /download/:token
+app.get('/download/:id', async (req, res) => {
+  const { id } = req.params;
+
+  // Option 1: Decode/lookup from DB
+  const realUrl = decodeURIComponent(id); // or use DB to get actual file URL
 
   try {
-    const response = await axios.get(url, { responseType: 'stream' });
+    const response = await fetch(realUrl);
+    if (!response.ok) return res.status(500).send('Download failed');
 
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    const contentType = response.headers.get('content-type') || 'application/octet-stream';
+    const filename = 'movie.torrent'; // You can dynamically extract filename
+
     res.setHeader('Content-Type', 'application/x-bittorrent');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
 
-    response.data.pipe(res);
-  } catch (error) {
-    console.error('Download error:', error.message);
-    res.status(500).send('Failed to download torrent file');
+    response.body.pipe(res); // stream to client
+  } catch (err) {
+    console.error(err);
+    res.status(500).send('Failed to fetch file.');
   }
 });
+
 
 
 
