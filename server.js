@@ -11,6 +11,8 @@ import { connectDBs } from './config/mongodb.js';
 
 import cron from 'node-cron';
 import { deleteOldTorrents } from './utils/cleanup.js';
+import popadsRoute from './routes/popadsRoute.js';
+
 
 
 
@@ -60,6 +62,8 @@ app.get('/', (req, res) => res.send('✅ API is live'));
 app.use('/api/auth', authRouter);
 app.use('/api/user', userRouter);
 app.use('/api/movies', movieRouter);
+app.use('/api', popadsRoute);
+
 
 
 
@@ -67,41 +71,44 @@ app.get('/proxy-download', async (req, res) => {
   const { url, filename } = req.query;
 
   if (!url || !filename) {
-    return res.status(400).send('Missing URL or filename');
+    return res.status(400).send('❌ Missing URL or filename');
   }
+
+  const decodedUrl = decodeURIComponent(url);
 
   try {
-    // Stream the remote file
-    const fileResponse = await axios({
+    const response = await axios({
       method: 'GET',
-      url: decodeURIComponent(url),
+      url: decodedUrl,
       responseType: 'stream',
       headers: {
-        'User-Agent': 'Mozilla/5.0', // Fake browser header for some hosts
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', // Some hosts reject axios default
         'Accept': '*/*',
+        'Referer': decodedUrl, // Optional but helps with sources like Catbox
       },
+      timeout: 15000, // Optional timeout (15 sec)
+      maxRedirects: 5, // Follow redirects safely
     });
 
-    // Set headers so Seedr and browsers treat it as a file download
-    res.setHeader('Content-Type', 'application/x-bittorrent');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Content-Length', fileResponse.headers['content-length'] || '');
-
-    // Pipe the stream from remote to client
-    fileResponse.data.pipe(res);
-
-  } catch (error) {
-    console.error('Proxy download error:', error.message);
-
-    if (error.response) {
-      return res.status(error.response.status).send(`Error from upstream server: ${error.response.statusText}`);
+    res.setHeader('Content-Type', 'application/x-bittorrent');
+    if (response.headers['content-length']) {
+      res.setHeader('Content-Length', response.headers['content-length']);
     }
 
-    res.status(500).send('Failed to proxy download');
+    response.data.pipe(res);
+  } catch (err) {
+    console.error('❌ Proxy error:', err.message);
+
+    if (err.response) {
+      return res
+        .status(err.response.status)
+        .send(`Upstream error: ${err.response.statusText}`);
+    }
+
+    res.status(500).send('⚠️ Failed to proxy torrent file.');
   }
 });
-
 
 
 
