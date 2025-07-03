@@ -10,7 +10,7 @@ import movieRouter from './routes/movieRoutes.js';
 import { connectDBs } from './config/mongodb.js';
 
 import cron from 'node-cron';
-import { deleteOldTorrents } from './utils/cleanup.js';
+
 import popadsRoute from './routes/popadsRoute.js';
 
 
@@ -43,10 +43,6 @@ const corsOptions = {
   credentials: true,
 };
 
-cron.schedule('0 0 * * *', () => {
-  console.log('🧹 Running cleanup job...');
-  deleteOldTorrents();
-});
 
 
 // Middleware
