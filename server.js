@@ -81,28 +81,31 @@ app.get('/proxy-download', async (req, res) => {
       url: decodedUrl,
       responseType: 'stream',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
+        // These headers help with hosts like Catbox, mobile Safari, Chrome etc.
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 Chrome/112.0.0.0 Mobile Safari/537.36',
         'Accept': '*/*',
         'Referer': decodedUrl,
       },
-      timeout: 15000,
+      timeout: 20000, // 20s timeout for slow networks
       maxRedirects: 5,
+      validateStatus: (status) => status < 500 // Let 4xx through
     });
 
-    // ✅ Browser download headers
+    // ✅ Set proper headers for mobile download compatibility
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Content-Type', 'application/x-bittorrent');
-    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Content-Type', 'application/octet-stream'); // More universally compatible than x-bittorrent
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
 
-    // ✅ Optional: Expose filename for CORS download support
+    // ✅ Support CORS downloads (if frontend is on different domain)
+    res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
 
-    // ✅ Set size if available
     if (response.headers['content-length']) {
       res.setHeader('Content-Length', response.headers['content-length']);
     }
 
-    // ✅ Stream the file to the client
+    // ✅ Pipe the file stream to client
     response.data.pipe(res);
   } catch (err) {
     console.error('❌ Proxy error:', err.message);
