@@ -66,7 +66,6 @@ app.use('/api', popadsRoute);
 
 
 
-
 app.get('/proxy-download', async (req, res) => {
   const { url, filename } = req.query;
 
@@ -82,20 +81,28 @@ app.get('/proxy-download', async (req, res) => {
       url: decodedUrl,
       responseType: 'stream',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', // Some hosts reject axios default
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
         'Accept': '*/*',
-        'Referer': decodedUrl, // Optional but helps with sources like Catbox
+        'Referer': decodedUrl,
       },
-      timeout: 15000, // Optional timeout (15 sec)
-      maxRedirects: 5, // Follow redirects safely
+      timeout: 15000,
+      maxRedirects: 5,
     });
 
+    // ✅ Browser download headers
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Type', 'application/x-bittorrent');
+    res.setHeader('Cache-Control', 'no-store');
+
+    // ✅ Optional: Expose filename for CORS download support
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+
+    // ✅ Set size if available
     if (response.headers['content-length']) {
       res.setHeader('Content-Length', response.headers['content-length']);
     }
 
+    // ✅ Stream the file to the client
     response.data.pipe(res);
   } catch (err) {
     console.error('❌ Proxy error:', err.message);
