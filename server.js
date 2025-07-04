@@ -77,23 +77,19 @@ app.get('/proxy-download', async (req, res) => {
       url: decodedUrl,
       responseType: 'stream',
       headers: {
-        // These headers help with hosts like Catbox, mobile Safari, Chrome etc.
         'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 Chrome/112.0.0.0 Mobile Safari/537.36',
         'Accept': '*/*',
         'Referer': decodedUrl,
       },
-      timeout: 20000, // 20s timeout for slow networks
+      timeout: 20000,
       maxRedirects: 5,
-      validateStatus: (status) => status < 500 // Let 4xx through
+      validateStatus: (status) => status < 500
     });
 
-    // ✅ Set proper headers for mobile download compatibility
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Content-Type', 'application/octet-stream'); // More universally compatible than x-bittorrent
+    res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
     res.setHeader('Pragma', 'no-cache');
-
-    // ✅ Support CORS downloads (if frontend is on different domain)
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
 
@@ -101,22 +97,14 @@ app.get('/proxy-download', async (req, res) => {
       res.setHeader('Content-Length', response.headers['content-length']);
     }
 
-    // ✅ Pipe the file stream to client
     response.data.pipe(res);
   } catch (err) {
-    console.error('❌ Proxy error:', err.message);
+    console.error('❌ Proxy failed, redirecting:', err.message);
 
-    if (err.response) {
-      return res
-        .status(err.response.status)
-        .send(`Upstream error: ${err.response.statusText}`);
-    }
-
-    res.status(500).send('⚠️ Failed to proxy torrent file.');
+    // If axios got a 4xx/5xx error, or timed out, fallback to redirecting
+    res.redirect(decodedUrl); // 302 redirect to actual file source
   }
 });
-
-
 
 
 // ✅ Universal proxy-download route
