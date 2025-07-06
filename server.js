@@ -5,25 +5,19 @@ import cookieParser from 'cookie-parser';
 import axios from 'axios';
 import authRouter from './routes/authRoutes.js';
 import userRouter from './routes/userRoutes.js';
-
 import movieRouter from './routes/movieRoutes.js';
-import { connectDBs } from './config/mongodb.js';
-
-import cron from 'node-cron';
-
 import popadsRoute from './routes/popadsRoute.js';
-
-
-
+import { connectDBs } from './config/mongodb.js';
+import cron from 'node-cron';
+import prerender from 'prerender-node';
 
 const app = express();
 const port = process.env.PORT || 4000;
 
-// Connect to MongoDB (for auth/user features)
+// ✅ Connect to MongoDB
+await connectDBs();
 
-await connectDBs(); // en
-
-// Allowed origins for CORS
+// ✅ CORS setup
 const allowedOrigins = [
   'http://localhost:5173',
   'https://auth-2407.netlify.app',
@@ -43,25 +37,27 @@ const corsOptions = {
   credentials: true,
 };
 
-
-
-// Middleware
+// ✅ Middlewares
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(cookieParser());
 
-// Basic route
+// ✅ Pre-rendering for SEO (for bots like Googlebot)
+app.use(
+  prerender.set('prerenderToken', process.env.PRERENDER_TOKEN)
+);
+
+// ✅ Basic test route
 app.get('/', (req, res) => res.send('✅ API is live'));
 
-// Auth and user routes
+// ✅ API Routes
 app.use('/api/auth', authRouter);
 app.use('/api/user', userRouter);
 app.use('/api/movies', movieRouter);
 app.use('/api', popadsRoute);
 
-
-
+// ✅ File proxy download handler
 app.get('/proxy-download', async (req, res) => {
   const { url, filename } = req.query;
 
@@ -77,13 +73,14 @@ app.get('/proxy-download', async (req, res) => {
       url: decodedUrl,
       responseType: 'stream',
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 Chrome/112.0.0.0 Mobile Safari/537.36',
-        'Accept': '*/*',
-        'Referer': decodedUrl,
+        'User-Agent':
+          'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 Chrome/112.0.0.0 Mobile Safari/537.36',
+        Accept: '*/*',
+        Referer: decodedUrl,
       },
       timeout: 20000,
       maxRedirects: 5,
-      validateStatus: (status) => status < 500
+      validateStatus: (status) => status < 500,
     });
 
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
@@ -100,19 +97,11 @@ app.get('/proxy-download', async (req, res) => {
     response.data.pipe(res);
   } catch (err) {
     console.error('❌ Proxy failed, redirecting:', err.message);
-
-    // If axios got a 4xx/5xx error, or timed out, fallback to redirecting
-    res.redirect(decodedUrl); // 302 redirect to actual file source
+    res.redirect(decodedUrl); // fallback
   }
 });
 
-
-// ✅ Universal proxy-download route
-
-
-
-
-// Start the server
+// ✅ Start server
 app.listen(port, () => {
   console.log(`🚀 Server running on http://localhost:${port}`);
 });
