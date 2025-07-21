@@ -58,6 +58,10 @@ app.use('/api/movies', movieRouter);
 app.use('/api', popadsRoute);
 
 // ✅ File proxy download handler
+import WebTorrent from 'webtorrent'; // Make sure to install: npm install webtorrent
+
+const client = new WebTorrent();
+
 app.get('/proxy-download', async (req, res) => {
   const { url, filename } = req.query;
 
@@ -68,38 +72,62 @@ app.get('/proxy-download', async (req, res) => {
   const decodedUrl = decodeURIComponent(url);
 
   try {
-    const response = await axios({
-      method: 'GET',
-      url: decodedUrl,
-      responseType: 'stream',
-      headers: {
-        'User-Agent':
-          'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 Chrome/112.0.0.0 Mobile Safari/537.36',
-        Accept: '*/*',
-        Referer: decodedUrl,
-      },
-      timeout: 20000,
-      maxRedirects: 5,
-      validateStatus: (status) => status < 500,
-    });
+    // If magnet link
+    if (decodedUrl.startsWith('magnet:')) {
+      client.add(decodedUrl, { path: '/tmp' }, (torrent) => {
+        // Choose the largest file (usually the main media)
+        const file = torrent.files.reduce((a, b) => (a.length > b.length ? a : b));
 
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Content-Type', 'application/octet-stream');
-    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
-    res.setHeader('Pragma', 'no-cache');
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+        res.setHeader('Content-Type', 'application/octet-stream');
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+        res.setHeader('Pragma', 'no-cache');
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
 
-    if (response.headers['content-length']) {
-      res.setHeader('Content-Length', response.headers['content-length']);
+        file.createReadStream().pipe(res);
+
+        file.on('done', () => {
+          console.log('✅ Torrent streaming completed');
+          client.remove(decodedUrl); // Clean up
+        });
+      });
+    } else {
+      // Normal direct URL
+      const response = await axios({
+        method: 'GET',
+        url: decodedUrl,
+        responseType: 'stream',
+        headers: {
+          'User-Agent':
+            'Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 Chrome/112.0.0.0 Mobile Safari/537.36',
+          Accept: '*/*',
+          Referer: decodedUrl,
+        },
+        timeout: 20000,
+        maxRedirects: 5,
+        validateStatus: (status) => status < 500,
+      });
+
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+
+      if (response.headers['content-length']) {
+        res.setHeader('Content-Length', response.headers['content-length']);
+      }
+
+      response.data.pipe(res);
     }
-
-    response.data.pipe(res);
   } catch (err) {
     console.error('❌ Proxy failed, redirecting:', err.message);
     res.redirect(decodedUrl); // fallback
   }
 });
+
 
 // ✅ Start server
 app.listen(port, () => {
