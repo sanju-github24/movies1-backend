@@ -1,5 +1,5 @@
 import express from "express";
-import puppeteer from "puppeteer-extra"; // ✅ puppeteer-extra
+import puppeteer from "puppeteer-extra"; // puppeteer-extra
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { load } from "cheerio";
 
@@ -44,18 +44,23 @@ async function fetchReleaseDateGoogle(title) {
   }
 }
 
+// -------------------- Utility: delay --------------------
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // -------------------- Main BMS Scraper --------------------
 async function scrapeBMS(slug) {
   try {
     const browser = await puppeteer.launch({
-  headless: true,
-  args: [
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--disable-blink-features=AutomationControlled",
-  ],
-});
-
+      headless: true,
+      executablePath: process.env.CHROME_PATH || undefined, // use system Chrome if available
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-blink-features=AutomationControlled",
+      ],
+    });
 
     const page = await browser.newPage();
 
@@ -73,7 +78,9 @@ async function scrapeBMS(slug) {
 
     const url = `https://in.bookmyshow.com/movies/bengaluru/${slug}`;
     await page.goto(url, { waitUntil: "networkidle2" });
-    await page.waitForTimeout(1000 + Math.random() * 1000);
+
+    // Random small delay
+    await delay(1000 + Math.random() * 1000);
 
     const html = await page.content();
     await browser.close();
@@ -114,6 +121,7 @@ async function scrapeBMS(slug) {
       $("img[src*='/movies/images/banner/']").first().attr("src") ||
       null;
 
+    // fallback: inline style
     if (!background) {
       const inlineStyle = $("[style*='background-image']").attr("style");
       if (inlineStyle) {
