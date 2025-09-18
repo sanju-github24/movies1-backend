@@ -7,7 +7,7 @@ const router = express.Router();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// ✅ Serve static files from public/ (works even inside this router)
+// Serve static files from public/
 router.use("/public", express.static(path.join(__dirname, "../public")));
 
 router.get("/", (req, res) => {
@@ -17,7 +17,8 @@ router.get("/", (req, res) => {
     return res.status(400).json({ success: false, message: "No slug provided" });
   }
 
-  const pythonPath = "/opt/homebrew/bin/python3.13";  
+  // ✅ Use generic python3 for Linux environments like Render
+  const pythonPath = "python3";  
   const scriptPath = path.join(__dirname, "../script/bms_scraper.py");
 
   execFile(pythonPath, [scriptPath, slug], (error, stdout, stderr) => {
