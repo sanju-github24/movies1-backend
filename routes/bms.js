@@ -1,10 +1,14 @@
 import express from "express";
-import puppeteer from "puppeteer";
+import puppeteer from "puppeteer-extra"; // puppeteer-extra for stealth
+import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { load } from "cheerio";
 
 const router = express.Router();
 const DEFAULT_ACTOR_IMAGE = "/user.png";
 const DEFAULT_POSTER = "/default-poster.png";
+
+// Use stealth plugin to reduce blocking
+puppeteer.use(StealthPlugin());
 
 // Optional: Google Custom Search config
 const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY || "";
@@ -44,13 +48,14 @@ async function fetchReleaseDateGoogle(title) {
 async function scrapeBMS(slug) {
   try {
     const browser = await puppeteer.launch({
-      headless: true,
+      headless: "new", // use new headless mode for better stealth
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-blink-features=AutomationControlled",
       ],
     });
+
     const page = await browser.newPage();
 
     // Anti-bot settings
@@ -67,6 +72,9 @@ async function scrapeBMS(slug) {
 
     const url = `https://in.bookmyshow.com/movies/bengaluru/${slug}`;
     await page.goto(url, { waitUntil: "networkidle2" });
+
+    // Random small delay to mimic human browsing
+    await page.waitForTimeout(1000 + Math.random() * 1000);
 
     const html = await page.content();
     await browser.close();
@@ -103,9 +111,11 @@ async function scrapeBMS(slug) {
 
     // -------------------- Hero Background --------------------
     let background =
-      $("img[src*='/movies/images/cover/']").first().attr("src") || null;
+      $("img[src*='/movies/images/cover/']").first().attr("src") ||
+      $("img[src*='/movies/images/banner/']").first().attr("src") ||
+      null;
 
-    // Fallback: Inline style background (some BMS pages use it)
+    // Fallback: Inline style background
     if (!background) {
       const inlineStyle = $("[style*='background-image']").attr("style");
       if (inlineStyle) {
