@@ -5,6 +5,7 @@ import { load } from "cheerio";
 import os from "os";
 import path from "path";
 import fs from "fs";
+import { executablePath } from "puppeteer";
 
 const router = express.Router();
 const DEFAULT_ACTOR_IMAGE = "/user.png";
@@ -59,11 +60,11 @@ async function scrapeBMS(slug) {
     // Use a temporary directory for userDataDir to avoid conflicts
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "puppeteer-"));
 
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      userDataDir: tempDir, // each launch gets a fresh temp directory
-    });
+    const browser = await puppeteer.launch({
+  headless: true,
+  executablePath: executablePath(), // use bundled Chromium
+  args: ["--no-sandbox", "--disable-setuid-sandbox"],
+});
 
     const page = await browser.newPage();
 

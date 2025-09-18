@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "server": "nodemon server.js",
-    "postinstall": "puppeteer install"
+     "postinstall": "puppeteer browsers install chrome"
   },
   "author": "",
   "license": "ISC",
