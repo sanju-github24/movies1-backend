@@ -5,6 +5,7 @@ import { load } from "cheerio";
 import os from "os";
 import path from "path";
 import fs from "fs";
+
 const router = express.Router();
 const DEFAULT_ACTOR_IMAGE = "/user.png";
 const DEFAULT_POSTER = "/default-poster.png";
@@ -53,14 +54,16 @@ function delay(ms) {
 
 // -------------------- Main BMS Scraper --------------------
 async function scrapeBMS(slug) {
+  let browser;
   try {
-    const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "puppeteer-"));
-const browser = await puppeteer.launch({
-  headless: true,
-  args: ["--no-sandbox", "--disable-setuid-sandbox"],
-  userDataDir, // <-- add this
-   executablePath: undefined, // system Chrome
-});
+    // Use a temporary directory for userDataDir to avoid conflicts
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "puppeteer-"));
+
+    browser = await puppeteer.launch({
+      headless: true,
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
+      userDataDir: tempDir, // each launch gets a fresh temp directory
+    });
 
     const page = await browser.newPage();
 
@@ -137,6 +140,7 @@ const browser = await puppeteer.launch({
       movie: { title, rating, releaseDate, formatLanguage, cast, poster, background },
     };
   } catch (e) {
+    if (browser) await browser.close();
     console.error("BMS Puppeteer error:", e.message);
     return { success: false, error: e.message };
   }
