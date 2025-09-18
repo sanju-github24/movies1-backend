@@ -6,20 +6,16 @@ from bs4 import BeautifulSoup
 import re
 import time
 import random
+import os
 
 # =========================
-# Google Custom Search config
+# Config
 # =========================
-GOOGLE_API_KEY = "AIzaSyA2PqeGd-X3jYCDUX12P8H8TcFyaaYKDJc"  # ⚠️ better load from env
-GOOGLE_CX = "31ea24d83bf9d43ba"
-
-# Toggle Google fallback for actor images
-USE_GOOGLE_IMAGES = False  
-
-# Default fallback avatar
+GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY", "YOUR_GOOGLE_API_KEY")
+GOOGLE_CX = os.getenv("GOOGLE_CX", "YOUR_GOOGLE_CX")
+USE_GOOGLE_IMAGES = False  # Toggle Google fallback for actor images
 DEFAULT_ACTOR_IMAGE = "/user.png"
 
-# Default headers for requests
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -34,9 +30,8 @@ HEADERS = {
 # =========================
 # Utility Functions
 # =========================
-
-def safe_request(url, params=None, retries=2, delay=1):
-    """Make a request with retries and backoff"""
+def safe_request(url, params=None, retries=3, delay=1):
+    """Perform a GET request with retries and backoff"""
     for attempt in range(retries):
         try:
             resp = requests.get(url, params=params, headers=HEADERS, timeout=12)
@@ -70,11 +65,9 @@ def fetch_actor_image(actor_name):
         resp = safe_request(url, params)
         if not resp:
             return None
-
         data = resp.json()
         if "items" in data and len(data["items"]) > 0:
             return data["items"][0].get("link")
-
         return None
     except Exception as e:
         print(f"Google image fetch error for {actor_name}: {e}", file=sys.stderr)
@@ -94,7 +87,6 @@ def fetch_release_date_google(movie_title):
         resp = safe_request(url, params)
         if not resp:
             return "N/A"
-
         data = resp.json()
         if "items" in data:
             for item in data["items"]:
@@ -108,7 +100,6 @@ def fetch_release_date_google(movie_title):
                     match = re.search(pattern, text)
                     if match:
                         return match.group(0)
-
         return "N/A"
     except Exception as e:
         print(f"Google release date fetch error: {e}", file=sys.stderr)
@@ -116,9 +107,8 @@ def fetch_release_date_google(movie_title):
 
 
 # =========================
-# Main Scraper
+# Main Scraper Function
 # =========================
-
 def scrape_bms(bms_slug):
     """Scrape BookMyShow movie details"""
     try:
@@ -156,11 +146,9 @@ def scrape_bms(bms_slug):
                 name = name_tag.get_text(strip=True)
                 role = role_tag[1].get_text(strip=True).replace("as ", "") if len(role_tag) > 1 else None
 
-                # Try BMS image first
+                # Actor image
                 img_tag = block.select_one("img")
                 image = img_tag["src"] if img_tag and img_tag.get("src") else None
-
-                # Fallback: Google image (only if enabled)
                 if not image and USE_GOOGLE_IMAGES:
                     image = fetch_actor_image(name)
 
