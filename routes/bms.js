@@ -2,7 +2,9 @@ import express from "express";
 import puppeteer from "puppeteer-extra"; // puppeteer-extra
 import StealthPlugin from "puppeteer-extra-plugin-stealth";
 import { load } from "cheerio";
-
+import os from "os";
+import path from "path";
+import fs from "fs";
 const router = express.Router();
 const DEFAULT_ACTOR_IMAGE = "/user.png";
 const DEFAULT_POSTER = "/default-poster.png";
@@ -52,15 +54,12 @@ function delay(ms) {
 // -------------------- Main BMS Scraper --------------------
 async function scrapeBMS(slug) {
   try {
-    const browser = await puppeteer.launch({
-      headless: true,
-      executablePath: process.env.CHROME_PATH || undefined, // use system Chrome if available
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-blink-features=AutomationControlled",
-      ],
-    });
+    const userDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "puppeteer-"));
+const browser = await puppeteer.launch({
+  headless: true,
+  args: ["--no-sandbox", "--disable-setuid-sandbox"],
+  userDataDir, // <-- add this
+});
 
     const page = await browser.newPage();
 
