@@ -24,7 +24,8 @@ router.get("/", (req, res) => {
   console.log("Running scraper at:", scriptPath); // Debug log
 
   // ✅ Spawn Python process
-  const pyProcess = spawn("python", [scriptPath, slug]);
+const pyProcess = spawn("python3", [scriptPath, slug]);
+
 
 
   let result = "";
