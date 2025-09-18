@@ -59,6 +59,7 @@ const browser = await puppeteer.launch({
   headless: true,
   args: ["--no-sandbox", "--disable-setuid-sandbox"],
   userDataDir, // <-- add this
+   executablePath: undefined, // system Chrome
 });
 
     const page = await browser.newPage();
