@@ -13,7 +13,7 @@ import up4streamRoutes from "./routes/up4streamRoutes.js";
 import { createClient } from "@supabase/supabase-js";
 import puppeteer from "puppeteer";
 import WebTorrent from 'webtorrent';
-
+import bunnyRoutes from "./routes/bunnyRoutes.js";
 import bmsRouter from "./routes/bms.js";
 
 const app = express();
@@ -44,7 +44,8 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(express.json());
 app.use(cookieParser());
-
+app.use("/api", bunnyRoutes);
+app.use(express.urlencoded({ extended: true }));
 // -------------------- Static files --------------------
 app.use("/public", express.static("public"));
 
