@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "server": "nodemon server.js",
-     "postinstall": "puppeteer browsers install chrome"
+    "postinstall": "puppeteer browsers install chrome"
   },
   "author": "",
   "license": "ISC",
@@ -35,6 +35,7 @@
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "slugify": "^1.6.6",
+    "uuid": "^13.0.0",
     "webtorrent": "^2.6.10"
   }
 }
