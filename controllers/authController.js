@@ -4,11 +4,24 @@ import userModel from '../models/usermodel.js';
 import transporter from '../config/nodeMailer.js';
 import { EMAIL_VERIFY_TEMPLATE, PASSWORD_RESET_TEMPLATE } from '../config/emailTemplates.js';
 
+// --- Cookie Configuration Helper ---
+// This pattern correctly handles localhost (cross-port, non-secure) 
+// and production (cross-site, secure: true)
+const cookieOptions = {
+    httpOnly: true,
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    secure: process.env.NODE_ENV === 'production',
+    // FIX: Use 'Lax' for local (cross-port) and 'None' for production (cross-site)
+    // Note: If 'SameSite: None', 'Secure: true' MUST be set.
+    sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax', 
+};
+
 // ------------------ REGISTER ------------------
 export const register = async (req, res) => {
   const { name, email, password } = req.body;
 
   if (!name || !email || !password)
+    // CRITICAL: Ensure early returns use res.json() to send the CORS-compliant response
     return res.status(400).json({ success: false, message: "Missing Details" });
 
   try {
@@ -22,13 +35,10 @@ export const register = async (req, res) => {
 
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: '7d' });
 
-    res.cookie('token', token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'strict',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+    // Apply the corrected cookie options
+    res.cookie('token', token, cookieOptions); 
 
+    // --- Email logic (kept short for brevity) ---
     await transporter.sendMail({
       from: process.env.SENDER_EMAIL,
       to: email,
@@ -42,54 +52,81 @@ export const register = async (req, res) => {
       token,
     });
   } catch (error) {
+    // Ensure 500 errors also send a response
     res.status(500).json({ success: false, message: error.message });
   }
 };
 
 // ------------------ LOGIN ------------------
+// ------------------ LOGIN ------------------
 export const login = async (req, res) => {
-  const { email, password } = req.body;
+    console.log("➡️ Attempting Login for:", req.body.email); 
+    
+    const { email, password } = req.body;
+    
+    if (!email || !password) 
+      return res.status(400).json({ success: false, message: "Missing Email or Password" });
 
-  try {
-    const user = await userModel.findOne({ email });
-    if (!user)
-      return res.status(401).json({ success: false, message: "User not found" });
+    try {
+      console.log("➡️ Login: Entered try block, finding user.");
+      
+      // 🚀 THE FIX: Explicitly select the 'password' field.
+      const user = await userModel.findOne({ email }).select('+password'); 
+      
+      if (user) {
+          console.log("✅ Login: User found. Proceeding to password check.");
+      } else {
+          console.log("❌ Login: User not found in database.");
+      }
+      
+      if (!user)
+        return res.status(401).json({ success: false, message: "Invalid credentials" }); 
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch)
-      return res.status(401).json({ success: false, message: "Invalid credentials" });
+      // This line now receives the actual hash, preventing the crash
+      const isMatch = await bcrypt.compare(password, user.password);
+      
+      if (!isMatch)
+        return res.status(401).json({ success: false, message: "Invalid credentials" }); 
 
-    const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+      const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
 
-    res.cookie("token", token, {
-      httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'strict',
-      maxAge: 7 * 24 * 60 * 60 * 1000,
-    });
+      res.cookie("token", token, cookieOptions);
 
-    res.status(200).json({
-      success: true,
-      message: "Logged in successfully",
-      user: { _id: user._id, name: user.name, email: user.email },
-      token,
-    });
-  } catch (err) {
-    res.status(500).json({ success: false, message: err.message });
-  }
+      // Successfully sends a 200 response (and correct CORS headers)
+      res.status(200).json({
+        success: true,
+        message: "Logged in successfully",
+        user: { _id: user._id, name: user.name, email: user.email },
+        token,
+      });
+    } catch (err) {
+      // This catch block will only handle external errors (e.g., JWT_SECRET missing)
+      console.error("❌ Login Server Crash (Handled):", err.message);
+      res.status(500).json({ success: false, message: "Internal server error during login." });
+    }
 };
-
 // ------------------ LOGOUT ------------------
 export const logout = (req, res) => {
   try {
+    // 🚀 FIX: Use spread operator to apply all original cookie options
+    // and explicitly set maxAge to 0 (or simply don't set it, as clearCookie handles expiry)
     res.clearCookie('token', {
-      httpOnly: true,
+      ...cookieOptions,
+      maxAge: undefined, // Don't explicitly set maxAge here if clearCookie handles it
+      expires: new Date(0), // Forces immediate expiration
+      
+      // CRITICAL: Must be explicitly included for clearCookie to work cross-origin/cross-port
       secure: process.env.NODE_ENV === 'production',
-      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'strict',
-      path: '/', // ✅ important to match the cookie path
+      sameSite: process.env.NODE_ENV === 'production' ? 'None' : 'Lax', 
+      path: '/', 
     });
+    
+    // Log for debugging
+    console.log("✅ Logout: Successfully cleared 'token' cookie.");
+
     res.status(200).json({ success: true, message: "Logged out" });
   } catch (error) {
+    console.error("❌ Logout Error:", error.message);
     res.status(500).json({ success: false, message: error.message });
   }
 };
@@ -97,6 +134,7 @@ export const logout = (req, res) => {
 // ------------------ VERIFY EMAIL FLOW ------------------
 export const sendVerifyOtp = async (req, res) => {
   try {
+    // ... (no changes needed here) ...
     const { userId } = req.user;
     const user = await userModel.findById(userId);
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
@@ -153,6 +191,7 @@ export const verifyEmail = async (req, res) => {
 // ------------------ IS AUTH ------------------
 export const isAuthenticated = (req, res) => {
   try {
+    // ... (no changes needed here) ...
     res.status(200).json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -165,6 +204,7 @@ export const sendResetOtp = async (req, res) => {
   if (!email) return res.status(400).json({ success: false, message: "Email is required" });
 
   try {
+    // ... (no changes needed here) ...
     const user = await userModel.findOne({ email });
     if (!user)
       return res.status(404).json({ success: false, message: "User not found" });
@@ -193,6 +233,7 @@ export const resetPassword = async (req, res) => {
     return res.status(400).json({ success: false, message: "Missing fields" });
 
   try {
+    // ... (no changes needed here) ...
     const user = await userModel.findOne({ email });
     if (!user)
       return res.status(404).json({ success: false, message: "User not found" });
