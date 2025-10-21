@@ -3,6 +3,11 @@ import cors from 'cors';
 import 'dotenv/config';
 import cookieParser from 'cookie-parser';
 import axios from 'axios';
+import fs from 'fs';       
+import path from 'path';     
+import { fileURLToPath } from 'url'; 
+import { dirname } from 'path';     
+
 import authRouter from './routes/authRoutes.js';
 import userRouter from './routes/userRoutes.js';
 import movieRouter from './routes/movieRoutes.js';
@@ -15,12 +20,29 @@ import puppeteer from "puppeteer";
 import WebTorrent from 'webtorrent';
 import bunnyRoutes from "./routes/bunnyRoutes.js";
 import bmsRouter from "./routes/bms.js";
+import tmdbRouter from './routes/tmdbRoutes.js'; // Ensure you have this router file if imported
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const app = express();
 const port = process.env.PORT || 4000;
 
 // -------------------- Connect to MongoDB --------------------
 await connectDBs();
+
+// -------------------- LOAD CLEANED MOVIE DATA --------------------
+const dataPath = path.join(__dirname, 'data', 'all_south_indian_movies.json');
+let cleanedMovieData = [];
+
+try {
+    const rawData = fs.readFileSync(dataPath, 'utf-8');
+    cleanedMovieData = JSON.parse(rawData);
+    console.log(`✅ Cleaned movie data loaded: ${cleanedMovieData.length} movies.`);
+} catch (error) {
+    console.error("❌ ERROR: Failed to load cleaned movie data. Make sure the file is in a '/data' folder.", error.message);
+    // Continue running the server even if data loading fails
+}
 
 // -------------------- CORS --------------------
 const allowedOrigins = [
@@ -33,15 +55,45 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: function (origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) callback(null, true);
-    else callback(new Error('Not allowed by CORS'));
+    // 🔍 CRITICAL DEBUGGING AID: Log the incoming origin
+    console.log('Incoming Request Origin:', origin);
+    
+    // Allow requests with no origin (like local file access or curl)
+    if (!origin) return callback(null, true); 
+
+    if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+    }
+    else {
+        console.error(`CORS Block: Origin ${origin} not allowed.`);
+        callback(new Error('Not allowed by CORS'));
+    }
   },
   credentials: true,
 };
 
 // -------------------- Middlewares --------------------
-app.use(cors(corsOptions));
+// This MUST be the first middleware to guarantee the CORS header is set for ALL responses.
+app.use(cors(corsOptions)); 
 app.options('*', cors(corsOptions));
+
+// 🚀 FINAL CORS FIX MIDDLEWARE: Manually set headers right after the 'cors' middleware
+app.use((req, res, next) => {
+    const origin = req.headers.origin;
+    
+    // Only set headers if the origin is one of the allowed ones
+    if (allowedOrigins.includes(origin)) {
+        // Must be the specific origin, not '*'
+        res.setHeader('Access-Control-Allow-Origin', origin);
+        // Must be 'true' when the client uses 'withCredentials'
+        res.setHeader('Access-Control-Allow-Credentials', 'true');
+        // This is important for preflight requests
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization'); 
+    }
+    
+    next();
+});
+
 app.use(express.json());
 app.use(cookieParser());
 app.use("/api", bunnyRoutes);
@@ -57,6 +109,11 @@ if (process.env.PRERENDER_TOKEN) {
 // -------------------- Supabase --------------------
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
+// -------------------- New API Endpoint (Data) --------------------
+app.get('/api/cleaned-movies', (req, res) => {
+    res.json(cleanedMovieData);
+});
+
 // -------------------- Routes --------------------
 app.use("/api/bms", bmsRouter);
 app.use('/api/auth', authRouter);
@@ -64,6 +121,7 @@ app.use('/api/user', userRouter);
 app.use('/api/movies', movieRouter);
 app.use('/api', popadsRoute);
 app.use("/api/up4stream", up4streamRoutes);
+app.use('/api', tmdbRouter); // Ensure this line is present if using TMDB
 
 // -------------------- Proxy download handler --------------------
 const client = new WebTorrent();
