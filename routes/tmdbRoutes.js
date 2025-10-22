@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import axios from 'axios';
-import * as fs from 'fs/promises'; // ⬅️ NEW: Import Node's File System module
+import * as fs from 'fs/promises'; 
 
 const router = Router();
 
@@ -10,18 +10,18 @@ const BASE_URL = "https://api.themoviedb.org/3/";
 const IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"; 
 const BACKDROP_BASE_URL = "https://image.tmdb.org/t/p/w1280"; 
 
-// ⬅️ NEW: Define the path to your data file
-const DATA_FILE_PATH = './data/all_south_indian_movies.json'; 
+// Define the path to your data file
+const DATA_FILE_PATH = './data/data/all_south_indian_movies.json'; 
 
-// --- Internal Helper Functions (Remain Unchanged) ---
+// --------------------------------------------------------------------------------------
+// --- Internal Helper Functions (UPDATED) ---
+// --------------------------------------------------------------------------------------
 
 /**
  * Searches for a title (movie or TV) using TMDB's /search/multi and returns the top match ID.
- * @param {string} title - The title to search for.
- * @returns {Promise<object | null>} - Object with id, name, and media_type, or null if not found.
+ * This is used for title search only.
  */
 const _search_title_id = async (title) => {
-    // ... (Existing implementation remains the same) ...
     const endpoint = `${BASE_URL}search/multi`;
     try {
         const response = await axios.get(endpoint, {
@@ -40,23 +40,58 @@ const _search_title_id = async (title) => {
             }
         }
     } catch (error) {
-        console.error("TMDB Search ID Error:", error.message);
+        console.error("TMDB Title Search Error:", error.message);
     }
     return null;
 };
 
 /**
- * Fetches the full details and credits for a given TMDB ID.
- * @param {number} tmdb_id - The TMDB ID of the content.
- * @param {string} media_type - 'movie' or 'tv'.
- * @returns {Promise<object | null>} - The full JSON response including 'credits'.
+ * Searches for a TMDB ID using the external IMDb ID.
+ * This returns the TMDB ID and media_type.
+ */
+const _search_imdb_id = async (imdb_id) => {
+    // TMDB's /find endpoint is used to search by external ID (like IMDb ID)
+    const endpoint = `${BASE_URL}find/${imdb_id}`;
+    try {
+        const response = await axios.get(endpoint, {
+            params: { 
+                api_key: TMDB_API_KEY, 
+                external_source: 'imdb_id' 
+            }
+        });
+        
+        const results = response.data.movie_results.length > 0 
+                      ? response.data.movie_results 
+                      : response.data.tv_results;
+        
+        if (results.length > 0) {
+            const top_result = results[0];
+            const media_type = response.data.movie_results.length > 0 ? 'movie' : 'tv';
+
+            return {
+                id: top_result.id,
+                name: top_result.title || top_result.name,
+                media_type: media_type
+            };
+        }
+    } catch (error) {
+        console.error("TMDB IMDb Search Error:", error.message);
+    }
+    return null;
+};
+
+/**
+ * Fetches the full details, credits, and external IDs (including IMDb ID).
  */
 const _get_full_details = async (tmdb_id, media_type) => {
-    // ... (Existing implementation remains the same) ...
     const endpoint = `${BASE_URL}${media_type}/${tmdb_id}`;
     try {
         const response = await axios.get(endpoint, {
-            params: { api_key: TMDB_API_KEY, append_to_response: 'credits' } 
+            params: { 
+                api_key: TMDB_API_KEY, 
+                // ⬅️ CRITICAL: Append external_ids to get the IMDb ID
+                append_to_response: 'credits,external_ids' 
+            } 
         });
         return response.data;
     } catch (error) {
@@ -65,29 +100,43 @@ const _get_full_details = async (tmdb_id, media_type) => {
     return null;
 };
 
-// -------------------- TMDB Movie Details Endpoint (GET - Unchanged) --------------------
+// --------------------------------------------------------------------------------------
+// -------------------- TMDB Movie Details Endpoint (GET - NEW LOGIC) --------------------
+// --------------------------------------------------------------------------------------
+
 router.get('/tmdb-details', async (req, res) => {
-    const { title } = req.query;
-    // ... (Existing logic to fetch TMDB data remains the same) ...
+    // ⬅️ NEW: Check for imdb_id first, then fallback to title
+    const { title, imdb_id } = req.query; 
     
-    if (!title) {
-        return res.status(400).json({ success: false, message: 'Movie title is required.' });
+    if (!title && !imdb_id) {
+        return res.status(400).json({ 
+            success: false, 
+            message: 'Must provide either a movie title or an IMDb ID.' 
+        });
     }
 
-    // 1. Search for ID
-    const top_result = await _search_title_id(title);
+    let top_result = null;
+
+    if (imdb_id) {
+        // PRIORITY 1: Search by IMDb ID
+        top_result = await _search_imdb_id(imdb_id);
+    } else if (title) {
+        // PRIORITY 2: Search by Title
+        top_result = await _search_title_id(title);
+    }
     
     if (!top_result) {
+        const search_param = imdb_id ? `IMDb ID: '${imdb_id}'` : `title: '${title}'`;
         return res.status(404).json({ 
             success: false, 
             error_type: "TitleNotFound",
-            message: `Failed to find a movie or TV show matching the title: '${title}'.` 
+            message: `Failed to find a movie or TV show matching the ${search_param}.` 
         });
     }
 
     const { id: tmdb_id, media_type } = top_result;
 
-    // 2. Fetch full details and credits
+    // 2. Fetch full details, credits, and external IDs
     const details = await _get_full_details(tmdb_id, media_type);
 
     if (!details) {
@@ -124,6 +173,10 @@ router.get('/tmdb-details', async (req, res) => {
         release_date = details.first_air_date;
     }
     const year = release_date ? release_date.substring(0, 4) : null;
+    
+    // ⬅️ NEW: Extract and include the IMDb ID from the external_ids object
+    const extracted_imdb_id = details.external_ids ? details.external_ids.imdb_id : null;
+
 
     const final_result = {
         title: details.title || details.name,
@@ -133,7 +186,8 @@ router.get('/tmdb-details', async (req, res) => {
         cover_poster_url: backdrop_url, 
         imdb_rating: details.vote_average || 0.0, 
         cast: cast_list,
-        // Include a unique identifier if one is available from the frontend data
+        // ⬅️ FINAL: Add the IMDb ID to the result
+        imdb_id: extracted_imdb_id,
     };
     
     // Send the final result
@@ -141,11 +195,10 @@ router.get('/tmdb-details', async (req, res) => {
 });
 
 
-// -------------------- Data Update Endpoint (POST - NEW) --------------------
+// -------------------- Data Update Endpoint (POST - UNCHANGED) --------------------
 
 /**
  * Allows the frontend to send metadata back to the server to be saved to the JSON file.
- * NOTE: For this to work, you must have Express Body Parser configured in your main app.
  */
 router.post('/save-movie-metadata', async (req, res) => {
     // Expects the complete movie object (original data + new TMDB metadata) in the request body
@@ -161,7 +214,6 @@ router.post('/save-movie-metadata', async (req, res) => {
         let movies = JSON.parse(rawData);
 
         // 2. Find and Update the existing movie entry (Best practice)
-        // This is a simple example: it finds by title and replaces the whole entry.
         const index = movies.findIndex(m => m.title === incomingMovieData.title);
 
         if (index !== -1) {
@@ -169,19 +221,17 @@ router.post('/save-movie-metadata', async (req, res) => {
             movies[index] = { ...movies[index], ...incomingMovieData };
             console.log(`Updated existing movie: ${incomingMovieData.title}`);
         } else {
-            // Or if you only want to append new movies
+            // Append new movies
             movies.push(incomingMovieData);
             console.log(`Appended new movie: ${incomingMovieData.title}`);
         }
         
         // 3. Write the updated data back to the file
-        // The 'null, 4' is for pretty-printing the JSON with 4 spaces for indentation
         await fs.writeFile(DATA_FILE_PATH, JSON.stringify(movies, null, 4));
 
         res.json({ success: true, message: 'Movie data saved successfully to file.' });
 
     } catch (error) {
-        // Crucial for debugging file system errors (e.g., path, permissions)
         console.error('File System Write Error:', error); 
         res.status(500).json({ success: false, message: 'Server failed to write data to file.' });
     }
