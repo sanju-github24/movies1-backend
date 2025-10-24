@@ -4,6 +4,9 @@ import userModel from '../models/usermodel.js';
 import transporter from '../config/nodeMailer.js';
 import { EMAIL_VERIFY_TEMPLATE, PASSWORD_RESET_TEMPLATE } from '../config/emailTemplates.js';
 
+// Define the specific admin email
+const ADMIN_EMAIL = 'sanjusanjay0444@gmail.com';
+
 // --- Cookie Configuration Helper ---
 // This pattern correctly handles localhost (cross-port, non-secure) 
 // and production (cross-site, secure: true)
@@ -39,6 +42,8 @@ export const register = async (req, res) => {
     res.cookie('token', token, cookieOptions); 
 
     // --- Email logic (kept short for brevity) ---
+    // NOTE: In a real app, you would send the verification email here, 
+    // and the user wouldn't be logged in/issued a token until verification.
     await transporter.sendMail({
       from: process.env.SENDER_EMAIL,
       to: email,
@@ -48,7 +53,7 @@ export const register = async (req, res) => {
 
     return res.status(201).json({
       success: true,
-      user: { _id: user._id, name: user.name, email: user.email },
+      user: { _id: user._id, name: user.name, email: user.email, isAccountVerified: user.isAccountVerified },
       token,
     });
   } catch (error) {
@@ -57,8 +62,7 @@ export const register = async (req, res) => {
   }
 };
 
-// ------------------ LOGIN ------------------
-// ------------------ LOGIN ------------------
+// ------------------ LOGIN (UPDATED) ------------------
 export const login = async (req, res) => {
     console.log("➡️ Attempting Login for:", req.body.email); 
     
@@ -68,51 +72,64 @@ export const login = async (req, res) => {
       return res.status(400).json({ success: false, message: "Missing Email or Password" });
 
     try {
-      console.log("➡️ Login: Entered try block, finding user.");
       
-      // 🚀 THE FIX: Explicitly select the 'password' field.
+      // 🚀 Step 1: Find user and select password
       const user = await userModel.findOne({ email }).select('+password'); 
-      
-      if (user) {
-          console.log("✅ Login: User found. Proceeding to password check.");
-      } else {
-          console.log("❌ Login: User not found in database.");
-      }
       
       if (!user)
         return res.status(401).json({ success: false, message: "Invalid credentials" }); 
 
-      // This line now receives the actual hash, preventing the crash
+      // Step 2: Compare password
       const isMatch = await bcrypt.compare(password, user.password);
       
       if (!isMatch)
         return res.status(401).json({ success: false, message: "Invalid credentials" }); 
 
+      // 🌟 Step 3: Check Verification status and apply Admin Bypass
+      const isUserAdmin = user.email === ADMIN_EMAIL;
+      
+      if (!user.isAccountVerified && !isUserAdmin) {
+          // Block login for non-admin unverified users
+          return res.status(403).json({ 
+              success: false, 
+              message: "Account not verified. Please check your email for the verification link or OTP." 
+          });
+      }
+      
+      // If code reaches here: (1) User is Verified, OR (2) User is Admin (Bypass granted)
+
+      // Step 4: Generate token
       const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
 
+      // Step 5: Set cookie
       res.cookie("token", token, cookieOptions);
 
-      // Successfully sends a 200 response (and correct CORS headers)
+      // Step 6: Send success response
+      // NOTE: We strip the sensitive 'password' field before sending user data.
       res.status(200).json({
         success: true,
-        message: "Logged in successfully",
-        user: { _id: user._id, name: user.name, email: user.email },
+        message: isUserAdmin ? "Admin login successful (Verification bypassed)" : "Logged in successfully",
+        user: { 
+            _id: user._id, 
+            name: user.name, 
+            email: user.email,
+            isAccountVerified: user.isAccountVerified,
+        },
         token,
       });
     } catch (err) {
-      // This catch block will only handle external errors (e.g., JWT_SECRET missing)
-      console.error("❌ Login Server Crash (Handled):", err.message);
+      console.error("❌ Login Server Error:", err.message);
       res.status(500).json({ success: false, message: "Internal server error during login." });
     }
 };
+
 // ------------------ LOGOUT ------------------
 export const logout = (req, res) => {
   try {
     // 🚀 FIX: Use spread operator to apply all original cookie options
-    // and explicitly set maxAge to 0 (or simply don't set it, as clearCookie handles expiry)
     res.clearCookie('token', {
       ...cookieOptions,
-      maxAge: undefined, // Don't explicitly set maxAge here if clearCookie handles it
+      maxAge: undefined, 
       expires: new Date(0), // Forces immediate expiration
       
       // CRITICAL: Must be explicitly included for clearCookie to work cross-origin/cross-port
@@ -134,7 +151,7 @@ export const logout = (req, res) => {
 // ------------------ VERIFY EMAIL FLOW ------------------
 export const sendVerifyOtp = async (req, res) => {
   try {
-    // ... (no changes needed here) ...
+    // ... (rest of function remains the same) ...
     const { userId } = req.user;
     const user = await userModel.findById(userId);
     if (!user) return res.status(404).json({ success: false, message: "User not found" });
@@ -191,7 +208,7 @@ export const verifyEmail = async (req, res) => {
 // ------------------ IS AUTH ------------------
 export const isAuthenticated = (req, res) => {
   try {
-    // ... (no changes needed here) ...
+    // ... (rest of function remains the same) ...
     res.status(200).json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -204,7 +221,7 @@ export const sendResetOtp = async (req, res) => {
   if (!email) return res.status(400).json({ success: false, message: "Email is required" });
 
   try {
-    // ... (no changes needed here) ...
+    // ... (rest of function remains the same) ...
     const user = await userModel.findOne({ email });
     if (!user)
       return res.status(404).json({ success: false, message: "User not found" });
@@ -233,7 +250,7 @@ export const resetPassword = async (req, res) => {
     return res.status(400).json({ success: false, message: "Missing fields" });
 
   try {
-    // ... (no changes needed here) ...
+    // ... (rest of function remains the same) ...
     const user = await userModel.findOne({ email });
     if (!user)
       return res.status(404).json({ success: false, message: "User not found" });
