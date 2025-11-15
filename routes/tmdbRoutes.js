@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import axios from 'axios';
 import * as fs from 'fs/promises'; 
+import { URL } from 'url';
 
 const router = Router();
 
@@ -84,8 +85,8 @@ const _search_imdb_id = async (imdb_id) => {
 };
 
 /**
- * Fetches the full details, credits, external IDs, and videos (including trailers).
- * * ⭐️ UPDATED: Added 'videos' to append_to_response.
+ * Fetches the full details, credits, external IDs, videos, and **content ratings**.
+ * * ⭐️ UPDATED: Added 'release_dates' and 'content_ratings' to the request.
  */
 const _get_full_details = async (tmdb_id, media_type) => {
     const endpoint = `${BASE_URL}${media_type}/${tmdb_id}`;
@@ -93,7 +94,8 @@ const _get_full_details = async (tmdb_id, media_type) => {
         const response = await axios.get(endpoint, {
             params: { 
                 api_key: TMDB_API_KEY, 
-                append_to_response: 'credits,external_ids,videos' // CRITICAL for cast/trailer data
+                // CRITICAL ADDITION: Fetch ratings data for both movies and TV
+                append_to_response: 'credits,external_ids,videos,release_dates,content_ratings' 
             } 
         });
         return response.data;
@@ -102,6 +104,49 @@ const _get_full_details = async (tmdb_id, media_type) => {
     }
     return null;
 };
+
+/**
+ * Helper function to extract the content certification string (e.g., 'U/A', 'PG-13').
+ * Prioritizes India (IN) and falls back to the United States (US).
+ */
+const _get_certification = (details, media_type) => {
+    // Prioritize Indian certification ('IN'), then US as a reliable international fallback
+    const targetCountries = ['IN', 'US']; 
+    
+    // --- Movie Logic (uses 'release_dates') ---
+    if (media_type === 'movie' && details.release_dates) {
+        for (const countryCode of targetCountries) {
+            const country_data = details.release_dates.results.find(
+                (r) => r.iso_3166_1 === countryCode
+            );
+
+            if (country_data && country_data.release_dates.length > 0) {
+                // Find the first certification, ignoring empty strings
+                const release_with_cert = country_data.release_dates.find(
+                    (r) => r.certification
+                );
+                if (release_with_cert) {
+                    return release_with_cert.certification;
+                }
+            }
+        }
+    } 
+    // --- TV Logic (uses 'content_ratings') ---
+    else if (media_type === 'tv' && details.content_ratings) {
+        for (const countryCode of targetCountries) {
+            const country_data = details.content_ratings.results.find(
+                (r) => r.iso_3166_1 === countryCode
+            );
+            
+            if (country_data && country_data.rating) {
+                return country_data.rating;
+            }
+        }
+    }
+    
+    return null; // Return null if no certification is found
+};
+
 
 // --------------------------------------------------------------------------------------
 // -------------------- TMDB Movie Details Endpoint (GET) --------------------
@@ -164,10 +209,10 @@ router.get('/tmdb-details', async (req, res) => {
     // --------------------------------------
 
 
-    // --- Cast Extraction Logic (UPDATED) ---
+    // --- Cast Extraction Logic ---
     const credits = details.credits || {};
     
-    // 🚀 FIX: Removed .slice(0, 5) to return the full cast list available from TMDB.
+    // Map full cast list available from TMDB.
     const cast_list = (credits.cast || []).map(cast_member => {
         const profile_path = cast_member.profile_path;
         const profile_url = profile_path ? `${IMAGE_BASE_URL}${profile_path}` : null;
@@ -183,6 +228,10 @@ router.get('/tmdb-details', async (req, res) => {
     // --- Genre Extraction Logic ---
     const genres_list = (details.genres || []).map(g => g.name);
     // ----------------------------
+    
+    // --- ⭐️ New Certification Extraction ---
+    const certification = _get_certification(details, media_type);
+
 
     const poster_path = details.poster_path;
     const poster_url = poster_path ? `${IMAGE_BASE_URL}${poster_path}` : null;
@@ -209,10 +258,12 @@ router.get('/tmdb-details', async (req, res) => {
         poster_url: poster_url,
         cover_poster_url: backdrop_url, 
         imdb_rating: details.vote_average || 0.0, 
-        cast: cast_list, // ⬅️ Now includes the full available cast
+        cast: cast_list, 
         genres: genres_list, 
         imdb_id: extracted_imdb_id,
-        trailer_url: trailer_url, 
+        trailer_url: trailer_url,
+        // ⭐️ New Field Added
+        certification: certification // e.g., 'U/A', '16+', 'PG-13'
     };
     
     res.json({ success: true, data: final_result });
@@ -280,6 +331,7 @@ router.get('/casthq/direct-link', async (req, res) => {
             url: hlsUrl,
             responseType: 'stream', 
             headers: {
+                // Must explicitly provide 'Host' header when streaming external content
                 'Host': new URL(hlsUrl).host,
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             }
