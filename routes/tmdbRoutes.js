@@ -153,9 +153,12 @@ const _get_certification = (details, media_type) => {
 // --------------------------------------------------------------------------------------
 
 // Access via: GET /api/tmdb-details?title=... or ?imdbId=...
+// ... existing helper functions (_search_title_id, _search_imdb_id, _get_full_details, etc.)
+
+// Access via: GET /api/tmdb-details?title=... or ?imdbId=...
 router.get('/tmdb-details', async (req, res) => {
     const { title, imdb_id, imdbId } = req.query; 
-    const final_imdb_id = imdb_id || imdbId; // Use either parameter
+    const final_imdb_id = imdb_id || imdbId; 
     
     if (!title && !final_imdb_id) {
         return res.status(400).json({ 
@@ -184,6 +187,7 @@ router.get('/tmdb-details', async (req, res) => {
         });
     }
 
+    // Extract tmdb_id from the search result
     const { id: tmdb_id, media_type } = top_result;
 
     const details = await _get_full_details(tmdb_id, media_type);
@@ -199,58 +203,45 @@ router.get('/tmdb-details', async (req, res) => {
     // --- Trailer Extraction Logic ---
     let trailer_url = null;
     const videos = details.videos?.results || [];
-
-    // Find the first video that is marked as a 'Trailer' and is on 'YouTube'
     const trailer = videos.find(v => v.site === 'YouTube' && v.type === 'Trailer');
-    
     if (trailer) {
         trailer_url = `${YOUTUBE_WATCH_BASE}${trailer.key}`;
     }
-    // --------------------------------------
-
 
     // --- Cast Extraction Logic ---
     const credits = details.credits || {};
-    
-    // Map full cast list available from TMDB.
     const cast_list = (credits.cast || []).map(cast_member => {
         const profile_path = cast_member.profile_path;
         const profile_url = profile_path ? `${IMAGE_BASE_URL}${profile_path}` : null;
-        
         return {
             name: cast_member.name,
             character: cast_member.character,
             profile_url: profile_url
         };
     });
-    // ---------------------------------------
     
     // --- Genre Extraction Logic ---
     const genres_list = (details.genres || []).map(g => g.name);
-    // ----------------------------
     
-    // --- ⭐️ New Certification Extraction ---
+    // --- Certification Extraction ---
     const certification = _get_certification(details, media_type);
-
 
     const poster_path = details.poster_path;
     const poster_url = poster_path ? `${IMAGE_BASE_URL}${poster_path}` : null;
     const backdrop_path = details.backdrop_path;
     const backdrop_url = backdrop_path ? `${BACKDROP_BASE_URL}${backdrop_path}` : null; 
     
-    // ⭐️ Determine the correct full release date (movie or TV)
     let full_release_date = details.release_date; 
     if (media_type === 'tv') {
         full_release_date = details.first_air_date;
     }
     
-    // Extract the year for backward compatibility and convenience
     const year = full_release_date ? full_release_date.substring(0, 4) : null;
-    
     const extracted_imdb_id = details.external_ids ? details.external_ids.imdb_id : null;
 
-
+    // ⭐️ FINAL RESULT OBJECT: Now includes tmdb_id
     const final_result = {
+        tmdb_id: details.id, // Explicitly adding the TMDB ID here
         title: details.title || details.name,
         description: details.overview || 'Description not available.',
         year: year,
@@ -262,13 +253,11 @@ router.get('/tmdb-details', async (req, res) => {
         genres: genres_list, 
         imdb_id: extracted_imdb_id,
         trailer_url: trailer_url,
-        // ⭐️ New Field Added
-        certification: certification // e.g., 'U/A', '16+', 'PG-13'
+        certification: certification 
     };
     
     res.json({ success: true, data: final_result });
 });
-
 // --------------------------------------------------------------------------------------
 // -------------------- CastHQ DIRECT LINK Extractor Endpoint (STREAMER) --------------------
 // --------------------------------------------------------------------------------------
