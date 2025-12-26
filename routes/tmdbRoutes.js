@@ -169,12 +169,9 @@ router.get('/tmdb-details', async (req, res) => {
 
     let top_result = null;
 
-    // 🔑 PRIORITY 1: Search by reliable IMDb ID 
     if (final_imdb_id) {
         top_result = await _search_imdb_id(final_imdb_id);
-    } 
-    // PRIORITY 2: Search by title (fallback)
-    else if (title) {
+    } else if (title) {
         top_result = await _search_title_id(title);
     }
     
@@ -187,9 +184,9 @@ router.get('/tmdb-details', async (req, res) => {
         });
     }
 
-    // Extract tmdb_id from the search result
     const { id: tmdb_id, media_type } = top_result;
 
+    // IMPORTANT: Ensure your _get_full_details function includes "release_dates" in the append_to_response
     const details = await _get_full_details(tmdb_id, media_type);
 
     if (!details) {
@@ -200,58 +197,73 @@ router.get('/tmdb-details', async (req, res) => {
         });
     }
 
-    // --- Trailer Extraction Logic ---
+    // --- Dynamic Release Date Logic ---
+    let real_theatrical_date = null;
+
+    if (media_type === 'movie' && details.release_dates) {
+        // Flatten all release date results from all countries
+        const results = details.release_dates.results || [];
+        
+        // Try to find a Theatrical (3) or Premiere (1) release date
+        // We look for 'IN' (India) or 'US' if available, otherwise grab the first theatrical found
+        const preferred_regions = ['IN', 'US', 'GB'];
+        let found_date = null;
+
+        // Sort results so preferred regions are checked first
+        const sorted_results = results.sort((a, b) => {
+            const indexA = preferred_regions.indexOf(a.iso_3166_1);
+            const indexB = preferred_regions.indexOf(b.iso_3166_1);
+            return (indexA === -1 ? 99 : indexA) - (indexB === -1 ? 99 : indexB);
+        });
+
+        for (const region of sorted_results) {
+            // Types: 1=Premiere, 2=Limited, 3=Theatrical, 4=Digital, 5=Physical, 6=TV
+            const theatrical = region.release_dates.find(rd => rd.type === 3 || rd.type === 2);
+            if (theatrical) {
+                found_date = theatrical.release_date;
+                break;
+            }
+        }
+        
+        real_theatrical_date = found_date || details.release_date;
+    } else {
+        // Fallback for TV or if no release_dates info exists
+        real_theatrical_date = details.release_date || details.first_air_date;
+    }
+
+    // --- Trailer Extraction ---
     let trailer_url = null;
     const videos = details.videos?.results || [];
-    const trailer = videos.find(v => v.site === 'YouTube' && v.type === 'Trailer');
+    const trailer = videos.find(v => v.site === 'YouTube' && (v.type === 'Trailer' || v.type === 'Teaser'));
     if (trailer) {
         trailer_url = `${YOUTUBE_WATCH_BASE}${trailer.key}`;
     }
 
-    // --- Cast Extraction Logic ---
-    const credits = details.credits || {};
-    const cast_list = (credits.cast || []).map(cast_member => {
-        const profile_path = cast_member.profile_path;
-        const profile_url = profile_path ? `${IMAGE_BASE_URL}${profile_path}` : null;
-        return {
-            name: cast_member.name,
-            character: cast_member.character,
-            profile_url: profile_url
-        };
-    });
+    // --- Cast Extraction ---
+    const cast_list = (details.credits?.cast || []).slice(0, 10).map(member => ({
+        name: member.name,
+        character: member.character,
+        profile_url: member.profile_path ? `${IMAGE_BASE_URL}${member.profile_path}` : null
+    }));
     
-    // --- Genre Extraction Logic ---
     const genres_list = (details.genres || []).map(g => g.name);
-    
-    // --- Certification Extraction ---
     const certification = _get_certification(details, media_type);
+    const poster_url = details.poster_path ? `${IMAGE_BASE_URL}${details.poster_path}` : null;
+    const backdrop_url = details.backdrop_path ? `${BACKDROP_BASE_URL}${details.backdrop_path}` : null; 
+    const year = real_theatrical_date ? real_theatrical_date.substring(0, 4) : null;
 
-    const poster_path = details.poster_path;
-    const poster_url = poster_path ? `${IMAGE_BASE_URL}${poster_path}` : null;
-    const backdrop_path = details.backdrop_path;
-    const backdrop_url = backdrop_path ? `${BACKDROP_BASE_URL}${backdrop_path}` : null; 
-    
-    let full_release_date = details.release_date; 
-    if (media_type === 'tv') {
-        full_release_date = details.first_air_date;
-    }
-    
-    const year = full_release_date ? full_release_date.substring(0, 4) : null;
-    const extracted_imdb_id = details.external_ids ? details.external_ids.imdb_id : null;
-
-    // ⭐️ FINAL RESULT OBJECT: Now includes tmdb_id
     const final_result = {
-        tmdb_id: details.id, // Explicitly adding the TMDB ID here
+        tmdb_id: details.id,
         title: details.title || details.name,
         description: details.overview || 'Description not available.',
         year: year,
-        release_date: full_release_date,
+        release_date: real_theatrical_date, // This is now the "Real" date
         poster_url: poster_url,
         cover_poster_url: backdrop_url, 
         imdb_rating: details.vote_average || 0.0, 
         cast: cast_list, 
         genres: genres_list, 
-        imdb_id: extracted_imdb_id,
+        imdb_id: details.external_ids?.imdb_id || null,
         trailer_url: trailer_url,
         certification: certification 
     };
