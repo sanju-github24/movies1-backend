@@ -186,7 +186,7 @@ router.get('/tmdb-details', async (req, res) => {
 
     const { id: tmdb_id, media_type } = top_result;
 
-    // IMPORTANT: Ensure your _get_full_details function includes "release_dates" in the append_to_response
+    // Ensure "release_dates" is in your append_to_response to support the date logic below
     const details = await _get_full_details(tmdb_id, media_type);
 
     if (!details) {
@@ -197,19 +197,25 @@ router.get('/tmdb-details', async (req, res) => {
         });
     }
 
+    // --- Correct Runtime Logic ---
+    let runtime = 0;
+    if (media_type === 'movie') {
+        runtime = details.runtime || 0;
+    } else if (media_type === 'tv') {
+        // TV shows often have an array of typical episode runtimes (e.g., [45, 60])
+        // We take the first one or default to 0
+        runtime = (details.episode_run_time && details.episode_run_time.length > 0) 
+            ? details.episode_run_time[0] 
+            : 0;
+    }
+
     // --- Dynamic Release Date Logic ---
     let real_theatrical_date = null;
-
     if (media_type === 'movie' && details.release_dates) {
-        // Flatten all release date results from all countries
         const results = details.release_dates.results || [];
-        
-        // Try to find a Theatrical (3) or Premiere (1) release date
-        // We look for 'IN' (India) or 'US' if available, otherwise grab the first theatrical found
         const preferred_regions = ['IN', 'US', 'GB'];
         let found_date = null;
 
-        // Sort results so preferred regions are checked first
         const sorted_results = results.sort((a, b) => {
             const indexA = preferred_regions.indexOf(a.iso_3166_1);
             const indexB = preferred_regions.indexOf(b.iso_3166_1);
@@ -217,17 +223,14 @@ router.get('/tmdb-details', async (req, res) => {
         });
 
         for (const region of sorted_results) {
-            // Types: 1=Premiere, 2=Limited, 3=Theatrical, 4=Digital, 5=Physical, 6=TV
             const theatrical = region.release_dates.find(rd => rd.type === 3 || rd.type === 2);
             if (theatrical) {
                 found_date = theatrical.release_date;
                 break;
             }
         }
-        
         real_theatrical_date = found_date || details.release_date;
     } else {
-        // Fallback for TV or if no release_dates info exists
         real_theatrical_date = details.release_date || details.first_air_date;
     }
 
@@ -257,7 +260,8 @@ router.get('/tmdb-details', async (req, res) => {
         title: details.title || details.name,
         description: details.overview || 'Description not available.',
         year: year,
-        release_date: real_theatrical_date, // This is now the "Real" date
+        release_date: real_theatrical_date,
+        runtime: runtime, // Added correct runtime here
         poster_url: poster_url,
         cover_poster_url: backdrop_url, 
         imdb_rating: details.vote_average || 0.0, 
