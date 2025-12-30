@@ -207,47 +207,6 @@ app.use('/api', popadsRoute);
 app.use("/api/up4stream", up4streamRoutes);
 app.use('/api', tmdbRouter); // Ensure this line is present if using TMDB
 
-// -------------------- Proxy download handler --------------------
-const client = new WebTorrent();
-
-app.get('/proxy-download', async (req, res) => {
-  const { url, filename } = req.query;
-  if (!url || !filename) return res.status(400).send('❌ Missing URL or filename');
-
-  const decodedUrl = decodeURIComponent(url);
-  try {
-    if (decodedUrl.startsWith('magnet:')) {
-      client.add(decodedUrl, { path: '/tmp' }, (torrent) => {
-        const file = torrent.files.reduce((a, b) => a.length > b.length ? a : b);
-        res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-        res.setHeader('Content-Type', 'application/octet-stream');
-        file.createReadStream().pipe(res);
-        file.on('done', () => client.remove(decodedUrl));
-      });
-    } else {
-      const response = await axios({
-        method: 'GET',
-        url: decodedUrl,
-        responseType: 'stream',
-        headers: {
-          'User-Agent': 'Mozilla/5.0',
-          Accept: '*/*',
-          Referer: decodedUrl,
-        },
-        timeout: 20000,
-      });
-      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-      res.setHeader('Content-Type', 'application/octet-stream');
-      if (response.headers['content-length']) {
-        res.setHeader('Content-Length', response.headers['content-length']);
-      }
-      response.data.pipe(res);
-    }
-  } catch (err) {
-    console.error('❌ Proxy failed:', err.message);
-    res.redirect(decodedUrl);
-  }
-});
 
 // -------------------- BMS route using Puppeteer --------------------
 app.get("/api/bms", async (req, res) => {
