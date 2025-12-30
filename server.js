@@ -6,7 +6,9 @@ import axios from 'axios';
 import fs from 'fs';       
 import path from 'path';     
 import { fileURLToPath } from 'url'; 
-import { dirname } from 'path';     
+import { dirname } from 'path';
+import { startTelegramBot } from "./telegram/bot.js";
+
 
 import authRouter from './routes/authRoutes.js';
 import userRouter from './routes/userRoutes.js';
@@ -21,6 +23,8 @@ import WebTorrent from 'webtorrent';
 import bunnyRoutes from "./routes/bunnyRoutes.js";
 import bmsRouter from "./routes/bms.js";
 import tmdbRouter from './routes/tmdbRoutes.js'; // Ensure you have this router file if imported
+import geminiRoutes from './routes/geminiRoutes.js';
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -30,6 +34,9 @@ const port = process.env.PORT || 4000;
 
 // -------------------- Connect to MongoDB --------------------
 await connectDBs();
+// -------------------- Start Telegram Bot --------------------
+startTelegramBot();
+
 
 // -------------------- LOAD CLEANED MOVIE DATA --------------------
 const dataPath = path.join(__dirname, 'data', 'all_south_indian_movies.json');
@@ -81,13 +88,20 @@ app.options('*', cors(corsOptions));
 app.use((req, res, next) => {
     const origin = req.headers.origin;
     
-    // Only set headers if the origin is one of the allowed ones
+    // Allow ALL origins for the proxy response to ensure Hls.js can fetch segments reliably
+    if (req.path.startsWith('/api/live-stream-proxy')) {
+        res.setHeader('Access-Control-Allow-Origin', '*'); // Allow any origin for the stream
+        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+        // Crucial for HLS: Allow the browser to access common content types
+        res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Authorization'); 
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range'); // Expose headers HLS.js might need
+        return next(); // Skip origin checking for the proxy route
+    }
+    
+    // For all other API routes, check against allowedOrigins
     if (allowedOrigins.includes(origin)) {
-        // Must be the specific origin, not '*'
         res.setHeader('Access-Control-Allow-Origin', origin);
-        // Must be 'true' when the client uses 'withCredentials'
         res.setHeader('Access-Control-Allow-Credentials', 'true');
-        // This is important for preflight requests
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization'); 
     }
     
@@ -98,6 +112,7 @@ app.use(express.json());
 app.use(cookieParser());
 app.use("/api", bunnyRoutes);
 app.use(express.urlencoded({ extended: true }));
+app.use("/api/gemini", geminiRoutes);
 // -------------------- Static files --------------------
 app.use("/public", express.static("public"));
 
@@ -113,6 +128,75 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY
 app.get('/api/cleaned-movies', (req, res) => {
     res.json(cleanedMovieData);
 });
+
+// =========================================================
+// 🚀 NEW HLS LIVE STREAM PROXY ENDPOINT
+// =========================================================
+app.get('/api/live-stream-proxy', async (req, res) => {
+    const streamUrl = req.query.url;
+
+    if (!streamUrl) {
+        return res.status(400).send('❌ Missing stream URL query parameter.');
+    }
+    
+    console.log(`Proxying request for HLS stream: ${streamUrl}`);
+
+    try {
+        // Use axios to fetch the external stream content
+        const response = await axios({
+            method: 'GET',
+            url: streamUrl,
+            responseType: 'stream', // Crucial for streaming large files
+            // IMPORTANT: Forward headers like Range, which Hls.js uses to request segments
+            headers: {
+                'User-Agent': req.headers['user-agent'] || 'HLS-Proxy-Server',
+                'Referer': req.headers['referer'] || 'http://localhost',
+                // This ensures Hls.js can request specific byte ranges
+                'Range': req.headers['range'] || undefined, 
+            },
+            timeout: 30000, // 30 second timeout
+        });
+
+        // Set response headers from the upstream server
+        // This is necessary to correctly deliver M3U8 (manifest) or TS (segment) files
+        if (response.headers['content-type']) {
+            res.setHeader('Content-Type', response.headers['content-type']);
+        }
+        if (response.headers['content-length']) {
+            res.setHeader('Content-Length', response.headers['content-length']);
+        }
+        if (response.headers['accept-ranges']) {
+            res.setHeader('Accept-Ranges', response.headers['accept-ranges']);
+        }
+        if (response.headers['content-range']) {
+            res.setHeader('Content-Range', response.headers['content-range']);
+        }
+        
+        // This line is the CORS fix: it ensures the *browser* will accept the response
+        res.setHeader('Access-Control-Allow-Origin', '*'); 
+        
+        // Pipe the external stream response directly to the client's response
+        response.data.pipe(res);
+
+        // Handle errors during the piping process
+        response.data.on('error', (err) => {
+            console.error('❌ Proxy stream error (piping):', err.message);
+            if (!res.headersSent) {
+                res.status(500).end('Proxy streaming failed.');
+            }
+        });
+
+    } catch (error) {
+        const status = error.response ? error.response.status : 500;
+        const message = error.message;
+        console.error(`❌ Proxy request failed for ${streamUrl}: Status ${status}, Error: ${message}`);
+        
+        if (!res.headersSent) {
+            res.status(status).send(`Proxy failed to fetch stream: ${message}`);
+        }
+    }
+});
+
 
 // -------------------- Routes --------------------
 app.use("/api/bms", bmsRouter);
