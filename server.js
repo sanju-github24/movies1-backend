@@ -19,7 +19,7 @@ import prerender from 'prerender-node';
 import up4streamRoutes from "./routes/up4streamRoutes.js";
 import { createClient } from "@supabase/supabase-js";
 import puppeteer from "puppeteer";
-import WebTorrent from 'webtorrent';
+
 import bunnyRoutes from "./routes/bunnyRoutes.js";
 import bmsRouter from "./routes/bms.js";
 import tmdbRouter from './routes/tmdbRoutes.js'; // Ensure you have this router file if imported
