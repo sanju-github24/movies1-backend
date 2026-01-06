@@ -186,7 +186,7 @@ router.get('/tmdb-details', async (req, res) => {
 
     const { id: tmdb_id, media_type } = top_result;
 
-    // Ensure "release_dates" is in your append_to_response to support the date logic below
+    // Ensure "release_dates", "videos", and "credits" are in your append_to_response
     const details = await _get_full_details(tmdb_id, media_type);
 
     if (!details) {
@@ -202,8 +202,6 @@ router.get('/tmdb-details', async (req, res) => {
     if (media_type === 'movie') {
         runtime = details.runtime || 0;
     } else if (media_type === 'tv') {
-        // TV shows often have an array of typical episode runtimes (e.g., [45, 60])
-        // We take the first one or default to 0
         runtime = (details.episode_run_time && details.episode_run_time.length > 0) 
             ? details.episode_run_time[0] 
             : 0;
@@ -234,12 +232,18 @@ router.get('/tmdb-details', async (req, res) => {
         real_theatrical_date = details.release_date || details.first_air_date;
     }
 
-    // --- Trailer Extraction ---
+    // --- Trailer Extraction Refined ---
     let trailer_url = null;
+    let trailer_key = null; // Direct ID for high-end frontend embedding
     const videos = details.videos?.results || [];
-    const trailer = videos.find(v => v.site === 'YouTube' && (v.type === 'Trailer' || v.type === 'Teaser'));
+    
+    // Prioritize official YouTube "Trailer" over "Teaser"
+    const trailer = videos.find(v => v.site === 'YouTube' && v.type === 'Trailer') || 
+                    videos.find(v => v.site === 'YouTube' && v.type === 'Teaser');
+    
     if (trailer) {
-        trailer_url = `${YOUTUBE_WATCH_BASE}${trailer.key}`;
+        trailer_key = trailer.key;
+        trailer_url = `https://www.youtube.com/watch?v=${trailer.key}`;
     }
 
     // --- Cast Extraction ---
@@ -261,7 +265,7 @@ router.get('/tmdb-details', async (req, res) => {
         description: details.overview || 'Description not available.',
         year: year,
         release_date: real_theatrical_date,
-        runtime: runtime, // Added correct runtime here
+        runtime: runtime,
         poster_url: poster_url,
         cover_poster_url: backdrop_url, 
         imdb_rating: details.vote_average || 0.0, 
@@ -269,6 +273,7 @@ router.get('/tmdb-details', async (req, res) => {
         genres: genres_list, 
         imdb_id: details.external_ids?.imdb_id || null,
         trailer_url: trailer_url,
+        trailer_key: trailer_key, // Added direct key for iframe use
         certification: certification 
     };
     
