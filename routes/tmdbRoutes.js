@@ -157,13 +157,13 @@ const _get_certification = (details, media_type) => {
 
 // Access via: GET /api/tmdb-details?title=... or ?imdbId=...
 router.get('/tmdb-details', async (req, res) => {
-    const { title, imdb_id, imdbId } = req.query; 
-    const final_imdb_id = imdb_id || imdbId; 
-    
+    const { title, imdb_id, imdbId } = req.query;
+    const final_imdb_id = imdb_id || imdbId;
+
     if (!title && !final_imdb_id) {
-        return res.status(400).json({ 
-            success: false, 
-            message: 'Must provide either a movie title or an IMDb ID.' 
+        return res.status(400).json({
+            success: false,
+            message: 'Must provide either a movie title or an IMDb ID.'
         });
     }
 
@@ -174,26 +174,51 @@ router.get('/tmdb-details', async (req, res) => {
     } else if (title) {
         top_result = await _search_title_id(title);
     }
-    
+
     if (!top_result) {
         const search_param = final_imdb_id ? `IMDb ID: '${final_imdb_id}'` : `title: '${title}'`;
-        return res.status(404).json({ 
-            success: false, 
+        return res.status(404).json({
+            success: false,
             error_type: "TitleNotFound",
-            message: `Failed to find a movie or TV show matching the ${search_param}.` 
+            message: `Failed to find a movie or TV show matching the ${search_param}.`
         });
     }
 
     const { id: tmdb_id, media_type } = top_result;
-
-    // Ensure "release_dates", "videos", and "credits" are in your append_to_response
     const details = await _get_full_details(tmdb_id, media_type);
 
     if (!details) {
-        return res.status(500).json({ 
-            success: false, 
+        return res.status(500).json({
+            success: false,
             error_type: "DetailsFetchFailed",
             message: `Failed to fetch details for TMDB ID ${tmdb_id}.`
+        });
+    }
+
+    // --- NEW: TV Episode Fetching Logic ---
+    let episodes_list = [];
+    if (media_type === 'tv' && details.seasons) {
+        // We fetch details for each season to get episode names and numbers
+        // Using Promise.all for speed
+        const seasonPromises = details.seasons.map(s => 
+            _get_season_details(tmdb_id, s.season_number)
+        );
+        
+        const seasonsData = await Promise.all(seasonPromises);
+        
+        seasonsData.forEach(season => {
+            if (season && season.episodes) {
+                season.episodes.forEach(ep => {
+                    episodes_list.push({
+                        season: ep.season_number,
+                        episode: ep.episode_number,
+                        title: ep.name,
+                        overview: ep.overview,
+                        air_date: ep.air_date,
+                        still_path: ep.still_path ? `${IMAGE_BASE_URL}${ep.still_path}` : null
+                    });
+                });
+            }
         });
     }
 
@@ -202,8 +227,8 @@ router.get('/tmdb-details', async (req, res) => {
     if (media_type === 'movie') {
         runtime = details.runtime || 0;
     } else if (media_type === 'tv') {
-        runtime = (details.episode_run_time && details.episode_run_time.length > 0) 
-            ? details.episode_run_time[0] 
+        runtime = (details.episode_run_time && details.episode_run_time.length > 0)
+            ? details.episode_run_time[0]
             : 0;
     }
 
@@ -234,13 +259,10 @@ router.get('/tmdb-details', async (req, res) => {
 
     // --- Trailer Extraction Refined ---
     let trailer_url = null;
-    let trailer_key = null; // Direct ID for high-end frontend embedding
+    let trailer_key = null;
     const videos = details.videos?.results || [];
-    
-    // Prioritize official YouTube "Trailer" over "Teaser"
-    const trailer = videos.find(v => v.site === 'YouTube' && v.type === 'Trailer') || 
+    const trailer = videos.find(v => v.site === 'YouTube' && v.type === 'Trailer') ||
                     videos.find(v => v.site === 'YouTube' && v.type === 'Teaser');
-    
     if (trailer) {
         trailer_key = trailer.key;
         trailer_url = `https://www.youtube.com/watch?v=${trailer.key}`;
@@ -252,33 +274,55 @@ router.get('/tmdb-details', async (req, res) => {
         character: member.character,
         profile_url: member.profile_path ? `${IMAGE_BASE_URL}${member.profile_path}` : null
     }));
-    
-    const genres_list = (details.genres || []).map(g => g.name);
-    const certification = _get_certification(details, media_type);
-    const poster_url = details.poster_path ? `${IMAGE_BASE_URL}${details.poster_path}` : null;
-    const backdrop_url = details.backdrop_path ? `${BACKDROP_BASE_URL}${details.backdrop_path}` : null; 
-    const year = real_theatrical_date ? real_theatrical_date.substring(0, 4) : null;
+
+    const logo = details.images?.logos?.find(l => l.iso_639_1 === 'en') || details.images?.logos?.[0];
+    const title_logo = logo ? `${IMAGE_BASE_URL}${logo.file_path}` : null;
+
+    const slug = (details.title || details.name)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/(^-|-$)/g, '');
 
     const final_result = {
         tmdb_id: details.id,
         title: details.title || details.name,
+        slug: slug,
+        content_type: media_type,
         description: details.overview || 'Description not available.',
-        year: year,
+        year: real_theatrical_date ? real_theatrical_date.substring(0, 4) : null,
         release_date: real_theatrical_date,
         runtime: runtime,
-        poster_url: poster_url,
-        cover_poster_url: backdrop_url, 
-        imdb_rating: details.vote_average || 0.0, 
-        cast: cast_list, 
-        genres: genres_list, 
-        imdb_id: details.external_ids?.imdb_id || null,
+        poster_url: details.poster_path ? `${IMAGE_BASE_URL}${details.poster_path}` : null,
+        cover_poster_url: details.backdrop_path ? `${BACKDROP_BASE_URL}${details.backdrop_path}` : null,
+        title_logo: title_logo,
+        original_language: details.original_language,
+        imdb_rating: details.vote_average ? details.vote_average.toFixed(1) : "0.0",
+        vote_count: details.vote_count || 0,
+        cast: cast_list,
+        genres: (details.genres || []).map(g => g.name),
+        imdb_id: details.external_ids?.imdb_id || details.imdb_id || null,
         trailer_url: trailer_url,
-        trailer_key: trailer_key, // Added direct key for iframe use
-        certification: certification 
+        trailer_key: trailer_key,
+        certification: _get_certification(details, media_type),
+        // 🚀 ADDED EPISODES HERE
+        episodes: episodes_list 
     };
-    
+
     res.json({ success: true, data: final_result });
 });
+
+/**
+ * Helper function to fetch Season Data
+ * You need to implement this based on your API structure
+ */
+async function _get_season_details(tmdb_id, season_number) {
+    try {
+        const response = await axios.get(`https://api.themoviedb.org/3/tv/${tmdb_id}/season/${season_number}?api_key=${TMDB_API_KEY}`);
+        return response.data;
+    } catch (err) {
+        return null;
+    }
+}
 // --------------------------------------------------------------------------------------
 // -------------------- CastHQ DIRECT LINK Extractor Endpoint (STREAMER) --------------------
 // --------------------------------------------------------------------------------------
