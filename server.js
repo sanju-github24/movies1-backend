@@ -7,8 +7,8 @@ import fs from 'fs';
 import path from 'path';     
 import { fileURLToPath } from 'url'; 
 import { dirname } from 'path';
+import { spawn } from 'child_process';
 import { startTelegramBot } from "./telegram/bot.js";
-
 
 import authRouter from './routes/authRoutes.js';
 import userRouter from './routes/userRoutes.js';
@@ -22,8 +22,10 @@ import puppeteer from "puppeteer";
 
 import bunnyRoutes from "./routes/bunnyRoutes.js";
 import bmsRouter from "./routes/bms.js";
-import tmdbRouter from './routes/tmdbRoutes.js'; // Ensure you have this router file if imported
+import tmdbRouter from './routes/tmdbRoutes.js';
 import geminiRoutes from './routes/geminiRoutes.js';
+
+import { generateSignedUrl } from "./utils/signUrl.js";
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -37,7 +39,6 @@ await connectDBs();
 // -------------------- Start Telegram Bot --------------------
 startTelegramBot();
 
-
 // -------------------- LOAD CLEANED MOVIE DATA --------------------
 const dataPath = path.join(__dirname, 'data', 'all_south_indian_movies.json');
 let cleanedMovieData = [];
@@ -47,8 +48,7 @@ try {
     cleanedMovieData = JSON.parse(rawData);
     console.log(`✅ Cleaned movie data loaded: ${cleanedMovieData.length} movies.`);
 } catch (error) {
-    console.error("❌ ERROR: Failed to load cleaned movie data. Make sure the file is in a '/data' folder.", error.message);
-    // Continue running the server even if data loading fails
+    console.error("❌ ERROR: Failed to load cleaned movie data.", error.message);
 }
 
 // -------------------- CORS --------------------
@@ -62,16 +62,11 @@ const allowedOrigins = [
 
 const corsOptions = {
   origin: function (origin, callback) {
-    // 🔍 CRITICAL DEBUGGING AID: Log the incoming origin
     console.log('Incoming Request Origin:', origin);
-    
-    // Allow requests with no origin (like local file access or curl)
-    if (!origin) return callback(null, true); 
-
+    if (!origin) return callback(null, true);
     if (allowedOrigins.includes(origin)) {
         callback(null, true);
-    }
-    else {
+    } else {
         console.error(`CORS Block: Origin ${origin} not allowed.`);
         callback(new Error('Not allowed by CORS'));
     }
@@ -79,40 +74,37 @@ const corsOptions = {
   credentials: true,
 };
 
-// -------------------- Middlewares --------------------
-// This MUST be the first middleware to guarantee the CORS header is set for ALL responses.
-app.use(cors(corsOptions)); 
+// -------------------- Middlewares (MUST come first) --------------------
+app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-// 🚀 FINAL CORS FIX MIDDLEWARE: Manually set headers right after the 'cors' middleware
 app.use((req, res, next) => {
     const origin = req.headers.origin;
-    
-    // Allow ALL origins for the proxy response to ensure Hls.js can fetch segments reliably
+
     if (req.path.startsWith('/api/live-stream-proxy')) {
-        res.setHeader('Access-Control-Allow-Origin', '*'); // Allow any origin for the stream
+        res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-        // Crucial for HLS: Allow the browser to access common content types
-        res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Authorization'); 
-        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range'); // Expose headers HLS.js might need
-        return next(); // Skip origin checking for the proxy route
+        res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Authorization');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
+        return next();
     }
-    
-    // For all other API routes, check against allowedOrigins
+
     if (allowedOrigins.includes(origin)) {
         res.setHeader('Access-Control-Allow-Origin', origin);
         res.setHeader('Access-Control-Allow-Credentials', 'true');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization'); 
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     }
-    
+
     next();
 });
 
 app.use(express.json());
 app.use(cookieParser());
-app.use("/api", bunnyRoutes);
 app.use(express.urlencoded({ extended: true }));
+app.use("/api", bunnyRoutes);
 app.use("/api/gemini", geminiRoutes);
+
 // -------------------- Static files --------------------
 app.use("/public", express.static("public"));
 
@@ -124,89 +116,109 @@ if (process.env.PRERENDER_TOKEN) {
 // -------------------- Supabase --------------------
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
-// -------------------- New API Endpoint (Data) --------------------
+// =====================================
+// 🔍 TORRENT SEARCH — after CORS setup
+// =====================================
+app.options('/search', cors(corsOptions));
+app.get('/search', (req, res) => {
+    const movie  = req.query.movie  || "777 Charlie";
+    const lang   = req.query.lang   || "Kannada";
+    const source = req.query.source || "both";
+
+    console.log(`🔍 Torrent search: movie="${movie}" lang="${lang}" source="${source}"`);
+
+    // Change this line in your /search route:
+const pythonProcess = spawn('python3', ['./scrapers/scraper.py', movie, lang, source]);
+
+    let output = "";
+    let errorOutput = "";
+
+    pythonProcess.stdout.on('data', (data) => { output += data.toString(); });
+    pythonProcess.stderr.on('data', (data) => { errorOutput += data.toString(); });
+
+    pythonProcess.on('close', (code) => {
+        if (errorOutput) console.error("🐍 Python stderr:", errorOutput);
+        try {
+            const results = JSON.parse(output);
+            res.json(results);
+        } catch (e) {
+            console.error("❌ JSON parse failed:", output);
+            res.status(500).json({ error: "Scraping failed", detail: output });
+        }
+    });
+});
+
+// -------------------- Cleaned Movies --------------------
 app.get('/api/cleaned-movies', (req, res) => {
     res.json(cleanedMovieData);
 });
 
-// =========================================================
-// 🚀 NEW HLS LIVE STREAM PROXY ENDPOINT
-// =========================================================
+// =====================================
+// 🚀 HLS LIVE STREAM PROXY
+// =====================================
 app.get('/api/live-stream-proxy', async (req, res) => {
     const streamUrl = req.query.url;
 
     if (!streamUrl) {
         return res.status(400).send('❌ Missing stream URL query parameter.');
     }
-    
-    console.log(`Proxying request for HLS stream: ${streamUrl}`);
+
+    console.log(`Proxying HLS stream: ${streamUrl}`);
 
     try {
-        // Use axios to fetch the external stream content
         const response = await axios({
             method: 'GET',
             url: streamUrl,
-            responseType: 'stream', // Crucial for streaming large files
-            // IMPORTANT: Forward headers like Range, which Hls.js uses to request segments
+            responseType: 'stream',
             headers: {
                 'User-Agent': req.headers['user-agent'] || 'HLS-Proxy-Server',
                 'Referer': req.headers['referer'] || 'http://localhost',
-                // This ensures Hls.js can request specific byte ranges
-                'Range': req.headers['range'] || undefined, 
+                'Range': req.headers['range'] || undefined,
             },
-            timeout: 30000, // 30 second timeout
+            timeout: 30000,
         });
 
-        // Set response headers from the upstream server
-        // This is necessary to correctly deliver M3U8 (manifest) or TS (segment) files
-        if (response.headers['content-type']) {
-            res.setHeader('Content-Type', response.headers['content-type']);
-        }
-        if (response.headers['content-length']) {
-            res.setHeader('Content-Length', response.headers['content-length']);
-        }
-        if (response.headers['accept-ranges']) {
-            res.setHeader('Accept-Ranges', response.headers['accept-ranges']);
-        }
-        if (response.headers['content-range']) {
-            res.setHeader('Content-Range', response.headers['content-range']);
-        }
-        
-        // This line is the CORS fix: it ensures the *browser* will accept the response
-        res.setHeader('Access-Control-Allow-Origin', '*'); 
-        
-        // Pipe the external stream response directly to the client's response
+        if (response.headers['content-type'])   res.setHeader('Content-Type',   response.headers['content-type']);
+        if (response.headers['content-length'])  res.setHeader('Content-Length', response.headers['content-length']);
+        if (response.headers['accept-ranges'])   res.setHeader('Accept-Ranges',  response.headers['accept-ranges']);
+        if (response.headers['content-range'])   res.setHeader('Content-Range',  response.headers['content-range']);
+
+        res.setHeader('Access-Control-Allow-Origin', '*');
         response.data.pipe(res);
 
-        // Handle errors during the piping process
         response.data.on('error', (err) => {
-            console.error('❌ Proxy stream error (piping):', err.message);
-            if (!res.headersSent) {
-                res.status(500).end('Proxy streaming failed.');
-            }
+            console.error('❌ Proxy stream error:', err.message);
+            if (!res.headersSent) res.status(500).end('Proxy streaming failed.');
         });
 
     } catch (error) {
         const status = error.response ? error.response.status : 500;
-        const message = error.message;
-        console.error(`❌ Proxy request failed for ${streamUrl}: Status ${status}, Error: ${message}`);
-        
-        if (!res.headersSent) {
-            res.status(status).send(`Proxy failed to fetch stream: ${message}`);
-        }
+        console.error(`❌ Proxy failed for ${streamUrl}:`, error.message);
+        if (!res.headersSent) res.status(status).send(`Proxy failed: ${error.message}`);
     }
 });
 
-
 // -------------------- Routes --------------------
-app.use("/api/bms", bmsRouter);
-app.use('/api/auth', authRouter);
-app.use('/api/user', userRouter);
-app.use('/api/movies', movieRouter);
-app.use('/api', popadsRoute);
+app.use("/api/bms",      bmsRouter);
+app.use('/api/auth',     authRouter);
+app.use('/api/user',     userRouter);
+app.use('/api/movies',   movieRouter);
+app.use('/api',          popadsRoute);
 app.use("/api/up4stream", up4streamRoutes);
-app.use('/api', tmdbRouter); // Ensure this line is present if using TMDB
+app.use('/api',          tmdbRouter);
 
+// -------------------- Stream URL (Signed) --------------------
+app.get("/api/stream-url", (req, res) => {
+  try {
+    const { path } = req.query;
+    if (!path) return res.status(400).json({ success: false, error: "Neural link path is required" });
+    const signedUrl = generateSignedUrl(path, 86400);
+    res.json({ success: true, url: signedUrl });
+  } catch (error) {
+    console.error("Signing Engine Error:", error);
+    res.status(500).json({ success: false, error: "Internal Secure Node Failure" });
+  }
+});
 
 // -------------------- BMS route using Puppeteer --------------------
 app.get("/api/bms", async (req, res) => {
@@ -214,7 +226,6 @@ app.get("/api/bms", async (req, res) => {
   if (!slug) return res.status(400).json({ success: false, message: "No slug provided" });
 
   try {
-    // Fetch movie title from Supabase
     const { data, error } = await supabase
       .from("watch_html")
       .select("title")
@@ -223,33 +234,24 @@ app.get("/api/bms", async (req, res) => {
 
     if (error || !data) return res.status(404).json({ success: false, message: "Movie not found in DB" });
 
-    const title = data.title;
-
-    // Launch Puppeteer
-    const browser = await puppeteer.launch({
-      headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox'],
-    });
+    const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
     const page = await browser.newPage();
-    const url = `https://in.bookmyshow.com/bengaluru/movies?q=${encodeURIComponent(title)}`;
-    await page.goto(url, { waitUntil: "networkidle2" });
+    await page.goto(`https://in.bookmyshow.com/bengaluru/movies?q=${encodeURIComponent(data.title)}`, { waitUntil: "networkidle2" });
 
     const movie = await page.evaluate(() => {
       const card = document.querySelector("a[data-testid='card']");
       if (!card) return null;
       return {
-        title: card.querySelector("[data-testid='movie-name']")?.innerText || "N/A",
-        language: card.querySelector("[data-testid='movie-language']")?.innerText || "N/A",
-        releaseDate: card.querySelector("[data-testid='release-date']")?.innerText || "N/A",
-        rating: card.querySelector("[data-testid='rating']")?.innerText || "N/A",
-        poster: card.querySelector("img")?.src || null,
+        title:       card.querySelector("[data-testid='movie-name']")?.innerText    || "N/A",
+        language:    card.querySelector("[data-testid='movie-language']")?.innerText || "N/A",
+        releaseDate: card.querySelector("[data-testid='release-date']")?.innerText  || "N/A",
+        rating:      card.querySelector("[data-testid='rating']")?.innerText        || "N/A",
+        poster:      card.querySelector("img")?.src || null,
       };
     });
 
     await browser.close();
-
     if (!movie) return res.status(404).json({ success: false, message: "Movie not found on BMS" });
-
     res.json({ success: true, movie });
 
   } catch (err) {
