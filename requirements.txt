@@ -1,4 +1,18 @@
-playwright
-beautifulsoup4
-nest_asyncio
+# --- CORE SCRAPING ---
+playwright==1.42.0
+beautifulsoup4==4.12.3
+
+# --- ASYNC HELPERS ---
+# Essential if your Python script runs inside a loop or needs to fix event loop errors
+nest-asyncio==1.6.0
+asyncio==3.4.3
+
+# --- DATA PARSING & UTILS ---
+# Speeds up BeautifulSoup parsing significantly
+lxml==5.1.0 
+# Required for advanced character encoding detection
+charset-normalizer==3.3.2
+
+# --- COMPATIBILITY ---
+# Prevents the "greenlet" build error you saw earlier on newer Python versions
 greenlet>=3.0.0
