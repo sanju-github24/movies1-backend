@@ -15,12 +15,17 @@ async def scrape_1tamilmv(movie_name, target_language="Kannada"):
     base_url = "https://www.1tamilmv.ltd"
     search_url = f"{base_url}/search/?q={movie_name.replace(' ', '+')}"
 
+    # scraper.py
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+        browser = await p.chromium.launch(
+         headless=True,
+        args=[
+            "--no-sandbox", 
+            "--disable-setuid-sandbox", 
+            "--disable-dev-shm-usage"
+         ]
+      )
         page = await browser.new_page()
-        await page.set_extra_http_headers({
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        })
 
         try:
             await page.goto(search_url, wait_until="networkidle", timeout=30000)
