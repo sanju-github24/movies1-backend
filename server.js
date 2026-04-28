@@ -27,6 +27,17 @@ import geminiRoutes from './routes/geminiRoutes.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
 
+import { execSync } from 'child_process';
+
+const getChromiumPath = () => {
+    try {
+        // This finds the browser inside the custom path we set in the Dockerfile
+        return execSync('find /app/pw-browsers -name chrome -type f | head -n 1').toString().trim();
+    } catch (e) {
+        return null;
+    }
+};
+
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -234,7 +245,16 @@ app.get("/api/bms", async (req, res) => {
 
     if (error || !data) return res.status(404).json({ success: false, message: "Movie not found in DB" });
 
-    const browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+    const browser = await puppeteer.launch({ 
+    headless: true, 
+    executablePath: getChromiumPath(), // Use the helper here
+    args: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox', 
+        '--disable-dev-shm-usage',
+        '--single-process' // Helps with memory limits
+    ] 
+});
     const page = await browser.newPage();
     await page.goto(`https://in.bookmyshow.com/bengaluru/movies?q=${encodeURIComponent(data.title)}`, { waitUntil: "networkidle2" });
 
