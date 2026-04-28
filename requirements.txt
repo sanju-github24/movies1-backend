@@ -1,18 +1,13 @@
-# --- CORE SCRAPING ---
+# --- Scraping Engine ---
 playwright==1.42.0
 beautifulsoup4==4.12.3
 
-# --- ASYNC HELPERS ---
-# Essential if your Python script runs inside a loop or needs to fix event loop errors
+# --- Async & Loop Handling ---
+# Essential for running inside Node.js 'spawn'
 nest-asyncio==1.6.0
-asyncio==3.4.3
 
-# --- DATA PARSING & UTILS ---
-# Speeds up BeautifulSoup parsing significantly
-lxml==5.1.0 
-# Required for advanced character encoding detection
-charset-normalizer==3.3.2
-
-# --- COMPATIBILITY ---
-# Prevents the "greenlet" build error you saw earlier on newer Python versions
+# --- Compatibility & Performance ---
+# Fixes the C++ build error on Render
 greenlet>=3.0.0
+# Faster HTML parsing
+lxml==5.1.0
