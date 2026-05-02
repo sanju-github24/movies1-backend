@@ -24,20 +24,20 @@ import bunnyRoutes from "./routes/bunnyRoutes.js";
 import bmsRouter from "./routes/bms.js";
 import tmdbRouter from './routes/tmdbRoutes.js';
 import geminiRoutes from './routes/geminiRoutes.js';
+import autofillRouter from './routes/autofill.js'; // ✅ 1TamilMV AutoFill bot
 
 import { generateSignedUrl } from "./utils/signUrl.js";
 
 import { execSync } from 'child_process';
+import fetch from 'node-fetch'; // ✅ IPL proxy (npm i node-fetch)
 
 const getChromiumPath = () => {
     try {
-        // This finds the browser inside the custom path we set in the Dockerfile
         return execSync('find /app/pw-browsers -name chrome -type f | head -n 1').toString().trim();
     } catch (e) {
         return null;
     }
 };
-
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -115,6 +115,7 @@ app.use(cookieParser());
 app.use(express.urlencoded({ extended: true }));
 app.use("/api", bunnyRoutes);
 app.use("/api/gemini", geminiRoutes);
+app.use("/api", autofillRouter); // ✅ 1TamilMV AutoFill → POST /api/autofill
 
 // -------------------- Static files --------------------
 app.use("/public", express.static("public"));
@@ -138,8 +139,7 @@ app.get('/search', (req, res) => {
 
     console.log(`🔍 Torrent search: movie="${movie}" lang="${lang}" source="${source}"`);
 
-    // Change this line in your /search route:
-const pythonProcess = spawn('python3', ['./scrapers/scraper.py', movie, lang, source]);
+    const pythonProcess = spawn('python3', ['./scrapers/scraper.py', movie, lang, source]);
 
     let output = "";
     let errorOutput = "";
@@ -246,15 +246,15 @@ app.get("/api/bms", async (req, res) => {
     if (error || !data) return res.status(404).json({ success: false, message: "Movie not found in DB" });
 
     const browser = await puppeteer.launch({ 
-    headless: true, 
-    executablePath: getChromiumPath(), // Use the helper here
-    args: [
-        '--no-sandbox', 
-        '--disable-setuid-sandbox', 
-        '--disable-dev-shm-usage',
-        '--single-process' // Helps with memory limits
-    ] 
-});
+      headless: true, 
+      executablePath: getChromiumPath(),
+      args: [
+          '--no-sandbox', 
+          '--disable-setuid-sandbox', 
+          '--disable-dev-shm-usage',
+          '--single-process'
+      ] 
+    });
     const page = await browser.newPage();
     await page.goto(`https://in.bookmyshow.com/bengaluru/movies?q=${encodeURIComponent(data.title)}`, { waitUntil: "networkidle2" });
 
@@ -277,6 +277,78 @@ app.get("/api/bms", async (req, res) => {
   } catch (err) {
     console.error("BMS Puppeteer error:", err);
     res.status(500).json({ success: false, error: "Server error" });
+  }
+});
+
+// =====================================
+// 🏏 IPL PROXY — scores.iplt20.com
+// =====================================
+const IPL_BASE = "https://scores.iplt20.com/ipl/feeds";
+const IPL_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+  "Referer":    "https://www.iplt20.com/",
+  "Origin":     "https://www.iplt20.com",
+};
+
+// Helper: fetch from IPL CDN and strip JSONP wrapper
+async function fetchIPL(filePath) {
+  const url = `${IPL_BASE}/${filePath}`;
+  const res = await fetch(url, { headers: IPL_HEADERS });
+  if (!res.ok) throw new Error(`IPL API responded with ${res.status}`);
+  let text = await res.text();
+  text = text
+    .trim()
+    .replace(/^[a-zA-Z_][a-zA-Z0-9_]*\s*\(/, "")
+    .replace(/\);?\s*$/, "")
+    .replace(/^var\s+\w+\s*=\s*/, "")
+    .replace(/;$/, "")
+    .trim();
+  return JSON.parse(text);
+}
+
+// GET /api/match/:id/summary
+app.get("/api/match/:id/summary", async (req, res) => {
+  try {
+    const data = await fetchIPL(`${req.params.id}-matchsummary.js`);
+    res.json({ ok: true, data });
+  } catch (e) {
+    console.error(`❌ IPL summary error [${req.params.id}]:`, e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// GET /api/match/:id/innings/:num
+app.get("/api/match/:id/innings/:num", async (req, res) => {
+  try {
+    const data = await fetchIPL(`${req.params.id}-Innings${req.params.num}.js`);
+    res.json({ ok: true, data });
+  } catch (e) {
+    console.error(`❌ IPL innings error [${req.params.id}]:`, e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// GET /api/match/:id — summary + current innings in one shot
+app.get("/api/match/:id", async (req, res) => {
+  try {
+    const summary = await fetchIPL(`${req.params.id}-matchsummary.js`);
+
+    // Figure out current innings from summary
+    let ms = summary?.MatchSummary || {};
+    if (Array.isArray(ms)) ms = ms[0] || {};
+    const curInn = String(ms.CurrentInnings || "1");
+
+    let innings = null;
+    try {
+      innings = await fetchIPL(`${req.params.id}-Innings${curInn}.js`);
+    } catch (_) {
+      // innings may not exist yet (pre-match) — that's fine
+    }
+
+    res.json({ ok: true, data: { summary, innings, currentInnings: curInn } });
+  } catch (e) {
+    console.error(`❌ IPL match error [${req.params.id}]:`, e.message);
+    res.status(500).json({ ok: false, error: e.message });
   }
 });
 
