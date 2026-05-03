@@ -24,12 +24,12 @@ import bunnyRoutes from "./routes/bunnyRoutes.js";
 import bmsRouter from "./routes/bms.js";
 import tmdbRouter from './routes/tmdbRoutes.js';
 import geminiRoutes from './routes/geminiRoutes.js';
-import autofillRouter from './routes/autofill.js'; // ✅ 1TamilMV AutoFill bot
+import autofillRouter from './routes/autofill.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
 
 import { execSync } from 'child_process';
-import fetch from 'node-fetch'; // ✅ IPL proxy (npm i node-fetch)
+import fetch from 'node-fetch';
 
 const getChromiumPath = () => {
     try {
@@ -45,9 +45,7 @@ const __dirname = dirname(__filename);
 const app = express();
 const port = process.env.PORT || 4000;
 
-// -------------------- Connect to MongoDB --------------------
 await connectDBs();
-// -------------------- Start Telegram Bot --------------------
 startTelegramBot();
 
 // -------------------- LOAD CLEANED MOVIE DATA --------------------
@@ -85,7 +83,6 @@ const corsOptions = {
   credentials: true,
 };
 
-// -------------------- Middlewares (MUST come first) --------------------
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
@@ -115,21 +112,17 @@ app.use(cookieParser());
 app.use(express.urlencoded({ extended: true }));
 app.use("/api", bunnyRoutes);
 app.use("/api/gemini", geminiRoutes);
-app.use("/api", autofillRouter); // ✅ 1TamilMV AutoFill → POST /api/autofill
-
-// -------------------- Static files --------------------
+app.use("/api", autofillRouter);
 app.use("/public", express.static("public"));
 
-// -------------------- Pre-rendering for SEO --------------------
 if (process.env.PRERENDER_TOKEN) {
   app.use(prerender.set('prerenderToken', process.env.PRERENDER_TOKEN));
 }
 
-// -------------------- Supabase --------------------
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
 // =====================================
-// 🔍 TORRENT SEARCH — after CORS setup
+// 🔍 TORRENT SEARCH
 // =====================================
 app.options('/search', cors(corsOptions));
 app.get('/search', (req, res) => {
@@ -210,13 +203,13 @@ app.get('/api/live-stream-proxy', async (req, res) => {
 });
 
 // -------------------- Routes --------------------
-app.use("/api/bms",      bmsRouter);
-app.use('/api/auth',     authRouter);
-app.use('/api/user',     userRouter);
-app.use('/api/movies',   movieRouter);
-app.use('/api',          popadsRoute);
+app.use("/api/bms",       bmsRouter);
+app.use('/api/auth',      authRouter);
+app.use('/api/user',      userRouter);
+app.use('/api/movies',    movieRouter);
+app.use('/api',           popadsRoute);
 app.use("/api/up4stream", up4streamRoutes);
-app.use('/api',          tmdbRouter);
+app.use('/api',           tmdbRouter);
 
 // -------------------- Stream URL (Signed) --------------------
 app.get("/api/stream-url", (req, res) => {
@@ -248,12 +241,7 @@ app.get("/api/bms", async (req, res) => {
     const browser = await puppeteer.launch({ 
       headless: true, 
       executablePath: getChromiumPath(),
-      args: [
-          '--no-sandbox', 
-          '--disable-setuid-sandbox', 
-          '--disable-dev-shm-usage',
-          '--single-process'
-      ] 
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process'] 
     });
     const page = await browser.newPage();
     await page.goto(`https://in.bookmyshow.com/bengaluru/movies?q=${encodeURIComponent(data.title)}`, { waitUntil: "networkidle2" });
@@ -284,13 +272,66 @@ app.get("/api/bms", async (req, res) => {
 // 🏏 IPL PROXY — scores.iplt20.com
 // =====================================
 const IPL_BASE = "https://scores.iplt20.com/ipl/feeds";
+const IPL_LOGO_BASE = "https://scores.iplt20.com/ipl/teamlogos";
 const IPL_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
   "Referer":    "https://www.iplt20.com/",
   "Origin":     "https://www.iplt20.com",
 };
 
-// Helper: fetch from IPL CDN and strip JSONP wrapper
+// ── First match ID of the season (today onwards starts from 2485) ──
+const FIRST_MATCH_ID = 2485;
+
+// ── Team name → short code map ─────────────────────────────────────
+const TEAM_CODE_MAP = {
+  "Chennai Super Kings":          "CSK",
+  "Mumbai Indians":               "MI",
+  "Royal Challengers Bengaluru":  "RCB",
+  "Royal Challengers Bangalore":  "RCB",
+  "Kolkata Knight Riders":        "KKR",
+  "Delhi Capitals":               "DC",
+  "Punjab Kings":                 "PBKS",
+  "Rajasthan Royals":             "RR",
+  "Sunrisers Hyderabad":          "SRH",
+  "Gujarat Titans":               "GT",
+  "Lucknow Super Giants":         "LSG",
+};
+
+function toTeamCode(name = "") {
+  return TEAM_CODE_MAP[name.trim()] || name.trim().toUpperCase().slice(0, 4);
+}
+
+// ── Today's date string in IST "YYYY-MM-DD" ─────────────────────────
+function todayIST() {
+  const now = new Date();
+  const ist = new Date(now.getTime() + 5.5 * 3600 * 1000);
+  return ist.toISOString().split("T")[0];
+}
+
+// ── Parse IST date+time string → Date object ────────────────────────
+// MatchDate from IPL feed looks like "Saturday, 22 Mar 2025"
+// MatchTime looks like "19:30"
+function parseISTDateTime(dateStr = "", timeStr = "19:30") {
+  try {
+    // Strip day-of-week prefix if present: "Saturday, 22 Mar 2025" → "22 Mar 2025"
+    const cleanDate = dateStr.replace(/^[A-Za-z]+,\s*/, "").trim();
+    const d = new Date(`${cleanDate} ${timeStr} GMT+0530`);
+    return isNaN(d.getTime()) ? null : d;
+  } catch {
+    return null;
+  }
+}
+
+// ── Format Date → "HH:MM" in IST ────────────────────────────────────
+function toISTTimeStr(d) {
+  if (!d) return "";
+  return d.toLocaleTimeString("en-IN", {
+    hour: "2-digit", minute: "2-digit",
+    hour12: false, timeZone: "Asia/Kolkata",
+  });
+}
+
+// ── Helper: fetch from IPL CDN and strip JSONP wrapper ──────────────
 async function fetchIPL(filePath) {
   const url = `${IPL_BASE}/${filePath}`;
   const res = await fetch(url, { headers: IPL_HEADERS });
@@ -306,7 +347,7 @@ async function fetchIPL(filePath) {
   return JSON.parse(text);
 }
 
-// GET /api/match/:id/summary
+// ── GET /api/match/:id/summary ───────────────────────────────────────
 app.get("/api/match/:id/summary", async (req, res) => {
   try {
     const data = await fetchIPL(`${req.params.id}-matchsummary.js`);
@@ -317,7 +358,7 @@ app.get("/api/match/:id/summary", async (req, res) => {
   }
 });
 
-// GET /api/match/:id/innings/:num
+// ── GET /api/match/:id/innings/:num ─────────────────────────────────
 app.get("/api/match/:id/innings/:num", async (req, res) => {
   try {
     const data = await fetchIPL(`${req.params.id}-Innings${req.params.num}.js`);
@@ -328,12 +369,11 @@ app.get("/api/match/:id/innings/:num", async (req, res) => {
   }
 });
 
-// GET /api/match/:id — summary + current innings in one shot
+// ── GET /api/match/:id — summary + current innings combined ─────────
 app.get("/api/match/:id", async (req, res) => {
   try {
     const summary = await fetchIPL(`${req.params.id}-matchsummary.js`);
 
-    // Figure out current innings from summary
     let ms = summary?.MatchSummary || {};
     if (Array.isArray(ms)) ms = ms[0] || {};
     const curInn = String(ms.CurrentInnings || "1");
@@ -342,12 +382,194 @@ app.get("/api/match/:id", async (req, res) => {
     try {
       innings = await fetchIPL(`${req.params.id}-Innings${curInn}.js`);
     } catch (_) {
-      // innings may not exist yet (pre-match) — that's fine
+      // innings may not exist yet (pre-match) — fine
     }
 
     res.json({ ok: true, data: { summary, innings, currentInnings: curInn } });
   } catch (e) {
     console.error(`❌ IPL match error [${req.params.id}]:`, e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// =====================================
+// 📅 IPL SCHEDULE — GET /api/ipl/schedule
+// =====================================
+// Returns today's matches (or any date via ?date=YYYY-MM-DD)
+// Fetches from the official IPL schedule feed on S3.
+// Supports double headers automatically.
+//
+// Response shape:
+// {
+//   ok: true,
+//   date: "2025-04-15",
+//   data: [
+//     {
+//       matchId: 2485,       ← auto-computed from MatchNumber
+//       matchNum: 1,         ← position in season
+//       team1: "CSK",        ← home team short code
+//       team2: "MI",         ← away team short code
+//       team1Logo: "https://scores.iplt20.com/ipl/teamlogos/CSK.png",
+//       team2Logo: "https://scores.iplt20.com/ipl/teamlogos/MI.png",
+//       time: "19:30",       ← IST start time
+//       venue: "Wankhede",
+//       status: "live" | "upcoming" | "completed",
+//       score1: "",          ← populated when match is live/done
+//       score2: "",
+//       result: "",          ← e.g. "CSK won by 5 wkts"
+//     },
+//     // second entry if double header
+//   ]
+// }
+
+const IPL_SCHEDULE_URL =
+  "https://ipl-stats-sports-mechanic.s3.ap-south-1.amazonaws.com/ipl/feeds/ipl-2025-matches.json";
+
+app.get("/api/ipl/schedule", async (req, res) => {
+  const targetDate = req.query.date || todayIST(); // e.g. "2025-04-15"
+
+  try {
+    const response = await fetch(IPL_SCHEDULE_URL, { headers: IPL_HEADERS });
+    if (!response.ok) throw new Error(`Schedule feed: ${response.status}`);
+
+    const raw = await response.json();
+
+    // The feed uses "Matchsummary" (capital M, lowercase s)
+    const allMatches = raw?.Matchsummary || raw?.matches || [];
+
+    if (!Array.isArray(allMatches) || allMatches.length === 0) {
+      throw new Error("Empty schedule feed");
+    }
+
+    const now = new Date();
+
+    const todayMatches = allMatches
+      .filter((m) => {
+        // MatchDate: "Saturday, 22 Mar 2025", MatchTime: "19:30"
+        const d = parseISTDateTime(
+          m.MatchDate || m.StartDate || "",
+          m.MatchTime || m.StartTime || "19:30"
+        );
+        if (!d) return false;
+        // Convert match start to IST date string for comparison
+        const matchDateIST = new Date(d.getTime() + 5.5 * 3600 * 1000)
+          .toISOString()
+          .split("T")[0];
+        return matchDateIST === targetDate;
+      })
+      .sort((a, b) => {
+        // Sort by start time ascending (handles double headers)
+        const ta = parseISTDateTime(a.MatchDate || "", a.MatchTime || "");
+        const tb = parseISTDateTime(b.MatchDate || "", b.MatchTime || "");
+        return (ta?.getTime() || 0) - (tb?.getTime() || 0);
+      })
+      .map((m) => {
+        // MatchNumber is 1-indexed position in the full season
+        const matchNum = parseInt(m.MatchNumber || m.MatchNo || m.MatchOrder || "1", 10);
+        // matchId = FIRST_MATCH_ID + (matchNum - 1)
+        // e.g. match #1 of season → 2485, match #2 → 2486, etc.
+        const matchId = FIRST_MATCH_ID + (matchNum - 1);
+
+        const team1Code = toTeamCode(m.HomeTeam || m.Team1 || "");
+        const team2Code = toTeamCode(m.AwayTeam || m.Team2 || "");
+        const startTime = parseISTDateTime(
+          m.MatchDate || m.StartDate || "",
+          m.MatchTime || m.StartTime || "19:30"
+        );
+
+        // Determine status
+        // IsMatchComplete: "1" = done, "0" = not done
+        // MatchStatus: some feeds use "2" for complete
+        let status = "upcoming";
+        const isDone =
+          String(m.IsMatchComplete) === "1" ||
+          String(m.MatchStatus) === "2" ||
+          String(m.MatchStatus) === "complete";
+
+        if (isDone) {
+          status = "completed";
+        } else if (startTime && now >= startTime) {
+          // Start time has passed and not marked complete → treat as live
+          status = "live";
+        }
+
+        return {
+          matchId,
+          matchNum,
+          team1:     team1Code,
+          team2:     team2Code,
+          team1Logo: `${IPL_LOGO_BASE}/${team1Code}.png`,
+          team2Logo: `${IPL_LOGO_BASE}/${team2Code}.png`,
+          time:      startTime ? toISTTimeStr(startTime) : (m.MatchTime || "19:30"),
+          venue:     m.VenueName || m.Venue || m.GroundName || "",
+          status,
+          score1:    m.HomeScore  || m.Team1Score  || "",
+          score2:    m.AwayScore  || m.Team2Score  || "",
+          result:    m.MatchResult || m.WinningTeam || "",
+        };
+      });
+
+    console.log(`📅 IPL Schedule for ${targetDate}: ${todayMatches.length} match(es)`);
+    return res.json({ ok: true, data: todayMatches, date: targetDate });
+
+  } catch (err) {
+    console.error("❌ IPL Schedule error:", err.message);
+
+    // ── Fallback: compute match ID from season-start date offset ──────
+    // Season start: 22 Mar 2025 = match #1 (ID 2484 was pre-season)
+    const seasonStart  = new Date("2025-03-22T00:00:00+05:30");
+    const target       = new Date(`${targetDate}T00:00:00+05:30`);
+    const dayOffset    = Math.max(0, Math.floor((target - seasonStart) / 86400000));
+    const fallbackId   = FIRST_MATCH_ID + dayOffset;
+
+    console.log(`⚠️  Schedule fallback → matchId ${fallbackId} for ${targetDate}`);
+
+    return res.json({
+      ok: true,
+      data: [{
+        matchId:   fallbackId,
+        matchNum:  dayOffset + 1,
+        team1:     "TBD",
+        team2:     "TBD",
+        team1Logo: "",
+        team2Logo: "",
+        time:      "19:30",
+        venue:     "",
+        status:    "upcoming",
+        score1:    "",
+        score2:    "",
+        result:    "",
+      }],
+      date:     targetDate,
+      fallback: true,
+      error:    err.message,
+    });
+  }
+});
+
+// =====================================
+// 📊 IPL POINTS TABLE PROXY
+// =====================================
+const POINTS_TABLE_URL =
+  "https://ipl-stats-sports-mechanic.s3.ap-south-1.amazonaws.com/ipl/feeds/stats/284-groupstandings.js";
+
+app.get("/api/ipl/points-table", async (req, res) => {
+  try {
+    const response = await fetch(POINTS_TABLE_URL, { headers: IPL_HEADERS });
+    if (!response.ok) throw new Error(`Points table feed responded with ${response.status}`);
+
+    let text = await response.text();
+    const cleanedJson = text
+      .trim()
+      .replace(/^[a-zA-Z_][a-zA-Z0-9_]*\s*\(/, "")
+      .replace(/\);?\s*$/, "")
+      .replace(/^var\s+\w+\s*=\s*/, "")
+      .trim();
+
+    const data = JSON.parse(cleanedJson);
+    res.json({ ok: true, data: data.points || [] });
+  } catch (e) {
+    console.error(`❌ IPL Points Table Error:`, e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
