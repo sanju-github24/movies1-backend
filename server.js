@@ -663,6 +663,77 @@ app.get("/api/ipl/most-wickets", async (req, res) => {
   }
 });
 
+
+// =====================================
+// 🏏 FULL MATCH CENTER PROXY
+// =====================================
+app.get("/api/match/:id/full", async (req, res) => {
+  try {
+    const matchId = req.params.id;
+    
+    // 1. Fetch live summary
+    const summaryData = await fetchIPL(`${matchId}-matchsummary.js`);
+    let ms = summaryData?.MatchSummary || {};
+    if (Array.isArray(ms)) ms = ms[0] || {};
+    
+    const curInnNum = String(ms.CurrentInnings || "1");
+    
+    // 2. Fetch specific innings data for ball-by-ball and full cards
+    const inningsData = await fetchIPL(`${matchId}-Innings${curInnNum}.js`);
+    const inn = inningsData?.[`Innings${curInnNum}`] || {};
+
+    // ── BATTING CARD (Including Bowled By / Caught By) ──
+    const battingCard = (inn.BattingCard || []).map(player => ({
+      name: player.PlayerName.trim(),
+      outDesc: player.OutDesc, // e.g. "c Surya Kumar Yadav b AM Ghazanfar"
+      runs: player.Runs,
+      balls: player.Balls,
+      fours: player.Fours,
+      sixes: player.Sixes,
+      sr: player.StrikeRate,
+      isBatting: player.OutDesc === "not out"
+    }));
+
+    // ── BOWLING CARD (Total Overs Bowled) ──
+    const bowlingCard = (inn.BowlingCard || []).map(bowler => ({
+      name: bowler.PlayerName,
+      overs: bowler.Overs,
+      maidens: bowler.Maidens,
+      runs: bowler.Runs,
+      wickets: bowler.Wickets,
+      economy: bowler.Economy
+    }));
+
+    // ── BALL-BY-BALL COMMENTARY ──
+    const ballByBall = (inn.OverHistory || []).slice(0, 12).map(ball => ({
+      over: ball.BallName, // e.g. "7.3"
+      striker: ball.BatsManName,
+      bowler: ball.BowlerName,
+      runs: ball.Runs,
+      event: ball.NewCommentry, // e.g. "Deepak Chahar to Mitchell Marsh - SIX RUNS !!!"
+      isWicket: ball.IsWicket === "1",
+      isBoundary: ball.IsFour === "1" || ball.IsSix === "1"
+    }));
+
+    res.json({
+      ok: true,
+      matchName: ms.MatchName,
+      status: ms.IsMatchEnd === 1 ? "Completed" : "Live",
+      score: ms[`${curInnNum}Summary`],
+      data: {
+        batting: battingCard,
+        bowling: bowlingCard,
+        commentary: ballByBall,
+        recentBalls: inn.BallsInCurrentOver || []
+      }
+    });
+
+  } catch (e) {
+    console.error(`❌ IPL Full Match Center error [${req.params.id}]:`, e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // -------------------- Test route --------------------
 app.get('/', (req, res) => res.send('✅ API is live'));
 
