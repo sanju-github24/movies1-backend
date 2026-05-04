@@ -574,6 +574,95 @@ app.get("/api/ipl/points-table", async (req, res) => {
   }
 });
 
+// =====================================
+// 📊 IPL TOP RUN SCORERS PROXY
+// =====================================
+const TOP_RUNS_URL =
+  "https://ipl-stats-sports-mechanic.s3.ap-south-1.amazonaws.com/ipl/feeds/stats/284-toprunsscorers.js";
+
+app.get("/api/ipl/top-run-scorers", async (req, res) => {
+  try {
+    const response = await fetch(`${TOP_RUNS_URL}?callback=ontoprunsscorers&_=${Date.now()}`, {
+      headers: IPL_HEADERS,
+    });
+    if (!response.ok) throw new Error(`Top run scorers feed responded with ${response.status}`);
+
+    let text = await response.text();
+    const cleanedJson = text
+      .trim()
+      .replace(/^[a-zA-Z_][a-zA-Z0-9_]*\s*\(/, "")
+      .replace(/\);?\s*$/, "")
+      .replace(/^var\s+\w+\s*=\s*/, "")
+      .trim();
+
+    const data = JSON.parse(cleanedJson);
+    const scorers = (data.toprunsscorers || []).slice(0, 10).map((p) => ({
+      name:       p.StrikerName   || "",
+      team:       p.TeamCode      || "",
+      matches:    p.Matches       || 0,
+      innings:    p.Innings       || 0,
+      runs:       p.TotalRuns     || 0,
+      balls:      p.Balls         || 0,
+      fours:      p.Fours         || 0,
+      sixes:      p.Sixes         || 0,
+      strikeRate: p.StrikeRate    || "0",
+      average:    p.BattingAverage|| "0",
+      highScore:  p.HighestScore  || "0",
+      fifties:    p.FiftyPlusRuns || 0,
+      hundreds:   p.Centuries     || 0,
+    }));
+
+    res.json({ ok: true, data: scorers });
+  } catch (e) {
+    console.error("❌ IPL Top Run Scorers Error:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// =====================================
+// 📊 IPL MOST WICKETS PROXY
+// =====================================
+const MOST_WICKETS_URL =
+  "https://ipl-stats-sports-mechanic.s3.ap-south-1.amazonaws.com/ipl/feeds/stats/284-mostwickets.js";
+
+app.get("/api/ipl/most-wickets", async (req, res) => {
+  try {
+    const response = await fetch(`${MOST_WICKETS_URL}?callback=onmostwickets&_=${Date.now()}`, {
+      headers: IPL_HEADERS,
+    });
+    if (!response.ok) throw new Error(`Most wickets feed responded with ${response.status}`);
+
+    let text = await response.text();
+    const cleanedJson = text
+      .trim()
+      .replace(/^[a-zA-Z_][a-zA-Z0-9_]*\s*\(/, "")
+      .replace(/\);?\s*$/, "")
+      .replace(/^var\s+\w+\s*=\s*/, "")
+      .trim();
+
+    const data = JSON.parse(cleanedJson);
+    const bowlers = (data.mostwickets || []).slice(0, 10).map((p) => ({
+      name:       p.BowlerName     || "",
+      team:       p.TeamCode       || "",
+      matches:    p.Matches        || 0,
+      innings:    p.Innings        || 0,
+      wickets:    p.Wickets        || 0,
+      overs:      p.OversBowled    || 0,
+      runs:       p.TotalRunsConceded || 0,
+      economy:    p.EconomyRate    || "0",
+      average:    p.BowlingAverage || "0",
+      strikeRate: p.BowlingSR      || "0",
+      bestInnings:p.BBIW           || "-",
+      fiveWickets:p.FiveWickets    || 0,
+    }));
+
+    res.json({ ok: true, data: bowlers });
+  } catch (e) {
+    console.error("❌ IPL Most Wickets Error:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
 // -------------------- Test route --------------------
 app.get('/', (req, res) => res.send('✅ API is live'));
 
