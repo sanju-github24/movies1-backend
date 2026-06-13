@@ -30,6 +30,8 @@ import { generateSignedUrl } from "./utils/signUrl.js";
 
 import { execSync } from 'child_process';
 import fetch from 'node-fetch';
+import { tavily } from "@tavily/core";
+import { GoogleGenAI, Type } from "@google/genai";
 
 const getChromiumPath = () => {
     try {
@@ -41,6 +43,7 @@ const getChromiumPath = () => {
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
 const app = express();
 const port = process.env.PORT || 4000;
@@ -731,6 +734,307 @@ app.get("/api/match/:id/full", async (req, res) => {
   } catch (e) {
     console.error(`❌ IPL Full Match Center error [${req.params.id}]:`, e.message);
     res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+
+
+// =====================================
+// 🏏 WT20 PROXY ROUTES
+// =====================================
+const WT20_CLIENT_ID = "tPZJbRgIub3Vua93%2FDWtyQ%3D%3D";
+const WT20_BASE_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+  "Referer": "https://www.icc-cricket.com/",
+  "Origin": "https://www.icc-cricket.com",
+};
+
+// GET /api/wt20/scorecard?game_id=262318
+app.get("/api/wt20/scorecard", async (req, res) => {
+  const { game_id } = req.query;
+  if (!game_id) return res.status(400).json({ ok: false, error: "game_id is required" });
+
+  try {
+    const url = `https://assets-icc.sportz.io/cricket/v1/game/scorecard?client_id=${WT20_CLIENT_ID}&feed_format=json&game_id=${game_id}&lang=en`;
+    const response = await fetch(url, { headers: WT20_BASE_HEADERS });
+    if (!response.ok) throw new Error(`Upstream ${response.status}`);
+    const data = await response.json();
+    res.json(data);
+  } catch (e) {
+    console.error("❌ WT20 scorecard error:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// GET /api/wt20/schedule?series_ids=12672&game_count=10
+app.get("/api/wt20/schedule", async (req, res) => {
+  const {
+    series_ids = "12672",
+    game_count = "10",
+    is_live = "true",
+    is_recent = "true",
+    is_upcoming = "true",
+  } = req.query;
+
+  // client_id must NOT be re-encoded — pass raw decoded value
+  const CLIENT_ID = "tPZJbRgIub3Vua93/DWtyQ==";
+
+  try {
+    const params = new URLSearchParams({
+      client_id:   CLIENT_ID,
+      feed_format: "json",
+      game_count,
+      is_deleted:  "false",
+      is_live,
+      is_recent,
+      is_upcoming,
+      lang:        "en",
+      league_ids:  "1,9,10,35",
+      pagination:  "false",
+      series_ids,
+      timezone:    "0530",
+    });
+
+    const fullUrl = `https://assets-icc.sportz.io/cricket/v1/schedule?${params.toString()}`;
+    console.log("🔍 WT20 schedule URL:", fullUrl);
+
+    const response = await fetch(fullUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept":     "application/json, text/plain, */*",
+        "Referer":    "https://www.icc-cricket.com/",
+        "Origin":     "https://www.icc-cricket.com",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+
+    console.log("🔍 WT20 schedule status:", response.status);
+    const text = await response.text();
+    console.log("🔍 WT20 schedule body (first 300):", text.slice(0, 300));
+
+    if (!response.ok) {
+      return res.status(502).json({ ok: false, error: `Upstream ${response.status}`, body: text.slice(0, 300) });
+    }
+
+    const data = JSON.parse(text);
+    res.json(data);
+  } catch (e) {
+    console.error("❌ WT20 schedule error:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── Same fix for scorecard ──────────────────────────────────────────
+app.get("/api/wt20/scorecard", async (req, res) => {
+  const { game_id } = req.query;
+  if (!game_id) return res.status(400).json({ ok: false, error: "game_id is required" });
+
+  const CLIENT_ID = "tPZJbRgIub3Vua93/DWtyQ==";
+
+  try {
+    const params = new URLSearchParams({
+      client_id:   CLIENT_ID,
+      feed_format: "json",
+      game_id,
+      lang:        "en",
+    });
+
+    const fullUrl = `https://assets-icc.sportz.io/cricket/v1/game/scorecard?${params.toString()}`;
+    console.log("🔍 WT20 scorecard URL:", fullUrl);
+
+    const response = await fetch(fullUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Accept":     "application/json, text/plain, */*",
+        "Referer":    "https://www.icc-cricket.com/",
+        "Origin":     "https://www.icc-cricket.com",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+
+    console.log("🔍 WT20 scorecard status:", response.status);
+    const text = await response.text();
+    console.log("🔍 WT20 scorecard body (first 300):", text.slice(0, 300));
+
+    if (!response.ok) {
+      return res.status(502).json({ ok: false, error: `Upstream ${response.status}`, body: text.slice(0, 300) });
+    }
+
+    const data = JSON.parse(text);
+    res.json(data);
+  } catch (e) {
+    console.error("❌ WT20 scorecard error:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// GET /api/wt20/commentary?game_id=262318&inning=1&page=1
+app.get("/api/wt20/commentary", async (req, res) => {
+  const { game_id, inning = "1", page_number = "1", page_size = "20" } = req.query;
+  if (!game_id) return res.status(400).json({ ok: false, error: "game_id is required" });
+
+  const CLIENT_ID = "tPZJbRgIub3Vua93/DWtyQ==";
+
+  try {
+    const params = new URLSearchParams({
+      client_id:    CLIENT_ID,
+      feed_format:  "json",
+      game_id,
+      inning,
+      key_event:    "true",
+      lang:         "en",
+      page_number,
+      page_size,
+    });
+
+    const fullUrl = `https://assets-icc.sportz.io/cricket/v1/game/commentary?${params.toString()}`;
+    console.log("🔍 WT20 commentary URL:", fullUrl);
+
+    const response = await fetch(fullUrl, {
+      headers: {
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+        "Accept":          "application/json, text/plain, */*",
+        "Referer":         "https://www.icc-cricket.com/",
+        "Origin":          "https://www.icc-cricket.com",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+    });
+
+    const text = await response.text();
+    if (!response.ok) return res.status(502).json({ ok: false, error: `Upstream ${response.status}`, body: text.slice(0, 300) });
+
+    res.json(JSON.parse(text));
+  } catch (e) {
+    console.error("❌ WT20 commentary error:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+const STATIC_EMERGENCY_FALLBACKS = {
+  cricket: [
+    "https://images.unsplash.com/photo-1531415074968-036ba1b575da?q=80&w=1200&auto=format&fit=crop",
+  ],
+  football: [
+    "https://images.unsplash.com/photo-1508098682722-e99c43a406b2?q=80&w=1200&auto=format&fit=crop",
+  ],
+};
+
+function detectSport(query) {
+  const q = query.toLowerCase();
+  return (q.includes("football") || q.includes("fifa") || q.includes("soccer")) 
+    ? "football" : "cricket";
+}
+
+// ─── GEMINI QUERY OPTIMIZER ───────────────────────────────────────────────────
+async function optimizeQueryWithGemini(rawQuery) {
+  if (!process.env.GEMINI_API_KEY) return rawQuery;
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          contents: [{
+            parts: [{
+              text: `Convert this raw sports match query into a precise, search-optimized phrase (max 10 words).
+Expand team abbreviations to full country/team names. Include tournament name and year.
+Output ONLY the search phrase, nothing else.
+
+Raw query: "${rawQuery}"
+Examples:
+- "ICC WT20 WC 2026 ENG vs SL cricket" → "England vs Sri Lanka ICC Women's T20 World Cup 2026"
+- "FIFA World Cup 2026 CAN vs BIH football" → "Canada vs Bosnia FIFA World Cup 2026 match action"
+- "IPL 2025 MI vs CSK cricket" → "Mumbai Indians vs Chennai Super Kings IPL 2025 match"`
+            }]
+          }],
+          generationConfig: { temperature: 0.1, maxOutputTokens: 30 }
+        }),
+      }
+    );
+    const json = await res.json();
+    const optimized = json?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    return optimized?.length > 5 ? optimized : rawQuery;
+  } catch (e) {
+    console.warn("[gemini] Query optimization failed:", e.message);
+    return rawQuery;
+  }
+}
+
+// ─── TAVILY IMAGE FETCH ───────────────────────────────────────────────────────
+async function searchViaTavily(query, count = 5) {
+  if (!TAVILY_API_KEY) return [];
+  try {
+    const res = await fetch("https://api.tavily.com/search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${TAVILY_API_KEY}`,
+      },
+      body: JSON.stringify({
+        query,
+        search_depth: "basic",       // "advanced" costs 2 credits but richer results
+        include_images: true,        // ← this is the key flag
+        include_image_descriptions: false,
+        max_results: count,
+        topic: "news",               // "news" topic biases toward recent live match coverage
+      }),
+    });
+
+    if (!res.ok) {
+      console.warn(`[tavily] API error: ${res.status}`);
+      return [];
+    }
+
+    const json = await res.json();
+
+    // Tavily returns images as a flat array of URLs under json.images
+    return (json.images || []).filter(url =>
+      url?.startsWith("http") &&
+      !url.endsWith(".svg") &&
+      !url.endsWith(".gif") &&
+      !url.includes("logo") &&
+      !url.includes("icon") &&
+      !url.includes("pixel")
+    );
+  } catch (e) {
+    console.error("[tavily] Search failed:", e.message);
+    return [];
+  }
+}
+
+// ─── ROUTE ────────────────────────────────────────────────────────────────────
+app.get('/api/search-image', async (req, res) => {
+  try {
+    const rawQuery = req.query.q;
+    if (!rawQuery) return res.status(400).json({ error: "Missing query" });
+
+    const decoded = decodeURIComponent(rawQuery).trim();
+    const sportType = detectSport(decoded);
+
+    console.log(`[image-search] Raw: "${decoded}" | Sport: ${sportType}`);
+
+    // 1. Gemini expands abbreviations → clean human-readable match phrase
+    const optimizedQuery = await optimizeQueryWithGemini(decoded);
+    console.log(`[image-search] Optimized: "${optimizedQuery}"`);
+
+    // 2. Tavily fetches real-time images from live match coverage
+    const images = await searchViaTavily(optimizedQuery);
+
+    // 3. Static fallback if Tavily returns nothing
+    if (images.length === 0) {
+      console.log(`[image-search] Tavily returned 0, using ${sportType} fallback`);
+      return res.json({ images: STATIC_EMERGENCY_FALLBACKS[sportType] });
+    }
+
+    console.log(`[image-search] Returning ${images.length} images`);
+    return res.json({ images });
+
+  } catch (err) {
+    console.error("[image-search] Critical error:", err);
+    return res.json({
+      images: ["https://images.unsplash.com/photo-1508098682722-e99c43a406b2?q=80&w=1200&auto=format&fit=crop"]
+    });
   }
 });
 
