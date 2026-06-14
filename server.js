@@ -282,10 +282,8 @@ const IPL_HEADERS = {
   "Origin":     "https://www.iplt20.com",
 };
 
-// ── First match ID of the season (today onwards starts from 2485) ──
 const FIRST_MATCH_ID = 2485;
 
-// ── Team name → short code map ─────────────────────────────────────
 const TEAM_CODE_MAP = {
   "Chennai Super Kings":          "CSK",
   "Mumbai Indians":               "MI",
@@ -304,19 +302,14 @@ function toTeamCode(name = "") {
   return TEAM_CODE_MAP[name.trim()] || name.trim().toUpperCase().slice(0, 4);
 }
 
-// ── Today's date string in IST "YYYY-MM-DD" ─────────────────────────
 function todayIST() {
   const now = new Date();
   const ist = new Date(now.getTime() + 5.5 * 3600 * 1000);
   return ist.toISOString().split("T")[0];
 }
 
-// ── Parse IST date+time string → Date object ────────────────────────
-// MatchDate from IPL feed looks like "Saturday, 22 Mar 2025"
-// MatchTime looks like "19:30"
 function parseISTDateTime(dateStr = "", timeStr = "19:30") {
   try {
-    // Strip day-of-week prefix if present: "Saturday, 22 Mar 2025" → "22 Mar 2025"
     const cleanDate = dateStr.replace(/^[A-Za-z]+,\s*/, "").trim();
     const d = new Date(`${cleanDate} ${timeStr} GMT+0530`);
     return isNaN(d.getTime()) ? null : d;
@@ -325,7 +318,6 @@ function parseISTDateTime(dateStr = "", timeStr = "19:30") {
   }
 }
 
-// ── Format Date → "HH:MM" in IST ────────────────────────────────────
 function toISTTimeStr(d) {
   if (!d) return "";
   return d.toLocaleTimeString("en-IN", {
@@ -334,7 +326,6 @@ function toISTTimeStr(d) {
   });
 }
 
-// ── Helper: fetch from IPL CDN and strip JSONP wrapper ──────────────
 async function fetchIPL(filePath) {
   const url = `${IPL_BASE}/${filePath}`;
   const res = await fetch(url, { headers: IPL_HEADERS });
@@ -350,7 +341,6 @@ async function fetchIPL(filePath) {
   return JSON.parse(text);
 }
 
-// ── GET /api/match/:id/summary ───────────────────────────────────────
 app.get("/api/match/:id/summary", async (req, res) => {
   try {
     const data = await fetchIPL(`${req.params.id}-matchsummary.js`);
@@ -361,7 +351,6 @@ app.get("/api/match/:id/summary", async (req, res) => {
   }
 });
 
-// ── GET /api/match/:id/innings/:num ─────────────────────────────────
 app.get("/api/match/:id/innings/:num", async (req, res) => {
   try {
     const data = await fetchIPL(`${req.params.id}-Innings${req.params.num}.js`);
@@ -372,7 +361,6 @@ app.get("/api/match/:id/innings/:num", async (req, res) => {
   }
 });
 
-// ── GET /api/match/:id — summary + current innings combined ─────────
 app.get("/api/match/:id", async (req, res) => {
   try {
     const summary = await fetchIPL(`${req.params.id}-matchsummary.js`);
@@ -384,9 +372,7 @@ app.get("/api/match/:id", async (req, res) => {
     let innings = null;
     try {
       innings = await fetchIPL(`${req.params.id}-Innings${curInn}.js`);
-    } catch (_) {
-      // innings may not exist yet (pre-match) — fine
-    }
+    } catch (_) {}
 
     res.json({ ok: true, data: { summary, innings, currentInnings: curInn } });
   } catch (e) {
@@ -396,48 +382,19 @@ app.get("/api/match/:id", async (req, res) => {
 });
 
 // =====================================
-// 📅 IPL SCHEDULE — GET /api/ipl/schedule
+// 📅 IPL SCHEDULE
 // =====================================
-// Returns today's matches (or any date via ?date=YYYY-MM-DD)
-// Fetches from the official IPL schedule feed on S3.
-// Supports double headers automatically.
-//
-// Response shape:
-// {
-//   ok: true,
-//   date: "2025-04-15",
-//   data: [
-//     {
-//       matchId: 2485,       ← auto-computed from MatchNumber
-//       matchNum: 1,         ← position in season
-//       team1: "CSK",        ← home team short code
-//       team2: "MI",         ← away team short code
-//       team1Logo: "https://scores.iplt20.com/ipl/teamlogos/CSK.png",
-//       team2Logo: "https://scores.iplt20.com/ipl/teamlogos/MI.png",
-//       time: "19:30",       ← IST start time
-//       venue: "Wankhede",
-//       status: "live" | "upcoming" | "completed",
-//       score1: "",          ← populated when match is live/done
-//       score2: "",
-//       result: "",          ← e.g. "CSK won by 5 wkts"
-//     },
-//     // second entry if double header
-//   ]
-// }
-
 const IPL_SCHEDULE_URL =
   "https://ipl-stats-sports-mechanic.s3.ap-south-1.amazonaws.com/ipl/feeds/ipl-2025-matches.json";
 
 app.get("/api/ipl/schedule", async (req, res) => {
-  const targetDate = req.query.date || todayIST(); // e.g. "2025-04-15"
+  const targetDate = req.query.date || todayIST();
 
   try {
     const response = await fetch(IPL_SCHEDULE_URL, { headers: IPL_HEADERS });
     if (!response.ok) throw new Error(`Schedule feed: ${response.status}`);
 
     const raw = await response.json();
-
-    // The feed uses "Matchsummary" (capital M, lowercase s)
     const allMatches = raw?.Matchsummary || raw?.matches || [];
 
     if (!Array.isArray(allMatches) || allMatches.length === 0) {
@@ -448,31 +405,24 @@ app.get("/api/ipl/schedule", async (req, res) => {
 
     const todayMatches = allMatches
       .filter((m) => {
-        // MatchDate: "Saturday, 22 Mar 2025", MatchTime: "19:30"
         const d = parseISTDateTime(
           m.MatchDate || m.StartDate || "",
           m.MatchTime || m.StartTime || "19:30"
         );
         if (!d) return false;
-        // Convert match start to IST date string for comparison
         const matchDateIST = new Date(d.getTime() + 5.5 * 3600 * 1000)
           .toISOString()
           .split("T")[0];
         return matchDateIST === targetDate;
       })
       .sort((a, b) => {
-        // Sort by start time ascending (handles double headers)
         const ta = parseISTDateTime(a.MatchDate || "", a.MatchTime || "");
         const tb = parseISTDateTime(b.MatchDate || "", b.MatchTime || "");
         return (ta?.getTime() || 0) - (tb?.getTime() || 0);
       })
       .map((m) => {
-        // MatchNumber is 1-indexed position in the full season
         const matchNum = parseInt(m.MatchNumber || m.MatchNo || m.MatchOrder || "1", 10);
-        // matchId = FIRST_MATCH_ID + (matchNum - 1)
-        // e.g. match #1 of season → 2485, match #2 → 2486, etc.
         const matchId = FIRST_MATCH_ID + (matchNum - 1);
-
         const team1Code = toTeamCode(m.HomeTeam || m.Team1 || "");
         const team2Code = toTeamCode(m.AwayTeam || m.Team2 || "");
         const startTime = parseISTDateTime(
@@ -480,9 +430,6 @@ app.get("/api/ipl/schedule", async (req, res) => {
           m.MatchTime || m.StartTime || "19:30"
         );
 
-        // Determine status
-        // IsMatchComplete: "1" = done, "0" = not done
-        // MatchStatus: some feeds use "2" for complete
         let status = "upcoming";
         const isDone =
           String(m.IsMatchComplete) === "1" ||
@@ -492,23 +439,20 @@ app.get("/api/ipl/schedule", async (req, res) => {
         if (isDone) {
           status = "completed";
         } else if (startTime && now >= startTime) {
-          // Start time has passed and not marked complete → treat as live
           status = "live";
         }
 
         return {
-          matchId,
-          matchNum,
-          team1:     team1Code,
-          team2:     team2Code,
+          matchId, matchNum,
+          team1: team1Code, team2: team2Code,
           team1Logo: `${IPL_LOGO_BASE}/${team1Code}.png`,
           team2Logo: `${IPL_LOGO_BASE}/${team2Code}.png`,
-          time:      startTime ? toISTTimeStr(startTime) : (m.MatchTime || "19:30"),
-          venue:     m.VenueName || m.Venue || m.GroundName || "",
+          time:   startTime ? toISTTimeStr(startTime) : (m.MatchTime || "19:30"),
+          venue:  m.VenueName || m.Venue || m.GroundName || "",
           status,
-          score1:    m.HomeScore  || m.Team1Score  || "",
-          score2:    m.AwayScore  || m.Team2Score  || "",
-          result:    m.MatchResult || m.WinningTeam || "",
+          score1: m.HomeScore  || m.Team1Score  || "",
+          score2: m.AwayScore  || m.Team2Score  || "",
+          result: m.MatchResult || m.WinningTeam || "",
         };
       });
 
@@ -517,35 +461,21 @@ app.get("/api/ipl/schedule", async (req, res) => {
 
   } catch (err) {
     console.error("❌ IPL Schedule error:", err.message);
-
-    // ── Fallback: compute match ID from season-start date offset ──────
-    // Season start: 22 Mar 2025 = match #1 (ID 2484 was pre-season)
-    const seasonStart  = new Date("2025-03-22T00:00:00+05:30");
-    const target       = new Date(`${targetDate}T00:00:00+05:30`);
-    const dayOffset    = Math.max(0, Math.floor((target - seasonStart) / 86400000));
-    const fallbackId   = FIRST_MATCH_ID + dayOffset;
-
-    console.log(`⚠️  Schedule fallback → matchId ${fallbackId} for ${targetDate}`);
+    const seasonStart = new Date("2025-03-22T00:00:00+05:30");
+    const target      = new Date(`${targetDate}T00:00:00+05:30`);
+    const dayOffset   = Math.max(0, Math.floor((target - seasonStart) / 86400000));
+    const fallbackId  = FIRST_MATCH_ID + dayOffset;
 
     return res.json({
       ok: true,
       data: [{
-        matchId:   fallbackId,
-        matchNum:  dayOffset + 1,
-        team1:     "TBD",
-        team2:     "TBD",
-        team1Logo: "",
-        team2Logo: "",
-        time:      "19:30",
-        venue:     "",
-        status:    "upcoming",
-        score1:    "",
-        score2:    "",
-        result:    "",
+        matchId: fallbackId, matchNum: dayOffset + 1,
+        team1: "TBD", team2: "TBD",
+        team1Logo: "", team2Logo: "",
+        time: "19:30", venue: "", status: "upcoming",
+        score1: "", score2: "", result: "",
       }],
-      date:     targetDate,
-      fallback: true,
-      error:    err.message,
+      date: targetDate, fallback: true, error: err.message,
     });
   }
 });
@@ -600,19 +530,19 @@ app.get("/api/ipl/top-run-scorers", async (req, res) => {
 
     const data = JSON.parse(cleanedJson);
     const scorers = (data.toprunsscorers || []).slice(0, 10).map((p) => ({
-      name:       p.StrikerName   || "",
-      team:       p.TeamCode      || "",
-      matches:    p.Matches       || 0,
-      innings:    p.Innings       || 0,
-      runs:       p.TotalRuns     || 0,
-      balls:      p.Balls         || 0,
-      fours:      p.Fours         || 0,
-      sixes:      p.Sixes         || 0,
-      strikeRate: p.StrikeRate    || "0",
-      average:    p.BattingAverage|| "0",
-      highScore:  p.HighestScore  || "0",
-      fifties:    p.FiftyPlusRuns || 0,
-      hundreds:   p.Centuries     || 0,
+      name:       p.StrikerName    || "",
+      team:       p.TeamCode       || "",
+      matches:    p.Matches        || 0,
+      innings:    p.Innings        || 0,
+      runs:       p.TotalRuns      || 0,
+      balls:      p.Balls          || 0,
+      fours:      p.Fours          || 0,
+      sixes:      p.Sixes          || 0,
+      strikeRate: p.StrikeRate     || "0",
+      average:    p.BattingAverage || "0",
+      highScore:  p.HighestScore   || "0",
+      fifties:    p.FiftyPlusRuns  || 0,
+      hundreds:   p.Centuries      || 0,
     }));
 
     res.json({ ok: true, data: scorers });
@@ -645,18 +575,18 @@ app.get("/api/ipl/most-wickets", async (req, res) => {
 
     const data = JSON.parse(cleanedJson);
     const bowlers = (data.mostwickets || []).slice(0, 10).map((p) => ({
-      name:       p.BowlerName     || "",
-      team:       p.TeamCode       || "",
-      matches:    p.Matches        || 0,
-      innings:    p.Innings        || 0,
-      wickets:    p.Wickets        || 0,
-      overs:      p.OversBowled    || 0,
-      runs:       p.TotalRunsConceded || 0,
-      economy:    p.EconomyRate    || "0",
-      average:    p.BowlingAverage || "0",
-      strikeRate: p.BowlingSR      || "0",
-      bestInnings:p.BBIW           || "-",
-      fiveWickets:p.FiveWickets    || 0,
+      name:        p.BowlerName          || "",
+      team:        p.TeamCode            || "",
+      matches:     p.Matches             || 0,
+      innings:     p.Innings             || 0,
+      wickets:     p.Wickets             || 0,
+      overs:       p.OversBowled         || 0,
+      runs:        p.TotalRunsConceded   || 0,
+      economy:     p.EconomyRate         || "0",
+      average:     p.BowlingAverage      || "0",
+      strikeRate:  p.BowlingSR           || "0",
+      bestInnings: p.BBIW                || "-",
+      fiveWickets: p.FiveWickets         || 0,
     }));
 
     res.json({ ok: true, data: bowlers });
@@ -666,67 +596,58 @@ app.get("/api/ipl/most-wickets", async (req, res) => {
   }
 });
 
-
 // =====================================
 // 🏏 FULL MATCH CENTER PROXY
 // =====================================
 app.get("/api/match/:id/full", async (req, res) => {
   try {
     const matchId = req.params.id;
-    
-    // 1. Fetch live summary
     const summaryData = await fetchIPL(`${matchId}-matchsummary.js`);
     let ms = summaryData?.MatchSummary || {};
     if (Array.isArray(ms)) ms = ms[0] || {};
-    
     const curInnNum = String(ms.CurrentInnings || "1");
-    
-    // 2. Fetch specific innings data for ball-by-ball and full cards
     const inningsData = await fetchIPL(`${matchId}-Innings${curInnNum}.js`);
     const inn = inningsData?.[`Innings${curInnNum}`] || {};
 
-    // ── BATTING CARD (Including Bowled By / Caught By) ──
     const battingCard = (inn.BattingCard || []).map(player => ({
-      name: player.PlayerName.trim(),
-      outDesc: player.OutDesc, // e.g. "c Surya Kumar Yadav b AM Ghazanfar"
-      runs: player.Runs,
-      balls: player.Balls,
-      fours: player.Fours,
-      sixes: player.Sixes,
-      sr: player.StrikeRate,
+      name:      player.PlayerName.trim(),
+      outDesc:   player.OutDesc,
+      runs:      player.Runs,
+      balls:     player.Balls,
+      fours:     player.Fours,
+      sixes:     player.Sixes,
+      sr:        player.StrikeRate,
       isBatting: player.OutDesc === "not out"
     }));
 
-    // ── BOWLING CARD (Total Overs Bowled) ──
     const bowlingCard = (inn.BowlingCard || []).map(bowler => ({
-      name: bowler.PlayerName,
-      overs: bowler.Overs,
-      maidens: bowler.Maidens,
-      runs: bowler.Runs,
-      wickets: bowler.Wickets,
-      economy: bowler.Economy
+      name:     bowler.PlayerName,
+      overs:    bowler.Overs,
+      maidens:  bowler.Maidens,
+      runs:     bowler.Runs,
+      wickets:  bowler.Wickets,
+      economy:  bowler.Economy
     }));
 
-    // ── BALL-BY-BALL COMMENTARY ──
     const ballByBall = (inn.OverHistory || []).slice(0, 12).map(ball => ({
-      over: ball.BallName, // e.g. "7.3"
-      striker: ball.BatsManName,
-      bowler: ball.BowlerName,
-      runs: ball.Runs,
-      event: ball.NewCommentry, // e.g. "Deepak Chahar to Mitchell Marsh - SIX RUNS !!!"
-      isWicket: ball.IsWicket === "1",
+      over:       ball.BallName,
+      striker:    ball.BatsManName,
+      bowler:     ball.BowlerName,
+      runs:       ball.Runs,
+      event:      ball.NewCommentry,
+      isWicket:   ball.IsWicket === "1",
       isBoundary: ball.IsFour === "1" || ball.IsSix === "1"
     }));
 
     res.json({
       ok: true,
       matchName: ms.MatchName,
-      status: ms.IsMatchEnd === 1 ? "Completed" : "Live",
-      score: ms[`${curInnNum}Summary`],
+      status:    ms.IsMatchEnd === 1 ? "Completed" : "Live",
+      score:     ms[`${curInnNum}Summary`],
       data: {
-        batting: battingCard,
-        bowling: bowlingCard,
-        commentary: ballByBall,
+        batting:     battingCard,
+        bowling:     bowlingCard,
+        commentary:  ballByBall,
         recentBalls: inn.BallsInCurrentOver || []
       }
     });
@@ -737,51 +658,59 @@ app.get("/api/match/:id/full", async (req, res) => {
   }
 });
 
-
-
 // =====================================
 // 🏏 WT20 PROXY ROUTES
 // =====================================
-const WT20_CLIENT_ID = "tPZJbRgIub3Vua93%2FDWtyQ%3D%3D";
-const WT20_BASE_HEADERS = {
-  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
-  "Referer": "https://www.icc-cricket.com/",
-  "Origin": "https://www.icc-cricket.com",
+const WT20_CLIENT_ID = "tPZJbRgIub3Vua93/DWtyQ==";   // decoded — URLSearchParams re-encodes correctly
+const WT20_HEADERS = {
+  "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+  "Accept":          "application/json, text/plain, */*",
+  "Referer":         "https://www.icc-cricket.com/",
+  "Origin":          "https://www.icc-cricket.com",
+  "Accept-Language": "en-US,en;q=0.9",
 };
 
-// GET /api/wt20/scorecard?game_id=262318
+// ── GET /api/wt20/scorecard?game_id=262318 ───────────────────────────────────
 app.get("/api/wt20/scorecard", async (req, res) => {
   const { game_id } = req.query;
   if (!game_id) return res.status(400).json({ ok: false, error: "game_id is required" });
 
   try {
-    const url = `https://assets-icc.sportz.io/cricket/v1/game/scorecard?client_id=${WT20_CLIENT_ID}&feed_format=json&game_id=${game_id}&lang=en`;
-    const response = await fetch(url, { headers: WT20_BASE_HEADERS });
-    if (!response.ok) throw new Error(`Upstream ${response.status}`);
-    const data = await response.json();
-    res.json(data);
+    const params = new URLSearchParams({
+      client_id:   WT20_CLIENT_ID,
+      feed_format: "json",
+      game_id,
+      lang:        "en",
+    });
+    const url = `https://assets-icc.sportz.io/cricket/v1/game/scorecard?${params}`;
+    console.log("🏏 WT20 scorecard →", url);
+
+    const response = await fetch(url, { headers: WT20_HEADERS });
+    const text = await response.text();
+    if (!response.ok) {
+      console.error("❌ WT20 scorecard upstream:", response.status, text.slice(0, 200));
+      return res.status(502).json({ ok: false, error: `Upstream ${response.status}` });
+    }
+    res.json(JSON.parse(text));
   } catch (e) {
     console.error("❌ WT20 scorecard error:", e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// GET /api/wt20/schedule?series_ids=12672&game_count=10
+// ── GET /api/wt20/schedule?series_ids=12672&game_count=10 ────────────────────
 app.get("/api/wt20/schedule", async (req, res) => {
   const {
-    series_ids = "12672",
-    game_count = "10",
-    is_live = "true",
-    is_recent = "true",
+    series_ids  = "12672",
+    game_count  = "10",
+    is_live     = "true",
+    is_recent   = "true",
     is_upcoming = "true",
   } = req.query;
 
-  // client_id must NOT be re-encoded — pass raw decoded value
-  const CLIENT_ID = "tPZJbRgIub3Vua93/DWtyQ==";
-
   try {
     const params = new URLSearchParams({
-      client_id:   CLIENT_ID,
+      client_id:   WT20_CLIENT_ID,
       feed_format: "json",
       game_count,
       is_deleted:  "false",
@@ -794,115 +723,47 @@ app.get("/api/wt20/schedule", async (req, res) => {
       series_ids,
       timezone:    "0530",
     });
+    const url = `https://assets-icc.sportz.io/cricket/v1/schedule?${params}`;
+    console.log("📅 WT20 schedule →", url);
 
-    const fullUrl = `https://assets-icc.sportz.io/cricket/v1/schedule?${params.toString()}`;
-    console.log("🔍 WT20 schedule URL:", fullUrl);
-
-    const response = await fetch(fullUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept":     "application/json, text/plain, */*",
-        "Referer":    "https://www.icc-cricket.com/",
-        "Origin":     "https://www.icc-cricket.com",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
-
-    console.log("🔍 WT20 schedule status:", response.status);
+    const response = await fetch(url, { headers: WT20_HEADERS });
     const text = await response.text();
-    console.log("🔍 WT20 schedule body (first 300):", text.slice(0, 300));
-
     if (!response.ok) {
-      return res.status(502).json({ ok: false, error: `Upstream ${response.status}`, body: text.slice(0, 300) });
+      console.error("❌ WT20 schedule upstream:", response.status, text.slice(0, 200));
+      return res.status(502).json({ ok: false, error: `Upstream ${response.status}` });
     }
-
-    const data = JSON.parse(text);
-    res.json(data);
+    res.json(JSON.parse(text));
   } catch (e) {
     console.error("❌ WT20 schedule error:", e.message);
     res.status(500).json({ ok: false, error: e.message });
   }
 });
 
-// ── Same fix for scorecard ──────────────────────────────────────────
-app.get("/api/wt20/scorecard", async (req, res) => {
-  const { game_id } = req.query;
-  if (!game_id) return res.status(400).json({ ok: false, error: "game_id is required" });
-
-  const CLIENT_ID = "tPZJbRgIub3Vua93/DWtyQ==";
-
-  try {
-    const params = new URLSearchParams({
-      client_id:   CLIENT_ID,
-      feed_format: "json",
-      game_id,
-      lang:        "en",
-    });
-
-    const fullUrl = `https://assets-icc.sportz.io/cricket/v1/game/scorecard?${params.toString()}`;
-    console.log("🔍 WT20 scorecard URL:", fullUrl);
-
-    const response = await fetch(fullUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-        "Accept":     "application/json, text/plain, */*",
-        "Referer":    "https://www.icc-cricket.com/",
-        "Origin":     "https://www.icc-cricket.com",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
-
-    console.log("🔍 WT20 scorecard status:", response.status);
-    const text = await response.text();
-    console.log("🔍 WT20 scorecard body (first 300):", text.slice(0, 300));
-
-    if (!response.ok) {
-      return res.status(502).json({ ok: false, error: `Upstream ${response.status}`, body: text.slice(0, 300) });
-    }
-
-    const data = JSON.parse(text);
-    res.json(data);
-  } catch (e) {
-    console.error("❌ WT20 scorecard error:", e.message);
-    res.status(500).json({ ok: false, error: e.message });
-  }
-});
-
-// GET /api/wt20/commentary?game_id=262318&inning=1&page=1
+// ── GET /api/wt20/commentary?game_id=262318&inning=1&page_number=1 ───────────
 app.get("/api/wt20/commentary", async (req, res) => {
   const { game_id, inning = "1", page_number = "1", page_size = "20" } = req.query;
   if (!game_id) return res.status(400).json({ ok: false, error: "game_id is required" });
 
-  const CLIENT_ID = "tPZJbRgIub3Vua93/DWtyQ==";
-
   try {
     const params = new URLSearchParams({
-      client_id:    CLIENT_ID,
-      feed_format:  "json",
+      client_id:   WT20_CLIENT_ID,
+      feed_format: "json",
       game_id,
       inning,
-      key_event:    "true",
-      lang:         "en",
+      key_event:   "true",
+      lang:        "en",
       page_number,
       page_size,
     });
+    const url = `https://assets-icc.sportz.io/cricket/v1/game/commentary?${params}`;
+    console.log("💬 WT20 commentary →", url);
 
-    const fullUrl = `https://assets-icc.sportz.io/cricket/v1/game/commentary?${params.toString()}`;
-    console.log("🔍 WT20 commentary URL:", fullUrl);
-
-    const response = await fetch(fullUrl, {
-      headers: {
-        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-        "Accept":          "application/json, text/plain, */*",
-        "Referer":         "https://www.icc-cricket.com/",
-        "Origin":          "https://www.icc-cricket.com",
-        "Accept-Language": "en-US,en;q=0.9",
-      },
-    });
-
+    const response = await fetch(url, { headers: WT20_HEADERS });
     const text = await response.text();
-    if (!response.ok) return res.status(502).json({ ok: false, error: `Upstream ${response.status}`, body: text.slice(0, 300) });
-
+    if (!response.ok) {
+      console.error("❌ WT20 commentary upstream:", response.status, text.slice(0, 200));
+      return res.status(502).json({ ok: false, error: `Upstream ${response.status}` });
+    }
     res.json(JSON.parse(text));
   } catch (e) {
     console.error("❌ WT20 commentary error:", e.message);
@@ -910,22 +771,126 @@ app.get("/api/wt20/commentary", async (req, res) => {
   }
 });
 
+// =====================================
+// 🇮🇳 BCCI / INDIA MATCHES PROXY ROUTES
+// =====================================
+const BCCI_HEADERS = {
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+  "Accept":     "application/json, text/plain, */*",
+  "Referer":    "https://www.bcci.tv/",
+  "Origin":     "https://www.bcci.tv",
+};
+
+// ── GET /api/bcci/live ────────────────────────────────────────────────────────
+app.get("/api/bcci/live", async (req, res) => {
+  try {
+    const url = "https://scores2.bcci.tv/getLiveMatches"
+      + "?platform=international&previousMatchesCount=0"
+      + "&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false";
+    console.log("🏏 BCCI live →", url);
+
+    const response = await fetch(url, { headers: BCCI_HEADERS });
+    const text = await response.text();
+    if (!response.ok) {
+      console.error("❌ BCCI live upstream:", response.status, text.slice(0, 200));
+      return res.status(502).json({ ok: false, error: `Upstream ${response.status}` });
+    }
+    res.json(JSON.parse(text));
+  } catch (e) {
+    console.error("❌ BCCI live error:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── GET /api/bcci/upcoming ────────────────────────────────────────────────────
+app.get("/api/bcci/upcoming", async (req, res) => {
+  try {
+    const url = "https://scores2.bcci.tv/getUpcomingMatches"
+      + "?platform=international&previousMatchesCount=0"
+      + "&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false";
+    console.log("📅 BCCI upcoming →", url);
+
+    const response = await fetch(url, { headers: BCCI_HEADERS });
+    const text = await response.text();
+    if (!response.ok) {
+      console.error("❌ BCCI upcoming upstream:", response.status, text.slice(0, 200));
+      return res.status(502).json({ ok: false, error: `Upstream ${response.status}` });
+    }
+    res.json(JSON.parse(text));
+  } catch (e) {
+    console.error("❌ BCCI upcoming error:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── GET /api/bcci/recent ─────────────────────────────────────────────────────
+app.get("/api/bcci/recent", async (req, res) => {
+  try {
+    const url = "https://scores2.bcci.tv/getRecentMatches"
+      + "?platform=international&previousMatchesCount=0"
+      + "&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false";
+    console.log("✅ BCCI recent →", url);
+
+    const response = await fetch(url, { headers: BCCI_HEADERS });
+    const text = await response.text();
+    if (!response.ok) {
+      console.error("❌ BCCI recent upstream:", response.status, text.slice(0, 200));
+      return res.status(502).json({ ok: false, error: `Upstream ${response.status}` });
+    }
+    res.json(JSON.parse(text));
+  } catch (e) {
+    console.error("❌ BCCI recent error:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// ── GET /api/bcci/match?competitionID=285&matchID=2413 ───────────────────────
+// Proxies the full match center details (live score, ball by ball)
+app.get("/api/bcci/match", async (req, res) => {
+  const { competitionID, matchID, matchOrder, seriesName } = req.query;
+  if (!competitionID || !matchID) {
+    return res.status(400).json({ ok: false, error: "competitionID and matchID are required" });
+  }
+
+  try {
+    const params = new URLSearchParams({
+      competitionID,
+      matchID,
+      SERIES_ID: competitionID,
+      widgetType: "international",
+      ...(matchOrder  && { matchOrder }),
+      ...(seriesName  && { seriesName }),
+    });
+    const url = `https://scores2.bcci.tv/getMatchCenterDetails?${params}`;
+    console.log("🏏 BCCI match center →", url);
+
+    const response = await fetch(url, { headers: BCCI_HEADERS });
+    const text = await response.text();
+    if (!response.ok) {
+      console.error("❌ BCCI match upstream:", response.status, text.slice(0, 200));
+      return res.status(502).json({ ok: false, error: `Upstream ${response.status}` });
+    }
+    res.json(JSON.parse(text));
+  } catch (e) {
+    console.error("❌ BCCI match error:", e.message);
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+// =====================================
+// 🖼️ IMAGE SEARCH (Tavily + Gemini)
+// =====================================
 const STATIC_EMERGENCY_FALLBACKS = {
-  cricket: [
-    "https://images.unsplash.com/photo-1531415074968-036ba1b575da?q=80&w=1200&auto=format&fit=crop",
-  ],
-  football: [
-    "https://images.unsplash.com/photo-1508098682722-e99c43a406b2?q=80&w=1200&auto=format&fit=crop",
-  ],
+  cricket:  ["https://images.unsplash.com/photo-1531415074968-036ba1b575da?q=80&w=1200&auto=format&fit=crop"],
+  football: ["https://images.unsplash.com/photo-1508098682722-e99c43a406b2?q=80&w=1200&auto=format&fit=crop"],
 };
 
 function detectSport(query) {
   const q = query.toLowerCase();
-  return (q.includes("football") || q.includes("fifa") || q.includes("soccer")) 
+  return (q.includes("football") || q.includes("fifa") || q.includes("soccer"))
     ? "football" : "cricket";
 }
 
-// ─── GEMINI QUERY OPTIMIZER ───────────────────────────────────────────────────
 async function optimizeQueryWithGemini(rawQuery) {
   if (!process.env.GEMINI_API_KEY) return rawQuery;
   try {
@@ -961,34 +926,28 @@ Examples:
   }
 }
 
-// ─── TAVILY IMAGE FETCH ───────────────────────────────────────────────────────
 async function searchViaTavily(query, count = 5) {
   if (!TAVILY_API_KEY) return [];
   try {
     const res = await fetch("https://api.tavily.com/search", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type":  "application/json",
         "Authorization": `Bearer ${TAVILY_API_KEY}`,
       },
       body: JSON.stringify({
         query,
-        search_depth: "basic",       // "advanced" costs 2 credits but richer results
-        include_images: true,        // ← this is the key flag
+        search_depth:              "basic",
+        include_images:            true,
         include_image_descriptions: false,
-        max_results: count,
-        topic: "news",               // "news" topic biases toward recent live match coverage
+        max_results:               count,
+        topic:                     "news",
       }),
     });
 
-    if (!res.ok) {
-      console.warn(`[tavily] API error: ${res.status}`);
-      return [];
-    }
+    if (!res.ok) { console.warn(`[tavily] API error: ${res.status}`); return []; }
 
     const json = await res.json();
-
-    // Tavily returns images as a flat array of URLs under json.images
     return (json.images || []).filter(url =>
       url?.startsWith("http") &&
       !url.endsWith(".svg") &&
@@ -1003,25 +962,20 @@ async function searchViaTavily(query, count = 5) {
   }
 }
 
-// ─── ROUTE ────────────────────────────────────────────────────────────────────
 app.get('/api/search-image', async (req, res) => {
   try {
     const rawQuery = req.query.q;
     if (!rawQuery) return res.status(400).json({ error: "Missing query" });
 
-    const decoded = decodeURIComponent(rawQuery).trim();
+    const decoded   = decodeURIComponent(rawQuery).trim();
     const sportType = detectSport(decoded);
-
     console.log(`[image-search] Raw: "${decoded}" | Sport: ${sportType}`);
 
-    // 1. Gemini expands abbreviations → clean human-readable match phrase
     const optimizedQuery = await optimizeQueryWithGemini(decoded);
     console.log(`[image-search] Optimized: "${optimizedQuery}"`);
 
-    // 2. Tavily fetches real-time images from live match coverage
     const images = await searchViaTavily(optimizedQuery);
 
-    // 3. Static fallback if Tavily returns nothing
     if (images.length === 0) {
       console.log(`[image-search] Tavily returned 0, using ${sportType} fallback`);
       return res.json({ images: STATIC_EMERGENCY_FALLBACKS[sportType] });
