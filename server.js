@@ -27,6 +27,8 @@ import geminiRoutes from './routes/geminiRoutes.js';
 import autofillRouter from './routes/autofill.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
+import streamRoute from "./routes/streamRoute.js";
+
 
 import { execSync } from 'child_process';
 import fetch from 'node-fetch';
@@ -96,7 +98,7 @@ app.use((req, res, next) => {
         res.setHeader('Access-Control-Allow-Origin', '*');
         res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
         res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Authorization');
-        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type');
         return next();
     }
 
@@ -991,6 +993,9 @@ app.get('/api/search-image', async (req, res) => {
     });
   }
 });
+
+app.use(express.static("public")); // serve player.html from /public folder
+app.use(streamRoute);  
 
 // -------------------- Test route --------------------
 app.get('/', (req, res) => res.send('✅ API is live'));
