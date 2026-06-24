@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stream Player</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: Arial, sans-serif;
+            color: #fff;
+        }
+        .container {
+            width: 100%;
+            max-width: 800px;
+            padding: 20px;
+            box-sizing: border-box;
+            text-align: center;
+        }
+        video {
+            width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.8);
+            background: #111;
+        }
+        h2 {
+            margin-top: 15px;
+            font-size: 1.2rem;
+            font-weight: 300;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <video id="videoPlayer" controls autoplay playsinline>
+        <source id="videoSource" src="" type="video/mp4">
+        Your browser does not support the video tag.
+    </video>
+    <h2 id="videoTitle">Loading Movie...</h2>
+</div>
+
+<script>
+    // 1. Get the query parameters from the browser URL window
+    const urlParams = new URLSearchParams(window.location.search);
+    const fileId = urlParams.get('fileId');
+    const title = urlParams.get('title');
+
+    // 2. Dynamically set the video player source to hit your /stream endpoint
+    if (fileId) {
+        const videoPlayer = document.getElementById('videoPlayer');
+        const videoSource = document.getElementById('videoSource');
+        
+        // This hits your server's GET /stream route relatively
+        videoSource.src = `/stream?fileId=${encodeURIComponent(fileId)}`;
+        videoPlayer.load();
+    }
+
+    // 3. Update Title text display safely
+    if (title) {
+        document.getElementById('videoTitle').innerText = decodeURIComponent(title);
+    } else {
+        document.getElementById('videoTitle').innerText = "Stream Movie Playback";
+    }
+</script>
+
+</body>
+</html>
