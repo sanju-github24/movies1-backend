@@ -29,6 +29,9 @@ import autofillRouter from './routes/autofill.js';
 import { generateSignedUrl } from "./utils/signUrl.js";
 import streamRoute from "./routes/streamRoute.js";
 
+// ── NEW: FilmiBeat RSS proxy ──────────────────────────────────────────────────
+import rssProxy from './routes/rssProxy.js';
+// ─────────────────────────────────────────────────────────────────────────────
 
 import { execSync } from 'child_process';
 import fetch from 'node-fetch';
@@ -125,6 +128,18 @@ if (process.env.PRERENDER_TOKEN) {
 }
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+
+// =====================================
+// 🎬 FILMIBEAT RSS PROXY
+// =====================================
+// Endpoints:
+//   GET /api/rss?feed=all            → all 8 feeds merged, deduped, newest first
+//   GET /api/rss?feed=bollywood      → bollywood only
+//   GET /api/rss?feed=tamil|telugu|kannada|malayalam|hollywood|tv|ott
+//   GET /api/rss?feed=all&search=srk → server-side keyword filter
+//   GET /api/rss?feed=bollywood&count=50
+//   GET /api/rss/feeds               → list all feeds + cache status
+app.use('/api', rssProxy);
 
 // =====================================
 // 🔍 TORRENT SEARCH
@@ -663,7 +678,7 @@ app.get("/api/match/:id/full", async (req, res) => {
 // =====================================
 // 🏏 WT20 PROXY ROUTES
 // =====================================
-const WT20_CLIENT_ID = "tPZJbRgIub3Vua93/DWtyQ==";   // decoded — URLSearchParams re-encodes correctly
+const WT20_CLIENT_ID = "tPZJbRgIub3Vua93/DWtyQ==";
 const WT20_HEADERS = {
   "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
   "Accept":          "application/json, text/plain, */*",
@@ -672,7 +687,6 @@ const WT20_HEADERS = {
   "Accept-Language": "en-US,en;q=0.9",
 };
 
-// ── GET /api/wt20/scorecard?game_id=262318 ───────────────────────────────────
 app.get("/api/wt20/scorecard", async (req, res) => {
   const { game_id } = req.query;
   if (!game_id) return res.status(400).json({ ok: false, error: "game_id is required" });
@@ -700,7 +714,6 @@ app.get("/api/wt20/scorecard", async (req, res) => {
   }
 });
 
-// ── GET /api/wt20/schedule?series_ids=12672&game_count=10 ────────────────────
 app.get("/api/wt20/schedule", async (req, res) => {
   const {
     series_ids  = "12672",
@@ -741,7 +754,6 @@ app.get("/api/wt20/schedule", async (req, res) => {
   }
 });
 
-// ── GET /api/wt20/commentary?game_id=262318&inning=1&page_number=1 ───────────
 app.get("/api/wt20/commentary", async (req, res) => {
   const { game_id, inning = "1", page_number = "1", page_size = "20" } = req.query;
   if (!game_id) return res.status(400).json({ ok: false, error: "game_id is required" });
@@ -783,7 +795,6 @@ const BCCI_HEADERS = {
   "Origin":     "https://www.bcci.tv",
 };
 
-// ── GET /api/bcci/live ────────────────────────────────────────────────────────
 app.get("/api/bcci/live", async (req, res) => {
   try {
     const url = "https://scores2.bcci.tv/getLiveMatches"
@@ -804,7 +815,6 @@ app.get("/api/bcci/live", async (req, res) => {
   }
 });
 
-// ── GET /api/bcci/upcoming ────────────────────────────────────────────────────
 app.get("/api/bcci/upcoming", async (req, res) => {
   try {
     const url = "https://scores2.bcci.tv/getUpcomingMatches"
@@ -825,7 +835,6 @@ app.get("/api/bcci/upcoming", async (req, res) => {
   }
 });
 
-// ── GET /api/bcci/recent ─────────────────────────────────────────────────────
 app.get("/api/bcci/recent", async (req, res) => {
   try {
     const url = "https://scores2.bcci.tv/getRecentMatches"
@@ -846,8 +855,6 @@ app.get("/api/bcci/recent", async (req, res) => {
   }
 });
 
-// ── GET /api/bcci/match?competitionID=285&matchID=2413 ───────────────────────
-// Proxies the full match center details (live score, ball by ball)
 app.get("/api/bcci/match", async (req, res) => {
   const { competitionID, matchID, matchOrder, seriesName } = req.query;
   if (!competitionID || !matchID) {
@@ -994,7 +1001,7 @@ app.get('/api/search-image', async (req, res) => {
   }
 });
 
-app.use(express.static("public")); // serve player.html from /public folder
+app.use(express.static("public"));
 app.use(streamRoute);  
 
 // -------------------- Test route --------------------
@@ -1003,4 +1010,5 @@ app.get('/', (req, res) => res.send('✅ API is live'));
 // -------------------- Start server --------------------
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
+  console.log(`🎬 FilmiBeat RSS proxy → http://localhost:${port}/api/rss?feed=all`);
 });
