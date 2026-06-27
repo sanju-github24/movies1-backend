@@ -1,14 +1,14 @@
 /**
- * rssProxy.js — FilmiBeat RSS Proxy Router
+ * rssProxy.js — FilmiBeat + Cricinfo RSS Proxy Router
  *
  * Mount this in your Express app:
  *   import rssProxy from './server/rssProxy.js';
  *   app.use('/api', rssProxy);
  *
  * Endpoints:
- *   GET /api/rss?feed=bollywood|tamil|telugu|kannada|malayalam|hollywood|tv|ott|all
+ *   GET /api/rss?feed=bollywood|tamil|telugu|kannada|malayalam|hollywood|tv|ott|cricket|all
  *   &count=20        max articles per feed (default 25)
- *   &search=akshay  keyword filter (server-side)
+ *   &search=akshay   keyword filter (server-side)
  *
  * Requires Node 18+ (uses native fetch for HTTP/2 + proper TLS, avoiding
  * Cloudflare blocks that affect the legacy https.get() module).
@@ -20,6 +20,9 @@ import { XMLParser } from "fast-xml-parser";
 const router = express.Router();
 
 // ─── Feed Registry ────────────────────────────────────────────────────────────
+// "cricket" pulls from ESPN Cricinfo instead of FilmiBeat. Everything downstream
+// (cache, parser, /api/rss?feed=all aggregation) treats it identically — it's
+// just another key in FEED_MAP — so no special-casing was needed elsewhere.
 const FEED_MAP = {
   bollywood: "https://www.filmibeat.com/rss/feeds/bollywood-fb.xml",
   tamil:     "https://www.filmibeat.com/rss/feeds/tamil-fb.xml",
@@ -29,7 +32,12 @@ const FEED_MAP = {
   hollywood: "https://www.filmibeat.com/rss/feeds/english-hollywood-fb.xml",
   tv:        "https://www.filmibeat.com/rss/feeds/television-fb.xml",
   ott:       "https://www.filmibeat.com/rss/feeds/ott-fb.xml",
+  cricket:   "https://www.cricinfo.com/rss/content/story/feeds/0.xml",
 };
+
+// Domains allowed through the /api/rss/article extractor. Keep this in sync
+// with any new sources added to FEED_MAP above.
+const ALLOWED_ARTICLE_DOMAINS = ["filmibeat.com", "cricinfo.com", "espncricinfo.com"];
 
 // In-memory cache: { feedKey: { ts, data } }
 const cache = {};
@@ -41,15 +49,13 @@ const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
  * Fetch a URL using native fetch() (Node 18+).
  *
  * Why not https.get()?
- * filmibeat sits behind Cloudflare. Cloudflare prefers HTTP/2 and modern TLS
- * negotiation. Node's legacy https.get() speaks HTTP/1.1 only and lacks the
- * proper handshake, so Cloudflare randomly returns 403/530 for some feed paths.
- * Native fetch() behaves like a real browser request (HTTP/2, gzip, etc.)
- * and passes through without issues.
+ * Both filmibeat and cricinfo sit behind Cloudflare-class edges that prefer
+ * HTTP/2 and modern TLS negotiation. Node's legacy https.get() speaks
+ * HTTP/1.1 only and lacks the proper handshake, so the edge randomly returns
+ * 403/530 for some paths. Native fetch() behaves like a real browser request
+ * (HTTP/2, gzip, etc.) and passes through without issues.
  */
-async function fetchUrl(url, redirectCount = 0) {
-  if (redirectCount > 5) throw new Error("Too many redirects");
-
+async function fetchUrl(url) {
   const res = await fetch(url, {
     headers: {
       "User-Agent":
@@ -59,10 +65,10 @@ async function fetchUrl(url, redirectCount = 0) {
       "Accept":          "application/rss+xml, application/xml, text/xml, */*",
       "Accept-Language": "en-IN,en;q=0.9",
       "Accept-Encoding": "gzip, deflate, br",
-      "Referer":         "https://www.filmibeat.com/",
+      "Referer":         "https://www.google.com/",
       "Cache-Control":   "no-cache",
     },
-    redirect: "follow",   // native fetch handles redirects automatically
+    redirect: "follow", // native fetch handles redirects automatically
     signal: AbortSignal.timeout(12000),
   });
 
@@ -73,13 +79,37 @@ async function fetchUrl(url, redirectCount = 0) {
   return res.text();
 }
 
+function isAllowedArticleUrl(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, "");
+    return ALLOWED_ARTICLE_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
+  } catch {
+    return false;
+  }
+}
+
 // ─── Parse ───────────────────────────────────────────────────────────────────
+
+// Pulls plain text out of whatever shape fast-xml-parser handed back:
+// a bare string, a CDATA wrapper, a {"#text": ...} attribute-bearing node,
+// or (rarely) something deeper. Cricinfo's guid/category nodes carry
+// attributes (e.g. isPermaLink) that FilmiBeat's don't, so without this the
+// cricket feed silently produced "[object Object]" titles/links.
+function getText(val) {
+  if (val == null) return "";
+  if (typeof val === "string") return val;
+  if (typeof val === "number") return String(val);
+  if (val.__cdata != null) return getText(val.__cdata);
+  if (val["#text"] != null) return getText(val["#text"]);
+  return "";
+}
 
 function parseRSS(xml, feedKey) {
   const parser = new XMLParser({
     ignoreAttributes:    false,
     attributeNamePrefix: "@_",
     cdataPropName:       "__cdata",
+    textNodeName:        "#text",
   });
 
   const parsed  = parser.parse(xml);
@@ -96,17 +126,12 @@ function parseRSS(xml, feedKey) {
       item.enclosure?.["@_url"] ||
       "";
 
-    if (!thumbnail) {
-      const desc = item.description?.__cdata || item.description || "";
-      const m    = desc.match(/<img[^>]+src=["']([^"']+)["']/i);
+    const description = getText(item.description) || getText(item["content:encoded"]);
+
+    if (!thumbnail && description) {
+      const m = description.match(/<img[^>]+src=["']([^"']+)["']/i);
       if (m) thumbnail = m[1];
     }
-
-    const description =
-      item.description?.__cdata ||
-      item.description ||
-      item["content:encoded"]?.__cdata ||
-      "";
 
     const preview = description
       .replace(/<[^>]+>/g, " ")
@@ -115,17 +140,18 @@ function parseRSS(xml, feedKey) {
       .trim()
       .slice(0, 200);
 
-    const rawCategory =
-      (Array.isArray(item.category) ? item.category[0] : item.category) || feedKey;
+    const rawCategory = getText(
+      Array.isArray(item.category) ? item.category[0] : item.category
+    ) || feedKey;
 
     return {
-      id:        item.guid?.__cdata    || item.guid    || item.link || "",
-      title:     item.title?.__cdata   || item.title   || "Untitled",
-      link:      item.link?.__cdata    || item.link    || item.guid || "",
-      pubDate:   item.pubDate?.__cdata || item.pubDate || item["dc:date"] || "",
+      id:        getText(item.guid) || getText(item.link) || "",
+      title:     getText(item.title) || "Untitled",
+      link:      getText(item.link) || getText(item.guid) || "",
+      pubDate:   getText(item.pubDate) || getText(item["dc:date"]) || "",
       thumbnail,
       preview,
-      category:  rawCategory?.replace?.(/\s+/g, "") || feedKey,
+      category:  rawCategory.replace(/\s+/g, "") || feedKey,
       source:    feedKey,
       feedLabel: feedKey,
     };
@@ -152,7 +178,7 @@ async function getFeed(feedKey, count = 25) {
   return articles.slice(0, count);
 }
 
-// ─── Route ───────────────────────────────────────────────────────────────────
+// ─── Route: GET /api/rss ──────────────────────────────────────────────────────
 
 router.get("/rss", async (req, res) => {
   const origin = req.headers.origin || "*";
@@ -194,8 +220,8 @@ router.get("/rss", async (req, res) => {
 
     if (search) {
       articles = articles.filter((a) =>
-        a.title.toLowerCase().includes(search)    ||
-        a.preview.toLowerCase().includes(search)  ||
+        a.title.toLowerCase().includes(search)   ||
+        a.preview.toLowerCase().includes(search) ||
         a.category.toLowerCase().includes(search)
       );
     }
@@ -208,10 +234,11 @@ router.get("/rss", async (req, res) => {
 });
 
 // ─── Route: GET /api/rss/article ─────────────────────────────────────────────
-// Fetches a FilmiBeat article page and extracts title, content, thumbnail.
-// Used by the in-site news reader so users never leave the app.
+// Fetches an article page (FilmiBeat or Cricinfo) and extracts title,
+// content, and thumbnail so the in-site reader never has to redirect out.
 //
 // GET /api/rss/article?url=https://www.filmibeat.com/kannada/news/...
+// GET /api/rss/article?url=https://www.espncricinfo.com/story/...
 //
 router.get("/rss/article", async (req, res) => {
   const origin = req.headers.origin || "*";
@@ -224,9 +251,11 @@ router.get("/rss/article", async (req, res) => {
     return res.status(400).json({ success: false, error: "Missing ?url= param" });
   }
 
-  // Only allow filmibeat URLs for safety
-  if (!articleUrl.includes("filmibeat.com")) {
-    return res.status(403).json({ success: false, error: "Only filmibeat.com URLs allowed" });
+  if (!isAllowedArticleUrl(articleUrl)) {
+    return res.status(403).json({
+      success: false,
+      error: `Only these domains are allowed: ${ALLOWED_ARTICLE_DOMAINS.join(", ")}`,
+    });
   }
 
   try {
@@ -234,40 +263,39 @@ router.get("/rss/article", async (req, res) => {
 
     // ── Extract what we need with lightweight regex (no DOM parser needed) ──
 
-    // Title: <h1 ...>...</h1> or <title>...</title>
-    const h1Match  = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
-    const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    const h1Match     = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
+    const titleMatch  = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
     const title = (h1Match?.[1] || titleMatch?.[1] || "")
       .replace(/<[^>]+>/g, "")
-      .replace(/\s*[-|].*$/, "") // strip "- FilmiBeat" suffix
+      .replace(/\s*[-|].*$/, "") // strip "- FilmiBeat" / "- ESPNcricinfo" suffix
       .trim();
 
-    // Main thumbnail: og:image is the most reliable
     const ogImageMatch = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
       || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
     const thumbnail = ogImageMatch?.[1] || "";
 
-    // Published date: look for datePublished or article:published_time
     const dateMatch = html.match(/datePublished["'\s:]+["']([^"']+)["']/i)
       || html.match(/article:published_time["'][^>]+content=["']([^"']+)["']/i)
       || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+itemprop=["']datePublished["']/i);
     const pubDate = dateMatch?.[1] || "";
 
-    // Author
     const authorMatch = html.match(/["']author["'][^>]*>([^<]{2,60})<\//i)
       || html.match(/itemprop=["']author["'][^>]*>([\s\S]{2,60}?)<\//i);
-    const author = authorMatch?.[1]?.replace(/<[^>]+>/g, "").trim() || "FilmiBeat";
+    const author = authorMatch?.[1]?.replace(/<[^>]+>/g, "").trim()
+      || (articleUrl.includes("cricinfo") ? "ESPNcricinfo" : "FilmiBeat");
 
-    // Article body — filmibeat wraps content in .article-content or #article-content
-    // Try several selectors in order of specificity
+    // Article body — try source-specific selectors first, then generic ones.
     let content = "";
 
     const selectors = [
-      // Most specific: filmibeat article body div
+      // FilmiBeat
       /<div[^>]+class=["'][^"']*article-desc[^"']*["'][^>]*>([\s\S]*?)<\/div>\s*<div/i,
       /<div[^>]+id=["']article-content["'][^>]*>([\s\S]*?)<\/div>\s*(?:<div|<aside|<section)/i,
+      // Cricinfo story body
+      /<div[^>]+class=["'][^"']*story-content[^"']*["'][^>]*>([\s\S]*?)<\/div>\s*(?:<div|<aside|<section)/i,
+      /<div[^>]+class=["'][^"']*article-body[^"']*["'][^>]*>([\s\S]*?)<\/div>\s*(?:<div|<aside|<section)/i,
+      // Generic fallbacks
       /<article[^>]*>([\s\S]*?)<\/article>/i,
-      // Fallback: largest <div class="content..."> block
       /<div[^>]+class=["'][^"']*\bcontent\b[^"']*["'][^>]*>([\s\S]{500,}?)<\/div>\s*<(?:div|aside|footer)/i,
     ];
 
@@ -282,8 +310,8 @@ router.get("/rss/article", async (req, res) => {
     // If nothing matched, grab all <p> tags from the page body as fallback
     if (!content) {
       const paragraphs = [...html.matchAll(/<p[^>]*>([\s\S]*?)<\/p>/gi)]
-        .map(m => `<p>${m[1]}</p>`)
-        .filter(p => p.replace(/<[^>]+>/g, "").trim().length > 40);
+        .map((m) => `<p>${m[1]}</p>`)
+        .filter((p) => p.replace(/<[^>]+>/g, "").trim().length > 40);
       content = paragraphs.slice(0, 30).join("\n");
     }
 
@@ -292,7 +320,7 @@ router.get("/rss/article", async (req, res) => {
       .replace(/<script[\s\S]*?<\/script>/gi, "")
       .replace(/<style[\s\S]*?<\/style>/gi, "")
       .replace(/<iframe[\s\S]*?<\/iframe>/gi, "")
-      .replace(/<ins[\s\S]*?<\/ins>/gi, "")           // ad slots
+      .replace(/<ins[\s\S]*?<\/ins>/gi, "") // ad slots
       .replace(/<!--[\s\S]*?-->/g, "")
       .replace(/<div[^>]+class=["'][^"']*(ad|social|share|related|widget|promo)[^"']*["'][^>]*>[\s\S]*?<\/div>/gi, "")
       .trim();
