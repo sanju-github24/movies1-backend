@@ -32,7 +32,15 @@ const FEED_MAP = {
   hollywood: "https://www.filmibeat.com/rss/feeds/english-hollywood-fb.xml",
   tv:        "https://www.filmibeat.com/rss/feeds/television-fb.xml",
   ott:       "https://www.filmibeat.com/rss/feeds/ott-fb.xml",
-  cricket:   "https://www.cricinfo.com/rss/content/story/feeds/0.xml",
+  cricket:   "https://www.espncricinfo.com/rss/content/story/feeds/0.xml", // canonical host, not the cricinfo.com redirect alias
+};
+
+// Mirror URLs to try in order if the primary FEED_MAP URL fails (403, timeout, etc).
+const FEED_FALLBACKS = {
+  cricket: [
+    "https://www.espncricinfo.com/rss/content/story/feeds/0.xml",
+    "https://www.cricinfo.com/rss/content/story/feeds/0.xml",
+  ],
 };
 
 // Domains allowed through the /api/rss/article extractor. Keep this in sync
@@ -167,10 +175,26 @@ async function getFeed(feedKey, count = 25) {
     return cache[feedKey].data.slice(0, count);
   }
 
-  const url = FEED_MAP[feedKey];
-  if (!url) throw new Error(`Unknown feed key: "${feedKey}"`);
+  const primaryUrl = FEED_MAP[feedKey];
+  if (!primaryUrl) throw new Error(`Unknown feed key: "${feedKey}"`);
 
-  const xml      = await fetchUrl(url);
+  const candidates = [primaryUrl, ...(FEED_FALLBACKS[feedKey] || [])]
+    .filter((u, i, arr) => arr.indexOf(u) === i); // dedupe
+
+  let xml, lastErr;
+  for (const url of candidates) {
+    try {
+      xml = await fetchUrl(url);
+      lastErr = null;
+      break;
+    } catch (e) {
+      lastErr = e;
+      console.warn(`[rssProxy] "${feedKey}" failed for ${url}: ${e.message}`);
+    }
+  }
+
+  if (!xml) throw lastErr || new Error(`All sources failed for "${feedKey}"`);
+
   const articles = parseRSS(xml, feedKey);
 
   cache[feedKey] = { ts: now, data: articles };
