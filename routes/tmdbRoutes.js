@@ -5,549 +5,507 @@ import { URL } from 'url';
 
 const router = Router();
 
-// --- Configuration ---
 const TMDB_API_KEY = "452111addfd12727f394865d09a805b4"; 
 const BASE_URL = "https://api.themoviedb.org/3/";
 const IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"; 
 const BACKDROP_BASE_URL = "https://image.tmdb.org/t/p/w1280"; 
-const YOUTUBE_WATCH_BASE = "https://www.youtube.com/watch?v="; // Base URL for YouTube trailers
-
-// Define the path to your data file
+const LOGO_BASE_URL = "https://image.tmdb.org/t/p/w300";
+const YOUTUBE_WATCH_BASE = "https://www.youtube.com/watch?v=";
 const DATA_FILE_PATH = './data/data/all_south_indian_movies.json'; 
-
-// --- CastHQ Configuration (UPDATED DOMAIN AND KEY) ---
 const CASTHQ_API_BASE = 'https://casthq.to/api'; 
-const DEFAULT_CASTHQ_KEY = '154lzcrtrw3lelu26zf'; // Updated API key
+const DEFAULT_CASTHQ_KEY = '154lzcrtrw3lelu26zf';
 
-// --------------------------------------------------------------------------------------
-// --- Internal Helper Functions (TMDB) ---
-// --------------------------------------------------------------------------------------
-
-/**
- * Searches for a title (movie or TV) using TMDB's /search/multi and returns the top match ID.
- */
-const _search_title_id = async (title) => {
-    const endpoint = `${BASE_URL}search/multi`;
+// ── Axios with retry ──────────────────────────────────────────────────────────
+const axiosWithRetry = async (config, retries = 3, delay = 500) => {
+  for (let i = 0; i < retries; i++) {
     try {
-        const response = await axios.get(endpoint, {
-            params: { api_key: TMDB_API_KEY, query: title }
-        });
-        
-        if (response.data && response.data.results) {
-            for (const result of response.data.results) {
-                if (result.media_type === 'movie' || result.media_type === 'tv') {
-                    return {
-                        id: result.id,
-                        name: result.title || result.name,
-                        media_type: result.media_type
-                    };
-                }
-            }
-        }
-    } catch (error) {
-        console.error("TMDB Title Search Error:", error.message);
-    }
-    return null;
-};
-
-/**
- * Searches for a TMDB ID using the external IMDb ID.
- */
-const _search_imdb_id = async (imdb_id) => {
-    const endpoint = `${BASE_URL}find/${imdb_id}`;
-    try {
-        const response = await axios.get(endpoint, {
-            params: { 
-                api_key: TMDB_API_KEY, 
-                external_source: 'imdb_id' 
-            }
-        });
-        
-        // Prioritize movie results, then fall back to TV results
-        const results = response.data.movie_results.length > 0 
-                      ? response.data.movie_results 
-                      : response.data.tv_results;
-        
-        if (results.length > 0) {
-            const top_result = results[0];
-            const media_type = response.data.movie_results.length > 0 ? 'movie' : 'tv';
-
-            return {
-                id: top_result.id,
-                name: top_result.title || top_result.name,
-                media_type: media_type
-            };
-        }
-    } catch (error) {
-        console.error("TMDB IMDb Search Error:", error.message);
-    }
-    return null;
-};
-
-/**
- * Fetches the full details, credits, external IDs, videos, and **content ratings**.
- * * ⭐️ UPDATED: Added 'release_dates' and 'content_ratings' to the request.
- */
-const _get_full_details = async (tmdb_id, media_type) => {
-    const endpoint = `${BASE_URL}${media_type}/${tmdb_id}`;
-    try {
-        const response = await axios.get(endpoint, {
-            params: { 
-                api_key: TMDB_API_KEY, 
-                // CRITICAL ADDITION: Fetch ratings data for both movies and TV
-                append_to_response: 'credits,external_ids,videos,release_dates,content_ratings' 
-            } 
-        });
-        return response.data;
-    } catch (error) {
-        console.error("TMDB Get Details Error:", error.message);
-    }
-    return null;
-};
-
-/**
- * Helper function to extract the content certification string (e.g., 'U/A', 'PG-13').
- * Prioritizes India (IN) and falls back to the United States (US).
- */
-const _get_certification = (details, media_type) => {
-    // Prioritize Indian certification ('IN'), then US as a reliable international fallback
-    const targetCountries = ['IN', 'US']; 
-    
-    // --- Movie Logic (uses 'release_dates') ---
-    if (media_type === 'movie' && details.release_dates) {
-        for (const countryCode of targetCountries) {
-            const country_data = details.release_dates.results.find(
-                (r) => r.iso_3166_1 === countryCode
-            );
-
-            if (country_data && country_data.release_dates.length > 0) {
-                // Find the first certification, ignoring empty strings
-                const release_with_cert = country_data.release_dates.find(
-                    (r) => r.certification
-                );
-                if (release_with_cert) {
-                    return release_with_cert.certification;
-                }
-            }
-        }
-    } 
-    // --- TV Logic (uses 'content_ratings') ---
-    else if (media_type === 'tv' && details.content_ratings) {
-        for (const countryCode of targetCountries) {
-            const country_data = details.content_ratings.results.find(
-                (r) => r.iso_3166_1 === countryCode
-            );
-            
-            if (country_data && country_data.rating) {
-                return country_data.rating;
-            }
-        }
-    }
-    
-    return null; // Return null if no certification is found
-};
-
-
-// --------------------------------------------------------------------------------------
-// -------------------- TMDB Movie Details Endpoint (GET) --------------------
-// --------------------------------------------------------------------------------------
-
-// Access via: GET /api/tmdb-details?title=... or ?imdbId=...
-// ... existing helper functions (_search_title_id, _search_imdb_id, _get_full_details, etc.)
-
-// Access via: GET /api/tmdb-details?title=... or ?imdbId=...
-router.get('/tmdb-details', async (req, res) => {
-    const { title, imdb_id, imdbId } = req.query;
-    const final_imdb_id = imdb_id || imdbId;
-
-    if (!title && !final_imdb_id) {
-        return res.status(400).json({
-            success: false,
-            message: 'Must provide either a movie title or an IMDb ID.'
-        });
-    }
-
-    let top_result = null;
-
-    if (final_imdb_id) {
-        top_result = await _search_imdb_id(final_imdb_id);
-    } else if (title) {
-        top_result = await _search_title_id(title);
-    }
-
-    if (!top_result) {
-        const search_param = final_imdb_id ? `IMDb ID: '${final_imdb_id}'` : `title: '${title}'`;
-        return res.status(404).json({
-            success: false,
-            error_type: "TitleNotFound",
-            message: `Failed to find a movie or TV show matching the ${search_param}.`
-        });
-    }
-
-    const { id: tmdb_id, media_type } = top_result;
-    const details = await _get_full_details(tmdb_id, media_type);
-
-    if (!details) {
-        return res.status(500).json({
-            success: false,
-            error_type: "DetailsFetchFailed",
-            message: `Failed to fetch details for TMDB ID ${tmdb_id}.`
-        });
-    }
-
-    // --- NEW: TV Episode Fetching Logic ---
-    let episodes_list = [];
-    if (media_type === 'tv' && details.seasons) {
-        // We fetch details for each season to get episode names and numbers
-        // Using Promise.all for speed
-        const seasonPromises = details.seasons.map(s => 
-            _get_season_details(tmdb_id, s.season_number)
-        );
-        
-        const seasonsData = await Promise.all(seasonPromises);
-        
-        seasonsData.forEach(season => {
-            if (season && season.episodes) {
-                season.episodes.forEach(ep => {
-                    episodes_list.push({
-                        season: ep.season_number,
-                        episode: ep.episode_number,
-                        title: ep.name,
-                        overview: ep.overview,
-                        air_date: ep.air_date,
-                        still_path: ep.still_path ? `${IMAGE_BASE_URL}${ep.still_path}` : null
-                    });
-                });
-            }
-        });
-    }
-
-    // --- Correct Runtime Logic ---
-    let runtime = 0;
-    if (media_type === 'movie') {
-        runtime = details.runtime || 0;
-    } else if (media_type === 'tv') {
-        runtime = (details.episode_run_time && details.episode_run_time.length > 0)
-            ? details.episode_run_time[0]
-            : 0;
-    }
-
-    // --- Dynamic Release Date Logic ---
-    let real_theatrical_date = null;
-    if (media_type === 'movie' && details.release_dates) {
-        const results = details.release_dates.results || [];
-        const preferred_regions = ['IN', 'US', 'GB'];
-        let found_date = null;
-
-        const sorted_results = results.sort((a, b) => {
-            const indexA = preferred_regions.indexOf(a.iso_3166_1);
-            const indexB = preferred_regions.indexOf(b.iso_3166_1);
-            return (indexA === -1 ? 99 : indexA) - (indexB === -1 ? 99 : indexB);
-        });
-
-        for (const region of sorted_results) {
-            const theatrical = region.release_dates.find(rd => rd.type === 3 || rd.type === 2);
-            if (theatrical) {
-                found_date = theatrical.release_date;
-                break;
-            }
-        }
-        real_theatrical_date = found_date || details.release_date;
-    } else {
-        real_theatrical_date = details.release_date || details.first_air_date;
-    }
-
-    // --- Trailer Extraction Refined ---
-    let trailer_url = null;
-    let trailer_key = null;
-    const videos = details.videos?.results || [];
-    const trailer = videos.find(v => v.site === 'YouTube' && v.type === 'Trailer') ||
-                    videos.find(v => v.site === 'YouTube' && v.type === 'Teaser');
-    if (trailer) {
-        trailer_key = trailer.key;
-        trailer_url = `https://www.youtube.com/watch?v=${trailer.key}`;
-    }
-
-    // --- Cast Extraction ---
-    const cast_list = (details.credits?.cast || []).slice(0, 10).map(member => ({
-        name: member.name,
-        character: member.character,
-        profile_url: member.profile_path ? `${IMAGE_BASE_URL}${member.profile_path}` : null
-    }));
-
-    const logo = details.images?.logos?.find(l => l.iso_639_1 === 'en') || details.images?.logos?.[0];
-    const title_logo = logo ? `${IMAGE_BASE_URL}${logo.file_path}` : null;
-
-    const slug = (details.title || details.name)
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '-')
-        .replace(/(^-|-$)/g, '');
-
-    const final_result = {
-        tmdb_id: details.id,
-        title: details.title || details.name,
-        slug: slug,
-        content_type: media_type,
-        description: details.overview || 'Description not available.',
-        year: real_theatrical_date ? real_theatrical_date.substring(0, 4) : null,
-        release_date: real_theatrical_date,
-        runtime: runtime,
-        poster_url: details.poster_path ? `${IMAGE_BASE_URL}${details.poster_path}` : null,
-        cover_poster_url: details.backdrop_path ? `${BACKDROP_BASE_URL}${details.backdrop_path}` : null,
-        title_logo: title_logo,
-        original_language: details.original_language,
-        imdb_rating: details.vote_average ? details.vote_average.toFixed(1) : "0.0",
-        vote_count: details.vote_count || 0,
-        cast: cast_list,
-        genres: (details.genres || []).map(g => g.name),
-        imdb_id: details.external_ids?.imdb_id || details.imdb_id || null,
-        trailer_url: trailer_url,
-        trailer_key: trailer_key,
-        certification: _get_certification(details, media_type),
-        // 🚀 ADDED EPISODES HERE
-        episodes: episodes_list 
-    };
-
-    res.json({ success: true, data: final_result });
-});
-
-/**
- * Helper function to fetch Season Data
- * You need to implement this based on your API structure
- */
-async function _get_season_details(tmdb_id, season_number) {
-    try {
-        const response = await axios.get(`https://api.themoviedb.org/3/tv/${tmdb_id}/season/${season_number}?api_key=${TMDB_API_KEY}`);
-        return response.data;
+      return await axios(config);
     } catch (err) {
-        return null;
+      const isRetryable =
+        err.code === "ECONNRESET" ||
+        err.code === "ECONNABORTED" ||
+        err.code === "ETIMEDOUT" ||
+        err.code === "ENOTFOUND" ||
+        err.code === "EAI_AGAIN" ||
+        (err.response?.status >= 500 && err.response?.status < 600) ||
+        err.response?.status === 429;
+
+      if (!isRetryable || i === retries - 1) throw err;
+
+      const wait = delay * Math.pow(2, i); // 500ms, 1000ms, 2000ms
+      console.warn(`[TMDB Retry ${i + 1}/${retries}] ${err.code || err.response?.status} — retrying in ${wait}ms`);
+      await new Promise(r => setTimeout(r, wait));
     }
+  }
+};
+
+// Genre ID → Name maps (so list endpoints return strings not raw IDs)
+const MOVIE_GENRE_MAP = {
+  28:"Action",12:"Adventure",16:"Animation",35:"Comedy",80:"Crime",
+  99:"Documentary",18:"Drama",10751:"Family",14:"Fantasy",36:"History",
+  27:"Horror",10402:"Music",9648:"Mystery",10749:"Romance",
+  878:"Science Fiction",10770:"TV Movie",53:"Thriller",10752:"War",37:"Western"
+};
+const TV_GENRE_MAP = {
+  10759:"Action & Adventure",16:"Animation",35:"Comedy",80:"Crime",
+  99:"Documentary",18:"Drama",10751:"Family",10762:"Kids",
+  9648:"Mystery",10763:"News",10764:"Reality",10765:"Sci-Fi & Fantasy",
+  10766:"Soap",10767:"Talk",10768:"War & Politics",37:"Western"
+};
+
+const LANG_DISPLAY = {
+  ta:"Tamil",te:"Telugu",ml:"Malayalam",kn:"Kannada",hi:"Hindi",en:"English"
+};
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+const _search_title_id = async (title) => {
+  try {
+    const r = await axiosWithRetry({ method:"get", url:`${BASE_URL}search/multi`, params:{ api_key:TMDB_API_KEY, query:title } });
+    for (const result of r.data?.results || []) {
+      if (result.media_type==='movie'||result.media_type==='tv')
+        return { id:result.id, name:result.title||result.name, media_type:result.media_type };
+    }
+  } catch(e){ console.error("TMDB Title Search:",e.message); }
+  return null;
+};
+
+const _search_imdb_id = async (imdb_id) => {
+  try {
+    const r = await axiosWithRetry({ method:"get", url:`${BASE_URL}find/${imdb_id}`, params:{ api_key:TMDB_API_KEY, external_source:'imdb_id' } });
+    const results = r.data.movie_results.length>0 ? r.data.movie_results : r.data.tv_results;
+    if(results.length>0){
+      const media_type = r.data.movie_results.length>0 ? 'movie' : 'tv';
+      return { id:results[0].id, name:results[0].title||results[0].name, media_type };
+    }
+  } catch(e){ console.error("TMDB IMDb Search:",e.message); }
+  return null;
+};
+
+const _get_full_details = async (tmdb_id, media_type) => {
+  try {
+    const r = await axiosWithRetry({ method:"get", url:`${BASE_URL}${media_type}/${tmdb_id}`,
+      params:{ api_key:TMDB_API_KEY, append_to_response:'credits,external_ids,videos,release_dates,content_ratings,images', include_image_language:'en,null' }
+    });
+    return r.data;
+  } catch(e){ console.error("TMDB Details:",e.message); }
+  return null;
+};
+
+const _get_certification = (details, media_type) => {
+  const targets = ['IN','US'];
+  if(media_type==='movie' && details.release_dates){
+    for(const cc of targets){
+      const cd = details.release_dates.results?.find(r=>r.iso_3166_1===cc);
+      if(cd){ const rwc = cd.release_dates.find(r=>r.certification); if(rwc) return rwc.certification; }
+    }
+  } else if(media_type==='tv' && details.content_ratings){
+    for(const cc of targets){
+      const cd = details.content_ratings.results?.find(r=>r.iso_3166_1===cc);
+      if(cd?.rating) return cd.rating;
+    }
+  }
+  return null;
+};
+
+async function _get_season_details(tmdb_id, season_number){
+  try {
+    const r = await axiosWithRetry({ method:"get", url:`${BASE_URL}tv/${tmdb_id}/season/${season_number}`, params:{ api_key:TMDB_API_KEY } });
+    return r.data;
+  } catch(e){ return null; }
 }
-// --------------------------------------------------------------------------------------
-// -------------------- CastHQ DIRECT LINK Extractor Endpoint (STREAMER) --------------------
-// --------------------------------------------------------------------------------------
 
-/**
- * This endpoint acts as a **content streamer** to bypass anti-hotlinking.
- */
-router.get('/casthq/direct-link', async (req, res) => {
-    
-    const API_KEY = req.query.key || DEFAULT_CASTHQ_KEY; 
-    const FILE_CODE = req.query.file_code; 
-    
-    const QUALITY = req.query.q || ''; 
-    const HLS = req.query.hls || 1; 
+// Fetch logo + trailer for one item
+const _get_logo_and_trailer = async (tmdb_id, media_type) => {
+  try {
+    const [imgR, vidR] = await Promise.all([
+      axiosWithRetry({ method:"get", url:`${BASE_URL}${media_type}/${tmdb_id}/images`, params:{ api_key:TMDB_API_KEY, include_image_language:'en,null' } }),
+      axiosWithRetry({ method:"get", url:`${BASE_URL}${media_type}/${tmdb_id}/videos`, params:{ api_key:TMDB_API_KEY } })
+    ]);
+    // Set default timeout for all axios calls (10 seconds)
+   axios.defaults.timeout = 10000;
+    const logos = imgR.data?.logos || [];
+    const logo  = logos.find(l=>l.iso_639_1==='en') || logos[0];
+    const title_logo = logo ? `${LOGO_BASE_URL}${logo.file_path}` : null;
+    const videos = vidR.data?.results || [];
+    const trailer = videos.find(v=>v.site==='YouTube'&&v.type==='Trailer') || videos.find(v=>v.site==='YouTube'&&v.type==='Teaser');
+    return { title_logo, trailer_key: trailer?.key || null };
+  } catch(_){ return { title_logo:null, trailer_key:null }; }
+};
 
-    if (!FILE_CODE) {
-        return res.status(400).json({ 
-            success: false, 
-            message: '❌ Missing required parameter: file_code' 
+// Turn raw TMDB list item into unified shape with genre NAMES (not IDs)
+const _normalise_list_item = (item, media_type, enrichment={}) => {
+  const title = item.title||item.name||'';
+  const slug  = title.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/(^-|-$)/g,'');
+  const genreMap = media_type==='tv' ? TV_GENRE_MAP : MOVIE_GENRE_MAP;
+  const genres   = (item.genre_ids||[]).map(id=>genreMap[id]).filter(Boolean);
+  const langCode = item.original_language||'en';
+  return {
+    id: item.id, tmdb_id: item.id, title, slug,
+    content_type:     media_type,
+    description:      item.overview||'',
+    year:             (item.release_date||item.first_air_date||'').substring(0,4)||null,
+    release_date:     item.release_date||item.first_air_date||null,
+    poster_path:      item.poster_path||null,
+    backdrop_path:    item.backdrop_path||null,
+    poster_url:       item.poster_path  ? `${IMAGE_BASE_URL}${item.poster_path}`    : null,
+    cover_poster_url: item.backdrop_path? `${BACKDROP_BASE_URL}${item.backdrop_path}`: null,
+    imdb_rating:      item.vote_average ? Number(item.vote_average).toFixed(1)       : '0.0',
+    vote_count:       item.vote_count||0,
+    original_language: langCode,
+    language_display:  LANG_DISPLAY[langCode]||langCode.toUpperCase(),
+    genres,                          // ← actual genre name strings
+    trailer_key: enrichment.trailer_key||null,
+    title_logo:  enrichment.title_logo||null,
+  };
+};
+
+// Enrich a batch (logos + trailers) with controlled concurrency
+const _enrich_batch = async (items, concurrency=6) => {
+  const results = [...items];
+  for(let i=0; i<results.length; i+=concurrency){
+    const chunk = results.slice(i, i+concurrency);
+    const enrichments = await Promise.all(
+      chunk.map(item=>_get_logo_and_trailer(item.tmdb_id, item.content_type))
+    );
+    enrichments.forEach((e,j)=>{ results[i+j]={...results[i+j],...e}; });
+  }
+  return results;
+};
+
+// ── /tmdb-details ─────────────────────────────────────────────────────────────
+
+router.get('/tmdb-details', async (req, res) => {
+  const { title, imdb_id, imdbId, tmdbId, contentType } = req.query;
+  const final_imdb_id = imdb_id || imdbId;
+
+  let top_result = null;
+
+  if (tmdbId) {
+    // Direct TMDB ID — skip search entirely, fastest path
+    const media_type = contentType === "tv" ? "tv" : contentType === "movie" ? "movie" : "movie";
+    top_result = { id: Number(tmdbId), name: "", media_type };
+  } else if (final_imdb_id) {
+    top_result = await _search_imdb_id(final_imdb_id);
+  } else if (title) {
+    top_result = await _search_title_id(title);
+  } else {
+    return res.status(400).json({ success: false, message: "Must provide tmdbId, imdbId, or title." });
+  }
+
+  if (!top_result) return res.status(404).json({ success: false, error_type: "TitleNotFound", message: "No match found." });
+
+  let { id: tmdb_id, media_type } = top_result;
+
+  // ── Fetch full details ──
+  let details = await _get_full_details(tmdb_id, media_type);
+
+  // If we guessed "movie" from tmdbId but it's actually a TV show, retry as tv
+  if (details && tmdbId && !contentType && (details.first_air_date || details.number_of_seasons != null)) {
+    media_type = "tv";
+    details = await _get_full_details(tmdb_id, "tv");
+  }
+  // If movie fetch returned nothing, try tv
+  if (!details && tmdbId && media_type === "movie") {
+    media_type = "tv";
+    details = await _get_full_details(tmdb_id, "tv");
+  }
+
+  if (!details) return res.status(500).json({ success: false, error_type: "DetailsFetchFailed", message: "Failed to fetch details." });
+
+  // ── Episodes for TV ──
+  let episodes_list = [];
+  if (media_type === 'tv' && details.seasons) {
+    const validSeasons = details.seasons.filter(s => s.season_number > 0); // skip season 0 (specials)
+    const seasonsData = await Promise.all(
+      validSeasons.map(s => _get_season_details(tmdb_id, s.season_number))
+    );
+    seasonsData.forEach(season => {
+      if (season?.episodes) season.episodes.forEach(ep => {
+        episodes_list.push({
+          season:      ep.season_number,
+          episode:     ep.episode_number,
+          title:       ep.name || `Episode ${ep.episode_number}`,
+          overview:    ep.overview || "",
+          air_date:    ep.air_date || null,
+          still_path:  ep.still_path ? `${IMAGE_BASE_URL}${ep.still_path}` : null,
         });
+      });
+    });
+  }
+
+  const runtime = media_type === 'movie' ? (details.runtime || 0) : (details.episode_run_time?.[0] || 0);
+
+  // ── Theatrical release date ──
+  let real_theatrical_date = null;
+  if (media_type === 'movie' && details.release_dates) {
+    const preferred = ['IN', 'US', 'GB'];
+    const sorted = (details.release_dates.results || []).sort((a, b) => {
+      return (preferred.indexOf(a.iso_3166_1) === -1 ? 99 : preferred.indexOf(a.iso_3166_1))
+           - (preferred.indexOf(b.iso_3166_1) === -1 ? 99 : preferred.indexOf(b.iso_3166_1));
+    });
+    for (const region of sorted) {
+      const t = region.release_dates.find(rd => rd.type === 3 || rd.type === 2);
+      if (t) { real_theatrical_date = t.release_date; break; }
     }
+    real_theatrical_date = real_theatrical_date || details.release_date;
+  } else {
+    real_theatrical_date = details.release_date || details.first_air_date;
+  }
 
-    let hlsUrl = null;
+  // ── Trailer ──
+  const videos = details.videos?.results || [];
+  const trailer = videos.find(v => v.site === 'YouTube' && v.type === 'Trailer')
+               || videos.find(v => v.site === 'YouTube' && v.type === 'Teaser');
+  const trailer_key = trailer?.key || null;
+  const trailer_url = trailer_key ? `${YOUTUBE_WATCH_BASE}${trailer_key}` : null;
 
-    try {
-        // 1. First, call the CastHQ API to get the final HLS URL
-        const apiUrl = `${CASTHQ_API_BASE}/file/direct_link?key=${API_KEY}&file_code=${FILE_CODE}&q=${QUALITY}&hls=${HLS}`;
+  // ── Cast ──
+  const cast_list = (details.credits?.cast || []).slice(0, 10).map(m => ({
+    name: m.name, character: m.character, profile_path: m.profile_path || null,
+    profile_url: m.profile_path ? `${IMAGE_BASE_URL}${m.profile_path}` : null,
+  }));
 
-        const apiResponse = await axios.get(apiUrl);
-        const apiData = apiResponse.data;
+  // ── Logo ──
+  const logos = details.images?.logos || [];
+  const logo  = logos.find(l => l.iso_639_1 === 'en') || logos[0];
+  const title_logo = logo ? `${LOGO_BASE_URL}${logo.file_path}` : null;
 
-        if (apiData.status !== 200 || !apiData.result || !apiData.result.hls_direct) {
-            console.error('External CastHQ API Error:', apiData.msg || 'No direct HLS URL found.');
-            
-            return res.status(apiData.status || 502).json({ 
-                success: false,
-                error: 'Failed to retrieve HLS link from CastHQ provider.',
-                details: apiData.msg 
-            });
-        }
-        
-        hlsUrl = apiData.result.hls_direct;
+  const slug = (details.title || details.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 
-    } catch (error) {
-        console.error('Network or Request Error fetching CastHQ link:', error.message);
-        const statusCode = error.response ? error.response.status : 500;
-        
-        return res.status(statusCode).json({ 
-            success: false, 
-            error: `Request failed with status code ${statusCode}. Please check the file_code or API key.`,
-            details: error.message 
-        });
+  res.json({
+    success: true,
+    data: {
+      tmdb_id:          details.id,
+      title:            details.title || details.name,
+      slug,
+      content_type:     media_type,
+      description:      details.overview || 'Description not available.',
+      year:             real_theatrical_date ? real_theatrical_date.substring(0, 4) : null,
+      release_date:     real_theatrical_date,
+      runtime,
+      number_of_seasons: details.number_of_seasons || null,
+      poster_url:       details.poster_path  ? `${IMAGE_BASE_URL}${details.poster_path}`    : null,
+      cover_poster_url: details.backdrop_path? `${BACKDROP_BASE_URL}${details.backdrop_path}`: null,
+      title_logo,
+      original_language: details.original_language,
+      imdb_rating:      details.vote_average ? details.vote_average.toFixed(1) : "0.0",
+      vote_count:       details.vote_count || 0,
+      cast:             cast_list,
+      genres:           (details.genres || []).map(g => g.name),
+      imdb_id:          details.external_ids?.imdb_id || details.imdb_id || null,
+      trailer_url,
+      trailer_key,
+      certification:    _get_certification(details, media_type),
+      episodes:         episodes_list,
     }
-
-
-    // 2. Stream the HLS manifest content directly to the client
-    try {
-        const streamResponse = await axios({
-            method: 'get',
-            url: hlsUrl,
-            responseType: 'stream', 
-            headers: {
-                // Must explicitly provide 'Host' header when streaming external content
-                'Host': new URL(hlsUrl).host,
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-        });
-
-        // 3. Set necessary headers for the client
-        res.setHeader('Content-Type', 'application/vnd.apple.mpegurl'); 
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        
-        // 4. Pipe the external stream directly into the Express response stream
-        streamResponse.data.pipe(res);
-        
-        streamResponse.data.on('error', (err) => {
-             console.error(`Error piping stream for ${FILE_CODE}:`, err.message);
-             if (!res.headersSent) {
-                 res.status(502).json({ success: false, message: 'Stream data transfer failed.' });
-             } else {
-                 res.end(); 
-             }
-        });
-
-    } catch (error) {
-        console.error(`Error streaming content for ${FILE_CODE}:`, error.message);
-        
-        const statusCode = error.response ? error.response.status : 502;
-        
-        if (!res.headersSent) {
-             return res.status(statusCode).json({ 
-                success: false, 
-                message: 'Failed to initiate content stream from video host.',
-                details: error.message
-            });
-        }
-    }
+  });
 });
 
+// ── /tmdb-episodes ────────────────────────────────────────────────────────────
+// GET /api/tmdb-episodes?tmdbId=12345
+// GET /api/tmdb-episodes?imdbId=tt1234567
+// Fetches all episodes for a TV series directly from TMDB season API
 
-// --------------------------------------------------------------------------------------
-// -------------------- CastHQ FILE LIST Endpoint (GET) --------------------
-// --------------------------------------------------------------------------------------
+router.get('/tmdb-episodes', async (req, res) => {
+  const { tmdbId, imdbId } = req.query;
+  if (!tmdbId && !imdbId) return res.status(400).json({ success: false, message: "Must provide tmdbId or imdbId." });
+
+  try {
+    let final_tmdb_id = tmdbId ? Number(tmdbId) : null;
+
+    // If only imdbId provided, resolve to tmdb_id first
+    if (!final_tmdb_id && imdbId) {
+      const found = await _search_imdb_id(imdbId);
+      if (!found || found.media_type !== 'tv') {
+        return res.status(404).json({ success: false, message: "TV series not found for this IMDb ID." });
+      }
+      final_tmdb_id = found.id;
+    }
+
+    // Fetch show-level details to get season count
+    const showDetails = await axiosWithRetry({ method:"get", url:`${BASE_URL}tv/${final_tmdb_id}`, params:{ api_key: TMDB_API_KEY } });
+    const seasons = (showDetails.data?.seasons || []).filter(s => s.season_number > 0);
+
+    if (seasons.length === 0) {
+      return res.json({ success: true, episodes: [], total_seasons: 0 });
+    }
+
+    // Fetch all seasons in parallel
+    const seasonsData = await Promise.all(
+      seasons.map(s => _get_season_details(final_tmdb_id, s.season_number))
+    );
+
+    const episodes = [];
+    seasonsData.forEach(season => {
+      if (!season?.episodes) return;
+      season.episodes.forEach(ep => {
+        episodes.push({
+          season:                ep.season_number,
+          season_number:         ep.season_number,
+          episode:               ep.episode_number,
+          episodeNumberInSeason: ep.episode_number,
+          title:                 ep.name || `Episode ${ep.episode_number}`,
+          name:                  ep.name || `Episode ${ep.episode_number}`,
+          overview:              ep.overview || "",
+          description:           ep.overview || "",
+          air_date:              ep.air_date || null,
+          still_path:            ep.still_path || null,
+          thumbnail:             ep.still_path ? `${IMAGE_BASE_URL}${ep.still_path}` : null,
+          runtime:               ep.runtime || null,
+        });
+      });
+    });
+
+    res.json({
+      success:       true,
+      tmdb_id:       final_tmdb_id,
+      total_seasons: seasons.length,
+      total_episodes: episodes.length,
+      episodes,
+    });
+  } catch (e) {
+    console.error('TMDB Episodes:', e.message);
+    res.status(500).json({ success: false, message: "Failed to fetch episodes.", details: e.message });
+  }
+});
+
+// ── /tmdb-trending ────────────────────────────────────────────────────────────
+// GET /api/tmdb-trending?time_window=week&page=1
+
+router.get('/tmdb-trending', async (req, res) => {
+  const time_window = req.query.time_window||'week';
+  const page = req.query.page||1;
+  try {
+    const r = await axios.get(`${BASE_URL}trending/all/${time_window}`, { params:{ api_key:TMDB_API_KEY, page } });
+    const items    = (r.data.results||[]).map(item=>_normalise_list_item(item, item.media_type||'movie'));
+    const enriched = await _enrich_batch(items, 6);
+    res.json({ success:true, page:r.data.page, total_pages:r.data.total_pages, results:enriched });
+  } catch(e){
+    console.error('TMDB Trending:',e.message);
+    res.status(500).json({ success:false, message:'Failed to fetch trending.', details:e.message });
+  }
+});
+
+// ── /tmdb-popular ─────────────────────────────────────────────────────────────
+// GET /api/tmdb-popular?page=1&region=IN
+
+router.get('/tmdb-popular', async (req, res) => {
+  const page=req.query.page||1, region=req.query.region||'';
+  try {
+    const r = await axios.get(`${BASE_URL}movie/popular`, { params:{ api_key:TMDB_API_KEY, page, region:region||undefined } });
+    const items    = (r.data.results||[]).map(item=>_normalise_list_item(item,'movie'));
+    const enriched = await _enrich_batch(items, 6);
+    res.json({ success:true, page:r.data.page, total_pages:r.data.total_pages, results:enriched });
+  } catch(e){
+    console.error('TMDB Popular Movies:',e.message);
+    res.status(500).json({ success:false, message:'Failed to fetch popular movies.', details:e.message });
+  }
+});
+
+// ── /tmdb-popular-tv ──────────────────────────────────────────────────────────
+// GET /api/tmdb-popular-tv?page=1
+
+router.get('/tmdb-popular-tv', async (req, res) => {
+  const page=req.query.page||1;
+  try {
+    const r = await axios.get(`${BASE_URL}tv/popular`, { params:{ api_key:TMDB_API_KEY, page } });
+    const items    = (r.data.results||[]).map(item=>_normalise_list_item(item,'tv'));
+    const enriched = await _enrich_batch(items, 6);
+    res.json({ success:true, page:r.data.page, total_pages:r.data.total_pages, results:enriched });
+  } catch(e){
+    console.error('TMDB Popular TV:',e.message);
+    res.status(500).json({ success:false, message:'Failed to fetch popular TV.', details:e.message });
+  }
+});
+
+// ── /tmdb-regional ────────────────────────────────────────────────────────────
+// GET /api/tmdb-regional?lang=ta&type=movie&page=1
+//   lang: ta | te | ml | kn | hi | en   (ISO 639-1)
+//   type: movie | tv
+
+router.get('/tmdb-regional', async (req, res) => {
+  const lang    = req.query.lang    || 'ta';
+  const type    = req.query.type    || 'movie';
+  const page    = req.query.page    || 1;
+  const sort_by = req.query.sort_by || 'popularity.desc';
+  try {
+    const r = await axios.get(`${BASE_URL}discover/${type}`, {
+      params:{ api_key:TMDB_API_KEY, with_original_language:lang, sort_by, page, include_adult:false, 'vote_count.gte':50 }
+    });
+    const items    = (r.data.results||[]).map(item=>_normalise_list_item(item, type));
+    const enriched = await _enrich_batch(items, 6);
+    res.json({ success:true, language:lang, language_name:LANG_DISPLAY[lang]||lang, content_type:type, page:r.data.page, total_pages:r.data.total_pages, total_results:r.data.total_results, results:enriched });
+  } catch(e){
+    console.error(`TMDB Regional [${lang}/${type}]:`,e.message);
+    res.status(500).json({ success:false, message:`Failed to fetch ${lang} ${type}.`, details:e.message });
+  }
+});
+
+// ── /tmdb-enrich (POST) ───────────────────────────────────────────────────────
+// Body: [{ tmdb_id, content_type }, ...]  → [{ tmdb_id, title_logo, trailer_key }]
+
+router.post('/tmdb-enrich', async (req, res) => {
+  const items = req.body;
+  if(!Array.isArray(items)||items.length===0) return res.status(400).json({ success:false, message:'Body must be non-empty array.' });
+  try {
+    const enrichments = await Promise.all(
+      items.map(({tmdb_id,content_type})=>_get_logo_and_trailer(tmdb_id,content_type||'movie').then(e=>({tmdb_id,...e})))
+    );
+    res.json({ success:true, results:enrichments });
+  } catch(e){ res.status(500).json({ success:false, details:e.message }); }
+});
+
+// ── CastHQ ────────────────────────────────────────────────────────────────────
+
+router.get('/casthq/direct-link', async (req, res) => {
+  const API_KEY=req.query.key||DEFAULT_CASTHQ_KEY, FILE_CODE=req.query.file_code, QUALITY=req.query.q||'', HLS=req.query.hls||1;
+  if(!FILE_CODE) return res.status(400).json({ success:false, message:'Missing file_code' });
+  let hlsUrl=null;
+  try {
+    const apiData=(await axios.get(`${CASTHQ_API_BASE}/file/direct_link?key=${API_KEY}&file_code=${FILE_CODE}&q=${QUALITY}&hls=${HLS}`)).data;
+    if(apiData.status!==200||!apiData.result?.hls_direct) return res.status(apiData.status||502).json({ success:false, error:'Failed to retrieve HLS link.', details:apiData.msg });
+    hlsUrl=apiData.result.hls_direct;
+  } catch(e){ return res.status(e.response?.status||500).json({ success:false, error:e.message }); }
+  try {
+    const streamResponse=await axios({ method:'get', url:hlsUrl, responseType:'stream', headers:{ 'Host':new URL(hlsUrl).host, 'User-Agent':'Mozilla/5.0' } });
+    res.setHeader('Content-Type','application/vnd.apple.mpegurl');
+    res.setHeader('Cache-Control','no-cache, no-store, must-revalidate');
+    streamResponse.data.pipe(res);
+    streamResponse.data.on('error',(err)=>{ if(!res.headersSent) res.status(502).json({ success:false }); else res.end(); });
+  } catch(e){ if(!res.headersSent) res.status(502).json({ success:false, message:e.message }); }
+});
 
 router.get('/casthq/file-list', async (req, res) => {
-    
-    const API_KEY = req.query.key || DEFAULT_CASTHQ_KEY; 
-    const page = req.query.page || 1;
-    const limit = req.query.limit || 50;
-    
-    try {
-        const apiUrl = `${CASTHQ_API_BASE}/file/list?key=${API_KEY}&page=${page}&limit=${limit}`;
-
-        const apiResponse = await axios.get(apiUrl);
-        const apiData = apiResponse.data;
-
-        if (apiData.status !== 200 || !apiData.result) {
-            console.error('External CastHQ API Error:', apiData.msg || 'Unknown API response error');
-            
-            return res.status(apiData.status || 502).json({ 
-                success: false,
-                error: 'Failed to retrieve file list from CastHQ provider.',
-                details: apiData.msg 
-            });
-        }
-
-        res.json({
-            success: true,
-            message: 'File list successfully retrieved from CastHQ.',
-            data: apiData.result
-        });
-
-    } catch (error) {
-        console.error('Network or Request Error fetching CastHQ list:', error.message);
-        
-        const statusCode = error.response ? error.response.status : 500;
-        
-        res.status(statusCode).json({ 
-            success: false, 
-            error: `Request failed with status code ${statusCode}. If the key is correct, the endpoint path might be the issue.`,
-            details: error.message 
-        });
-    }
+  const API_KEY=req.query.key||DEFAULT_CASTHQ_KEY, page=req.query.page||1, limit=req.query.limit||50;
+  try {
+    const apiData=(await axios.get(`${CASTHQ_API_BASE}/file/list?key=${API_KEY}&page=${page}&limit=${limit}`)).data;
+    if(apiData.status!==200||!apiData.result) return res.status(apiData.status||502).json({ success:false, details:apiData.msg });
+    res.json({ success:true, data:apiData.result });
+  } catch(e){ res.status(e.response?.status||500).json({ success:false, error:e.message }); }
 });
-
-// --------------------------------------------------------------------------------------
-// -------------------- CastHQ ACCOUNT INFO Endpoint (GET) --------------------
-// --------------------------------------------------------------------------------------
 
 router.get('/casthq/account-info', async (req, res) => {
-    
-    const API_KEY = req.query.key || DEFAULT_CASTHQ_KEY; 
-    
-    try {
-        const apiUrl = `${CASTHQ_API_BASE}/account/info?key=${API_KEY}`;
-
-        const apiResponse = await axios.get(apiUrl);
-        const apiData = apiResponse.data;
-
-        if (apiData.status !== 200 || !apiData.result) {
-            console.error('External CastHQ Account Info Error:', apiData.msg || 'Unknown API response error');
-            
-            return res.status(apiData.status || 502).json({ 
-                success: false,
-                error: 'Failed to retrieve account info from CastHQ provider.',
-                details: apiData.msg 
-            });
-        }
-
-        res.json({
-            success: true,
-            message: 'Account info successfully retrieved from CastHQ.',
-            data: apiData.result
-        });
-
-    } catch (error) {
-        console.error('Network or Request Error fetching CastHQ account info:', error.message);
-        
-        const statusCode = error.response ? error.response.status : 500;
-        
-        res.status(statusCode).json({ 
-            success: false, 
-            error: `Request failed with status code ${statusCode}. Key may be invalid.`,
-            details: error.message 
-        });
-    }
+  const API_KEY=req.query.key||DEFAULT_CASTHQ_KEY;
+  try {
+    const apiData=(await axios.get(`${CASTHQ_API_BASE}/account/info?key=${API_KEY}`)).data;
+    if(apiData.status!==200||!apiData.result) return res.status(apiData.status||502).json({ success:false, details:apiData.msg });
+    res.json({ success:true, data:apiData.result });
+  } catch(e){ res.status(e.response?.status||500).json({ success:false, error:e.message }); }
 });
 
+// ── Save metadata ──────────────────────────────────────────────────────────────
 
-// -------------------- Data Update Endpoint (POST) --------------------
-
-/**
- * Allows the frontend to send metadata back to the server to be saved to the JSON file.
- * Access via: POST /api/save-movie-metadata
- */
 router.post('/save-movie-metadata', async (req, res) => {
-    const incomingMovieData = req.body; 
-
-    if (!incomingMovieData || !incomingMovieData.title) {
-        return res.status(400).json({ success: false, message: 'Invalid or incomplete movie data provided.' });
-    }
-
-    try {
-        const rawData = await fs.readFile(DATA_FILE_PATH, 'utf-8');
-        let movies = JSON.parse(rawData);
-
-        const index = movies.findIndex(m => m.title === incomingMovieData.title);
-
-        if (index !== -1) {
-            movies[index] = { ...movies[index], ...incomingMovieData };
-            console.log(`Updated existing movie: ${incomingMovieData.title}`);
-        } else {
-            movies.push(incomingMovieData);
-            console.log(`Appended new movie: ${incomingMovieData.title}`);
-        }
-        
-        await fs.writeFile(DATA_FILE_PATH, JSON.stringify(movies, null, 4));
-
-        res.json({ success: true, message: 'Movie data saved successfully to file.' });
-
-    } catch (error) {
-        console.error('File System Write Error:', error); 
-        res.status(500).json({ success: false, message: 'Server failed to write data to file.' });
-    }
+  const incomingMovieData=req.body;
+  if(!incomingMovieData?.title) return res.status(400).json({ success:false, message:'Invalid data.' });
+  try {
+    let movies=JSON.parse(await fs.readFile(DATA_FILE_PATH,'utf-8'));
+    const idx=movies.findIndex(m=>m.title===incomingMovieData.title);
+    if(idx!==-1) movies[idx]={...movies[idx],...incomingMovieData}; else movies.push(incomingMovieData);
+    await fs.writeFile(DATA_FILE_PATH,JSON.stringify(movies,null,4));
+    res.json({ success:true, message:'Saved.' });
+  } catch(e){ console.error('File Write Error:',e); res.status(500).json({ success:false, message:'Write failed.' }); }
 });
-
 
 export default router;
