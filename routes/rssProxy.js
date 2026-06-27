@@ -63,37 +63,68 @@ const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
  * 403/530 for some paths. Native fetch() behaves like a real browser request
  * (HTTP/2, gzip, etc.) and passes through without issues.
  */
-async function fetchUrl(url) {
+// ─── Fetch (with automatic proxy fallback on block) ──────────────────────────
+
+const BROWSER_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
+    "AppleWebKit/537.36 (KHTML, like Gecko) " +
+    "Chrome/125.0.0.0 Safari/537.36",
+  "Accept":          "text/html,application/xhtml+xml,application/xml,application/rss+xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-IN,en;q=0.9",
+  "Cache-Control":   "no-cache",
+};
+
+// Free, no-API-key proxy mirrors. Used only when the direct request fails
+// (403/timeout) — these route through different IP ranges than Render's,
+// which is what actually gets past ESPN/Cloudflare-class IP blocking.
+function proxyVariants(url) {
+  const enc = encodeURIComponent(url);
+  return [
+    `https://api.allorigins.win/raw?url=${enc}`,
+    `https://corsproxy.io/?url=${enc}`,
+  ];
+}
+
+async function fetchDirect(url, timeoutMs = 12000) {
   const res = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-        "AppleWebKit/537.36 (KHTML, like Gecko) " +
-        "Chrome/125.0.0.0 Safari/537.36",
-      "Accept":          "application/rss+xml, application/xml, text/xml, */*",
-      "Accept-Language": "en-IN,en;q=0.9",
-      "Accept-Encoding": "gzip, deflate, br",
-      "Referer":         "https://www.google.com/",
-      "Cache-Control":   "no-cache",
-    },
-    redirect: "follow", // native fetch handles redirects automatically
-    signal: AbortSignal.timeout(12000),
+    headers: { ...BROWSER_HEADERS, Referer: "https://www.google.com/" },
+    redirect: "follow",
+    signal: AbortSignal.timeout(timeoutMs),
   });
-
-  if (!res.ok) {
-    throw new Error(`HTTP ${res.status} ${res.statusText} for ${url}`);
-  }
-
+  if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText} for ${url}`);
   return res.text();
 }
 
-function isAllowedArticleUrl(url) {
+/**
+ * Fetch a URL, transparently retrying through proxy mirrors if the direct
+ * request is blocked (403, 5xx from a WAF, or timeout). Never throws on a
+ * 403 alone — only throws if every candidate (direct + all proxies) fails.
+ */
+async function fetchUrl(url) {
+  let lastErr;
+
   try {
-    const host = new URL(url).hostname.replace(/^www\./, "");
-    return ALLOWED_ARTICLE_DOMAINS.some((d) => host === d || host.endsWith(`.${d}`));
-  } catch {
-    return false;
+    return await fetchDirect(url);
+  } catch (err) {
+    lastErr = err;
+    console.warn(`[rssProxy] Direct fetch blocked (${err.message}), trying proxies for ${url}`);
   }
+
+  for (const proxied of proxyVariants(url)) {
+    try {
+      const text = await fetchDirect(proxied, 15000);
+      // allorigins/corsproxy sometimes wrap errors as JSON instead of throwing
+      if (text.trim().startsWith('{"error"')) throw new Error("Proxy returned error payload");
+      console.log(`[rssProxy] Recovered via proxy mirror for ${url}`);
+      return text;
+    } catch (err) {
+      lastErr = err;
+      console.warn(`[rssProxy] Proxy mirror failed (${err.message}) for ${url}`);
+    }
+  }
+
+  throw lastErr;
 }
 
 // ─── Parse ───────────────────────────────────────────────────────────────────
