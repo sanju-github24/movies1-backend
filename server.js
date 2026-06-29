@@ -200,11 +200,12 @@ app.get('/api/live-stream-proxy', async (req, res) => {
             // If it's a text manifest playlist, load as text; otherwise stream the binary media chunks
             responseType: isManifest ? 'text' : 'stream',
             headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-                'Referer': 'https://www.icc-cricket.com/',
-                'Origin': 'https://www.icc-cricket.com',
-                'Range': req.headers['range'] || undefined,
-            },
+    'Referer': 'https://www.icc-cricket.com/',
+    'Origin': 'https://www.icc-cricket.com',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    'Accept': '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
+},
             timeout: 30000,
         });
 
