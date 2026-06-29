@@ -27,6 +27,7 @@ import geminiRoutes from './routes/geminiRoutes.js';
 import autofillRouter from './routes/autofill.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
+import crypto from "crypto";
 
 
 // ── NEW: FilmiBeat RSS proxy ──────────────────────────────────────────────────
@@ -179,115 +180,6 @@ app.get('/api/cleaned-movies', (req, res) => {
     res.json(cleanedMovieData);
 });
 
-// =====================================
-// 🚀 HLS LIVE STREAM PROXY
-// =====================================
-app.get('/api/live-stream-proxy', async (req, res) => {
-    const streamUrl = req.query.url;
-
-    let finalUrl = streamUrl;
-
-// If this is the unsigned ICC playlist,
-// obtain the signed URL first.
-if (
-    streamUrl.includes("vod-i-01-icc-we.akamaized.net") &&
-    streamUrl.includes("master.m3u8")
-) {
-
-    // Call the ICC entitlement API here
-    // using the VideoId from the page metadata.
-
-const response = await axios.post(
-  "https://prd-api.icc-volt.com/api/icc/play",
-  {
-    VideoId: req.query.videoId,
-    VideoSource: req.query.videoSource,
-    VideoKind: "vod",
-    VideoSourceFormat: "HLS"
-  }
-);
-
-finalUrl =
-  response.data.ContentUrl ||
-  response.data.contentUrl ||
-  response.data.url;
-}
-
-    if (!streamUrl) {
-        return res.status(400).send('❌ Missing stream URL query parameter.');
-    }
-
-    console.log(`Proxying stream chunk/manifest: ${streamUrl}`);
-
-    try {
-        const isManifest = streamUrl.includes('.m3u8');
-
-        const response = await axios({
-            method: 'GET',
-            url: finalUrl,
-            // If it's a text manifest playlist, load as text; otherwise stream the binary media chunks
-            responseType: isManifest ? 'text' : 'stream',
-            headers: {
-    'Referer': 'https://www.icc-cricket.com/',
-    'Origin': 'https://www.icc-cricket.com',
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-    'Accept': '*/*',
-    'Accept-Language': 'en-US,en;q=0.9',
-},
-            timeout: 30000,
-        });
-
-        // Setup global CORS headers so your StreamX frontend player has open read permissions
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', '*');
-        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type');
-
-        if (response.headers['accept-ranges'])   res.setHeader('Accept-Ranges',  response.headers['accept-ranges']);
-        if (response.headers['content-range'])   res.setHeader('Content-Range',  response.headers['content-range']);
-
-        // CASE 1: Handle HLS Manifest Playlist Parsing & Segment Re-writing
-        if (isManifest) {
-            res.setHeader('Content-Type', 'application/x-mpegURL');
-            let manifestContent = response.data;
-
-            const baseUrl = streamUrl.substring(0, streamUrl.lastIndexOf('/') + 1);
-            // Reconstruct absolute proxy URL path dynamically targeting this exact server route
-            const myProxyHost = `${req.protocol}://${req.get('host')}/api/live-stream-proxy?url=`;
-
-            manifestContent = manifestContent.split('\n').map(line => {
-                if (line.trim() && !line.startsWith('#')) {
-                    // Turn relative playlist paths into absolute CDN target URLs
-                    const absoluteSegmentUrl = line.startsWith('http') ? line : new URL(line, baseUrl).href;
-                    // Wrap the chunk segment link back into this proxy endpoint
-                    return `${myProxyHost}${encodeURIComponent(absoluteSegmentUrl)}`;
-                }
-                return line;
-            }).join('\n');
-
-            return res.send(manifestContent);
-        }
-
-        // CASE 2: Handle Binary Video Data (.ts / .m4s media fragments)
-        if (response.headers['content-type'])   res.setHeader('Content-Type',   response.headers['content-type']);
-        if (response.headers['content-length'])  res.setHeader('Content-Length', response.headers['content-length']);
-        
-        response.data.pipe(res);
-
-        response.data.on('error', (err) => {
-            console.error('❌ Proxy streaming node pipe broken:', err.message);
-            if (!res.headersSent) res.status(500).end('Proxy streaming execution failed.');
-        });
-
-    } catch (error) {
-        const status = error.response ? error.response.status : 500;
-        console.error(`❌ Proxy connection failed for ${streamUrl}:`, error.message);
-        if (!res.headersSent) {
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.status(status).send(`Proxy connection failed: ${error.message}`);
-        }
-    }
-});
 
 // =====================================
 // ✅ FIXED ICC DASH PROXY
@@ -320,74 +212,79 @@ app.options('/api/live-stream-proxy', (req, res) => {
   res.status(204).end();
 });
 
+// server.js — single unified proxy handler
 app.get('/api/live-stream-proxy', async (req, res) => {
   const targetUrl = req.query.url;
-  if (!targetUrl) return res.status(400).json({ error: 'Missing ?url= parameter' });
+  if (!targetUrl) return res.status(400).json({ error: 'Missing ?url=' });
 
-  // Always set CORS first
   Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
 
-  const isManifest = targetUrl.includes('.mpd') || targetUrl.includes('manifest');
-  const isBinary   = !isManifest; // .m4v, .m4a, .m4i, .mp4 segments
+  const isMpd  = targetUrl.includes('.mpd') || targetUrl.includes('manifest.mpd');
+  const isM3u8 = targetUrl.includes('.m3u8');
+  const isText = isMpd || isM3u8;
 
-  console.log(`[ICC Proxy] ${isManifest ? 'MANIFEST' : 'SEGMENT'} → ${targetUrl.slice(0, 120)}`);
+  console.log(`[Proxy] ${isMpd ? 'DASH' : isM3u8 ? 'HLS' : 'SEGMENT'} → ${targetUrl.slice(0, 100)}`);
 
   try {
     const upstream = await axios({
       method: 'GET',
       url: targetUrl,
-      responseType: isManifest ? 'text' : 'stream',
+      responseType: isText ? 'text' : 'stream',
       headers: ICC_PROXY_HEADERS,
       timeout: 30000,
-      maxRedirects: 5,   // follow Akamai's hdnts→hdntl redirect automatically
+      maxRedirects: 5,
     });
 
-    if (isManifest) {
-      // ── DASH MANIFEST: rewrite all segment URLs through this proxy ──
+    const myProxy = `${req.protocol}://${req.get('host')}/api/live-stream-proxy?url=`;
+    const baseUrl  = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+
+    if (isMpd) {
       res.setHeader('Content-Type', 'application/dash+xml');
-
-      // Base URL for resolving relative paths
-      const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
-      const myProxy = `${req.protocol}://${req.get('host')}/api/live-stream-proxy?url=`;
-
+      res.setHeader('Cache-Control', 'no-store'); // important: don't cache signed manifests
       let mpd = upstream.data;
 
-      // Rewrite BaseURL tags
-      mpd = mpd.replace(/<BaseURL>(.*?)<\/BaseURL>/g, (_, url) => {
-        const abs = url.startsWith('http') ? url : new URL(url, baseUrl).href;
+      mpd = mpd.replace(/<BaseURL>(.*?)<\/BaseURL>/g, (_, u) => {
+        const abs = u.startsWith('http') ? u : new URL(u, baseUrl).href;
         return `<BaseURL>${myProxy}${encodeURIComponent(abs)}</BaseURL>`;
       });
-
-      // Rewrite initialization="..." and media="..." inside SegmentTemplate
-      mpd = mpd.replace(/(initialization|media)="([^"]+)"/g, (match, attr, path) => {
-        if (path.startsWith('http')) {
-          return `${attr}="${myProxy}${encodeURIComponent(path)}"`;
-        }
-        // relative path — resolve against base
-        const abs = new URL(path, baseUrl).href;
+      mpd = mpd.replace(/(initialization|media)="([^"]+)"/g, (_, attr, path) => {
+        const abs = path.startsWith('http') ? path : new URL(path, baseUrl).href;
         return `${attr}="${myProxy}${encodeURIComponent(abs)}"`;
       });
 
       return res.send(mpd);
     }
 
-    // ── BINARY SEGMENT: pipe through ──
+    if (isM3u8) {
+      res.setHeader('Content-Type', 'application/x-mpegURL');
+      res.setHeader('Cache-Control', 'no-store');
+      let m3u8 = upstream.data;
+
+      m3u8 = m3u8.split('\n').map(line => {
+        const t = line.trim();
+        if (!t || t.startsWith('#')) return line;
+        const abs = t.startsWith('http') ? t : new URL(t, baseUrl).href;
+        return `${myProxy}${encodeURIComponent(abs)}`;
+      }).join('\n');
+
+      return res.send(m3u8);
+    }
+
+    // Binary segment
     const ct = upstream.headers['content-type'];
-    if (ct) res.setHeader('Content-Type', ct);
     const cl = upstream.headers['content-length'];
+    if (ct) res.setHeader('Content-Type', ct);
     if (cl) res.setHeader('Content-Length', cl);
     if (upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
 
     upstream.data.pipe(res);
     upstream.data.on('error', err => {
-      console.error('[ICC Proxy] Pipe error:', err.message);
       if (!res.headersSent) res.status(500).end('Segment pipe failed');
     });
 
   } catch (err) {
     const status = err.response?.status || 500;
-    console.error(`[ICC Proxy] Error ${status} for ${targetUrl.slice(0, 80)}:`, err.message);
-    if (!res.headersSent) res.status(status).json({ error: err.message, url: targetUrl });
+    if (!res.headersSent) res.status(status).json({ error: err.message });
   }
 });
 // -------------------- Routes --------------------
