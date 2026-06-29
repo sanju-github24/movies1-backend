@@ -73,6 +73,8 @@ const allowedOrigins = [
   'http://localhost:5173',
   'https://auth-2407.netlify.app',
   'https://movies1-frontend.vercel.app',
+  'http://localhost:8080',                // 💡 Added traditional local port fallback
+  'http://[::]:8080',
   'https://1anchormovies.vercel.app',
   'https://www.1anchormovies.live',
 ];
