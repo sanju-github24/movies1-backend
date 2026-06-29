@@ -185,6 +185,33 @@ app.get('/api/cleaned-movies', (req, res) => {
 app.get('/api/live-stream-proxy', async (req, res) => {
     const streamUrl = req.query.url;
 
+    let finalUrl = streamUrl;
+
+// If this is the unsigned ICC playlist,
+// obtain the signed URL first.
+if (
+    streamUrl.includes("vod-i-01-icc-we.akamaized.net") &&
+    streamUrl.includes("master.m3u8")
+) {
+
+    // Call the ICC entitlement API here
+    // using the VideoId from the page metadata.
+
+    const entitlement = await axios.post(
+        "https://prd-api.icc-volt.com/api/entitlement/api/v2/icc/videos",
+        {
+            Type: 1,
+            VideoId: "...",
+            VideoKind: "vod",
+            PlayerType: "HTML5",
+            VideoSourceFormat: "DASH",
+            AuthType: "Open"
+        }
+    );
+
+    finalUrl = entitlement.data.ContentUrl;
+}
+
     if (!streamUrl) {
         return res.status(400).send('❌ Missing stream URL query parameter.');
     }
@@ -196,7 +223,7 @@ app.get('/api/live-stream-proxy', async (req, res) => {
 
         const response = await axios({
             method: 'GET',
-            url: streamUrl,
+            url: finalUrl,
             // If it's a text manifest playlist, load as text; otherwise stream the binary media chunks
             responseType: isManifest ? 'text' : 'stream',
             headers: {
@@ -1049,6 +1076,60 @@ app.get('/api/search-image', async (req, res) => {
     console.error("[image-search] Critical error:", err);
     return res.json({
       images: ["https://images.unsplash.com/photo-1508098682722-e99c43a406b2?q=80&w=1200&auto=format&fit=crop"]
+    });
+  }
+});
+
+// =====================================
+// ICC ENTITLEMENT API
+// =====================================
+app.post("/api/icc/play", async (req, res) => {
+  try {
+    const {
+      VideoId,
+      VideoSource,
+      VideoKind = "vod",
+      VideoSourceFormat = "DASH",
+      Type = 1
+    } = req.body;
+
+    if (!VideoId || !VideoSource) {
+      return res.status(400).json({
+        success: false,
+        error: "VideoId and VideoSource are required"
+      });
+    }
+
+    const response = await axios.post(
+      "https://prd-api.icc-volt.com/api/entitlement/api/v2/icc/videos",
+      {
+        Type,
+        VideoId,
+        VideoSource,
+        VideoKind,
+        PlayerType: "HTML5",
+        VideoSourceFormat,
+        AuthType: "Open"
+      },
+      {
+        headers: {
+          "Content-Type": "application/json",
+          Origin: "https://www.icc-cricket.com",
+          Referer: "https://www.icc-cricket.com/",
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137 Safari/537.36"
+        }
+      }
+    );
+
+    res.json(response.data);
+
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+
+    res.status(500).json({
+      success: false,
+      error: err.response?.data || err.message
     });
   }
 });
