@@ -16,7 +16,7 @@ import movieRouter from './routes/movieRoutes.js';
 import popadsRoute from './routes/popadsRoute.js';
 import { connectDBs } from './config/mongodb.js';
 import prerender from 'prerender-node';
-import up4streamRoutes from "./routes/up4streamRoutes.js";
+
 import { createClient } from "@supabase/supabase-js";
 import puppeteer from "puppeteer";
 
@@ -27,7 +27,7 @@ import geminiRoutes from './routes/geminiRoutes.js';
 import autofillRouter from './routes/autofill.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
-import streamRoute from "./routes/streamRoute.js";
+
 
 // ── NEW: FilmiBeat RSS proxy ──────────────────────────────────────────────────
 import rssProxy from './routes/rssProxy.js';
@@ -396,7 +396,6 @@ app.use('/api/auth',      authRouter);
 app.use('/api/user',      userRouter);
 app.use('/api/movies',    movieRouter);
 app.use('/api',           popadsRoute);
-app.use("/api/up4stream", up4streamRoutes);
 app.use('/api',           tmdbRouter);
 
 // -------------------- Stream URL (Signed) --------------------
@@ -1238,7 +1237,7 @@ app.post("/api/icc/play", async (req, res) => {
   }
 });
 app.use(express.static("public"));
-app.use(streamRoute);  
+
 
 // -------------------- Test route --------------------
 app.get('/', (req, res) => res.send('✅ API is live'));
