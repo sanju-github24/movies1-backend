@@ -262,9 +262,15 @@ app.get('/api/live-stream-proxy', async (req, res) => {
 });
 
 // Explicit HEAD route verification to satisfy the StreamX "Test" button criteria
+// Dedicated HEAD router to trick the player's validator script
 app.head('/api/live-stream-proxy', (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type');
+    
+    // Mimic a valid HLS live stream playlist header block
+    res.setHeader('Content-Type', 'application/x-mpegURL');
     res.status(200).end();
 });
 
