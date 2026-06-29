@@ -72,12 +72,16 @@ try {
 // -------------------- CORS --------------------
 const allowedOrigins = [
   'http://localhost:5173',
+  'http://localhost:8080',
+  'http://127.0.0.1:8080',
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://[::]:8080',
   'https://auth-2407.netlify.app',
   'https://movies1-frontend.vercel.app',
-  'http://localhost:8080',                // 💡 Added traditional local port fallback
-  'http://[::]:8080',
   'https://1anchormovies.vercel.app',
   'https://www.1anchormovies.live',
+  'https://stream.1anchormovies.live',  // add this too
 ];
 
 const corsOptions = {
@@ -214,8 +218,8 @@ app.options('/api/live-stream-proxy', (req, res) => {
 
 // server.js — single unified proxy handler
 app.get('/api/live-stream-proxy', async (req, res) => {
-  const targetUrl = req.query.url;
-  if (!targetUrl) return res.status(400).json({ error: 'Missing ?url=' });
+  const targetUrl = decodeURIComponent(req.query.url || '');
+if (!targetUrl) return res.status(400).json({ error: 'Missing ?url=' });
 
   Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
 
