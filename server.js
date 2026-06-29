@@ -197,19 +197,20 @@ if (
     // Call the ICC entitlement API here
     // using the VideoId from the page metadata.
 
-    const entitlement = await axios.post(
-        "https://prd-api.icc-volt.com/api/entitlement/api/v2/icc/videos",
-        {
-            Type: 1,
-            VideoId: "...",
-            VideoKind: "vod",
-            PlayerType: "HTML5",
-            VideoSourceFormat: "DASH",
-            AuthType: "Open"
-        }
-    );
+const response = await axios.post(
+  "https://prd-api.icc-volt.com/api/icc/play",
+  {
+    VideoId: req.query.videoId,
+    VideoSource: req.query.videoSource,
+    VideoKind: "vod",
+    VideoSourceFormat: "HLS"
+  }
+);
 
-    finalUrl = entitlement.data.ContentUrl;
+finalUrl =
+  response.data.ContentUrl ||
+  response.data.contentUrl ||
+  response.data.url;
 }
 
     if (!streamUrl) {
@@ -288,19 +289,107 @@ if (
     }
 });
 
-// Explicit HEAD route verification to satisfy the StreamX "Test" button criteria
-// Dedicated HEAD router to trick the player's validator script
+// =====================================
+// ✅ FIXED ICC DASH PROXY
+// Handles: manifest.mpd + init.m4i + Segment-*.m4v + Segment-*.m4a
+// =====================================
+const ICC_PROXY_HEADERS = {
+  'Referer': 'https://www.icc-cricket.com/',
+  'Origin': 'https://www.icc-cricket.com',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+  'Accept': '*/*',
+  'Accept-Language': 'en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7',
+};
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+  'Access-Control-Allow-Headers': '*',
+  'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type',
+};
+
+// HEAD preflight — required for Shaka/hls.js test
 app.head('/api/live-stream-proxy', (req, res) => {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', '*');
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type');
-    
-    // Mimic a valid HLS live stream playlist header block
-    res.setHeader('Content-Type', 'application/x-mpegURL');
-    res.status(200).end();
+  Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
+  res.setHeader('Content-Type', 'application/dash+xml');
+  res.status(200).end();
 });
 
+app.options('/api/live-stream-proxy', (req, res) => {
+  Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
+  res.status(204).end();
+});
+
+app.get('/api/live-stream-proxy', async (req, res) => {
+  const targetUrl = req.query.url;
+  if (!targetUrl) return res.status(400).json({ error: 'Missing ?url= parameter' });
+
+  // Always set CORS first
+  Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
+
+  const isManifest = targetUrl.includes('.mpd') || targetUrl.includes('manifest');
+  const isBinary   = !isManifest; // .m4v, .m4a, .m4i, .mp4 segments
+
+  console.log(`[ICC Proxy] ${isManifest ? 'MANIFEST' : 'SEGMENT'} → ${targetUrl.slice(0, 120)}`);
+
+  try {
+    const upstream = await axios({
+      method: 'GET',
+      url: targetUrl,
+      responseType: isManifest ? 'text' : 'stream',
+      headers: ICC_PROXY_HEADERS,
+      timeout: 30000,
+      maxRedirects: 5,   // follow Akamai's hdnts→hdntl redirect automatically
+    });
+
+    if (isManifest) {
+      // ── DASH MANIFEST: rewrite all segment URLs through this proxy ──
+      res.setHeader('Content-Type', 'application/dash+xml');
+
+      // Base URL for resolving relative paths
+      const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+      const myProxy = `${req.protocol}://${req.get('host')}/api/live-stream-proxy?url=`;
+
+      let mpd = upstream.data;
+
+      // Rewrite BaseURL tags
+      mpd = mpd.replace(/<BaseURL>(.*?)<\/BaseURL>/g, (_, url) => {
+        const abs = url.startsWith('http') ? url : new URL(url, baseUrl).href;
+        return `<BaseURL>${myProxy}${encodeURIComponent(abs)}</BaseURL>`;
+      });
+
+      // Rewrite initialization="..." and media="..." inside SegmentTemplate
+      mpd = mpd.replace(/(initialization|media)="([^"]+)"/g, (match, attr, path) => {
+        if (path.startsWith('http')) {
+          return `${attr}="${myProxy}${encodeURIComponent(path)}"`;
+        }
+        // relative path — resolve against base
+        const abs = new URL(path, baseUrl).href;
+        return `${attr}="${myProxy}${encodeURIComponent(abs)}"`;
+      });
+
+      return res.send(mpd);
+    }
+
+    // ── BINARY SEGMENT: pipe through ──
+    const ct = upstream.headers['content-type'];
+    if (ct) res.setHeader('Content-Type', ct);
+    const cl = upstream.headers['content-length'];
+    if (cl) res.setHeader('Content-Length', cl);
+    if (upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
+
+    upstream.data.pipe(res);
+    upstream.data.on('error', err => {
+      console.error('[ICC Proxy] Pipe error:', err.message);
+      if (!res.headersSent) res.status(500).end('Segment pipe failed');
+    });
+
+  } catch (err) {
+    const status = err.response?.status || 500;
+    console.error(`[ICC Proxy] Error ${status} for ${targetUrl.slice(0, 80)}:`, err.message);
+    if (!res.headersSent) res.status(status).json({ error: err.message, url: targetUrl });
+  }
+});
 // -------------------- Routes --------------------
 app.use("/api/bms",       bmsRouter);
 app.use('/api/auth',      authRouter);
@@ -1081,59 +1170,73 @@ app.get('/api/search-image', async (req, res) => {
 });
 
 // =====================================
-// ICC ENTITLEMENT API
+// ✅ FIXED ICC ENTITLEMENT API
 // =====================================
 app.post("/api/icc/play", async (req, res) => {
   try {
     const {
       VideoId,
-      VideoSource,
+      VideoSource,       // REQUIRED: the unsigned manifest.mpd URL
       VideoKind = "vod",
       VideoSourceFormat = "DASH",
-      Type = 1
+      VideoSourceName = "Desktop-DASH",
     } = req.body;
 
     if (!VideoId || !VideoSource) {
       return res.status(400).json({
         success: false,
-        error: "VideoId and VideoSource are required"
+        error: "VideoId and VideoSource (unsigned .mpd URL) are required"
       });
     }
+
+    // Generate session IDs (what the ICC player sends)
+    const sessionId = crypto.randomUUID();
+    const playbackSessionId = crypto.randomUUID().toUpperCase();
 
     const response = await axios.post(
       "https://prd-api.icc-volt.com/api/entitlement/api/v2/icc/videos",
       {
-        Type,
+        Type: 1,
         VideoId,
         VideoSource,
         VideoKind,
+        AssetState: "3",
         PlayerType: "HTML5",
         VideoSourceFormat,
-        AuthType: "Open"
+        VideoSourceName,
+        DRMType: "",
+        AuthType: "Open",
+        ContentKeyData: "",
+        SessionId: sessionId,
+        PlaybackSessionId: playbackSessionId,
+        Other: `${sessionId}|HTML5`,
+        VideoOfferType: "Free",
+        User: ""
       },
       {
         headers: {
           "Content-Type": "application/json",
-          Origin: "https://www.icc-cricket.com",
-          Referer: "https://www.icc-cricket.com/",
-          "User-Agent":
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137 Safari/537.36"
+          "Origin": "https://www.icc-cricket.com",
+          "Referer": "https://www.icc-cricket.com/",
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+          "Accept": "*/*",
+          "Accept-Language": "en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7",
         }
       }
     );
 
-    res.json(response.data);
+    // Return the signed ContentUrl directly
+    const data = response.data;
+    if (data.ResponseCode !== 1 || !data.ContentUrl) {
+      return res.status(502).json({ success: false, error: data.Message || "Entitlement failed", raw: data });
+    }
 
+    res.json({ success: true, ContentUrl: data.ContentUrl, raw: data });
   } catch (err) {
-    console.error(err.response?.data || err.message);
-
-    res.status(500).json({
-      success: false,
-      error: err.response?.data || err.message
-    });
+    console.error("ICC entitlement error:", err.response?.data || err.message);
+    res.status(500).json({ success: false, error: err.response?.data || err.message });
   }
 });
-
 app.use(express.static("public"));
 app.use(streamRoute);  
 
