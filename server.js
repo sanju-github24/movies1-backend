@@ -81,6 +81,7 @@ const allowedOrigins = [
   'https://movies1-frontend.vercel.app',
   'https://1anchormovies.vercel.app',
   'https://www.1anchormovies.live',
+  'https://www.1anchormovies.buzz'
   'https://stream.1anchormovies.live',  // add this too
 ];
 
