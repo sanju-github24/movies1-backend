@@ -92,6 +92,7 @@ const allowedOrigins = [
   'https://auth-2407.netlify.app',
   'https://movies1-frontend.vercel.app',
   'https://1anchormovies.vercel.app',
+  'https://www.1anchormovies.buzz/',
   'https://www.1anchormovies.live',
   'https://stream.1anchormovies.live',
 ];
