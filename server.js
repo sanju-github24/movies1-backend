@@ -689,11 +689,7 @@ function _parseIplMatchRow(m) {
   };
 }
 
-app.get("/api/ipl/2026/all-matches", async (req, res) => {
-  // Alias → delegate to generic endpoint
-  req.params = { year: "2026" };
-  return res.redirect(307, `/api/ipl/2026/all-matches-v2`);
-});
+
 
 // ── Generic: /api/ipl/:year/all-matches ──────────────────────────────────────
 if (!app._iplSeasonCache) app._iplSeasonCache = {};
