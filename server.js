@@ -1319,6 +1319,202 @@ app.get("/api/bcci/highlight", async (req, res) => {
 
 
 // =====================================
+// 🎵 SONGS & MUSIC SCRA-P-ER ROUTES
+// =====================================
+app.get('/api/songs/homepage', (req, res) => {
+    console.log(`🎵 Songs homepage requested`);
+    const pythonProcess = spawn('python3', ['./scrapers/index.py', '--homepage']);
+
+    let output = '';
+    let errorOutput = '';
+
+    pythonProcess.stdout.on('data', (data) => { output += data.toString(); });
+    pythonProcess.stderr.on('data', (data) => { errorOutput += data.toString(); });
+
+    pythonProcess.on('close', (code) => {
+        if (code !== 0 || !output.trim()) {
+            console.error(`❌ Songs homepage scraper failed with code ${code}. Stderr: ${errorOutput}`);
+            return res.status(502).json({ success: false, error: 'Failed to scrape songs homepage data.', details: errorOutput });
+        }
+        try {
+            const data = JSON.parse(output.trim());
+            return res.json(data);
+        } catch (e) {
+            console.error(`❌ JSON parse error for songs homepage:`, e);
+            return res.status(502).json({ success: false, error: 'Invalid JSON response from scraper.', details: output });
+        }
+    });
+});
+
+app.get('/api/songs/search', (req, res) => {
+    const query = req.query.q || '';
+    if (!query.trim()) {
+        return res.status(400).json({ success: false, error: 'Missing q parameter' });
+    }
+    console.log(`🎵 Songs search requested for: ${query}`);
+    const pythonProcess = spawn('python3', ['./scrapers/index.py', '--search', query]);
+
+    let output = '';
+    let errorOutput = '';
+
+    pythonProcess.stdout.on('data', (data) => { output += data.toString(); });
+    pythonProcess.stderr.on('data', (data) => { errorOutput += data.toString(); });
+
+    pythonProcess.on('close', (code) => {
+        if (code !== 0 || !output.trim()) {
+            console.error(`❌ Songs search scraper failed with code ${code}. Stderr: ${errorOutput}`);
+            return res.status(502).json({ success: false, error: 'Failed to search songs.', details: errorOutput });
+        }
+        try {
+            const data = JSON.parse(output.trim());
+            return res.json(data);
+        } catch (e) {
+            console.error(`❌ JSON parse error for songs search:`, e);
+            return res.status(502).json({ success: false, error: 'Invalid JSON response from search scraper.', details: output });
+        }
+    });
+});
+
+app.get('/api/songs/track', (req, res) => {
+    const id = req.query.id || '';
+    if (!id.trim()) {
+        return res.status(400).json({ success: false, error: 'Missing id parameter' });
+    }
+    console.log(`🎵 Songs track details requested for: ${id}`);
+    const pythonProcess = spawn('python3', ['./scrapers/index.py', '--track', id]);
+
+    let output = '';
+    let errorOutput = '';
+
+    pythonProcess.stdout.on('data', (data) => { output += data.toString(); });
+    pythonProcess.stderr.on('data', (data) => { errorOutput += data.toString(); });
+
+    pythonProcess.on('close', (code) => {
+        if (code !== 0 || !output.trim()) {
+            console.error(`❌ Songs track scraper failed with code ${code}. Stderr: ${errorOutput}`);
+            return res.status(502).json({ success: false, error: 'Failed to fetch track info.', details: errorOutput });
+        }
+        try {
+            const data = JSON.parse(output.trim());
+            return res.json(data);
+        } catch (e) {
+            console.error(`❌ JSON parse error for songs track:`, e);
+            return res.status(502).json({ success: false, error: 'Invalid JSON response from track scraper.', details: output });
+        }
+    });
+});
+
+
+// =====================================
+// 🎬 YOUTUBE PREVIEW — music video lookup
+// Returns { videoId, startSeconds, ytTitle } for the MiniYouTubePlayer
+// =====================================
+app.get('/api/songs/youtube-preview', async (req, res) => {
+    const q = (req.query.q || '').trim();
+    if (!q) return res.status(400).json({ error: 'Missing q parameter' });
+
+    const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+    if (!YOUTUBE_API_KEY) {
+        console.error('❌ YOUTUBE_API_KEY not set in environment');
+        return res.status(503).json({ error: 'YouTube API not configured' });
+    }
+
+    try {
+        const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoCategoryId=10&maxResults=5&q=${encodeURIComponent(q + ' song')}&key=${YOUTUBE_API_KEY}`;
+        const ytRes = await fetch(searchUrl);
+        if (!ytRes.ok) {
+            const errText = await ytRes.text();
+            console.error(`❌ YouTube API error ${ytRes.status}: ${errText}`);
+            return res.status(ytRes.status).json({ error: 'YouTube API request failed' });
+        }
+        const data = await ytRes.json();
+        const items = (data.items || []).filter(i => i.id?.videoId);
+        if (!items.length) return res.json({ videoId: null });
+
+        const best = items[0];
+        return res.json({
+            videoId:      best.id.videoId,
+            ytTitle:      best.snippet?.title || q,
+            startSeconds: 60,   // skip intro, land near first chorus
+        });
+    } catch (err) {
+        console.error('❌ YouTube preview fetch error:', err);
+        return res.status(500).json({ error: 'Internal error fetching YouTube preview' });
+    }
+});
+
+
+// =====================================
+// 🎵 ARTIST RECOMMENDATIONS — returns songs by a singer for the "More by X" section
+// Uses YouTube Data API to avoid Pendujatt reCAPTCHA blocking on repeated searches.
+// Returns { songs: [{ id, title, poster, label }] } matching Pendujatt card shape.
+// =====================================
+app.get('/api/songs/singer', async (req, res) => {
+    const singerName = (req.query.name || '').trim();
+    if (!singerName) return res.status(400).json({ songs: [], error: 'Missing name parameter' });
+
+    const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+    if (!YOUTUBE_API_KEY) {
+        console.error('❌ YOUTUBE_API_KEY not set — cannot fetch singer recommendations');
+        return res.status(503).json({ songs: [], error: 'YouTube API not configured' });
+    }
+
+    try {
+        // Search YouTube for songs by this artist (music category = 10)
+        const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoCategoryId=10&maxResults=20&q=${encodeURIComponent(singerName + ' songs')}&key=${YOUTUBE_API_KEY}`;
+        const ytRes = await fetch(searchUrl);
+
+        if (!ytRes.ok) {
+            const err = await ytRes.text();
+            console.error(`❌ YouTube singer API error ${ytRes.status}: ${err}`);
+            return res.status(ytRes.status).json({ songs: [], error: 'YouTube API failed' });
+        }
+
+        const data = await ytRes.json();
+        const items = (data.items || []).filter(i => i.id?.videoId && i.snippet?.title);
+
+        // Convert YouTube results into the same card shape TrackDetailPage expects.
+        // id is a pendujatt-style slug derived from the song title so clicking opens
+        // a Pendujatt search for that song.
+        const slugify = str =>
+            str.toLowerCase()
+               .replace(/[^\w\s-]/g, '')
+               .replace(/[\s_]+/g, '-')
+               .replace(/-+/g, '-')
+               .replace(/^-|-$/g, '');
+
+        const songs = items.map(item => {
+            const rawTitle  = item.snippet.title || '';
+            // Strip " - Official Video", "| Full Song" etc. for cleaner titles
+            const cleanTitle = rawTitle
+                .replace(/\s*[\|–\-—]\s*(official\s*(video|audio|lyric|music\s*video)|full\s*song|hd|4k|lyrical|lyric\s*video|video\s*song).*/gi, '')
+                .replace(/\s*\(official\s*(video|audio|lyric|music\s*video|song)\)/gi, '')
+                .trim();
+
+            const thumbnail = item.snippet.thumbnails?.high?.url
+                           || item.snippet.thumbnails?.medium?.url
+                           || item.snippet.thumbnails?.default?.url
+                           || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=150&q=80';
+
+            return {
+                id:      slugify(cleanTitle) || item.id.videoId,
+                title:   cleanTitle || rawTitle,
+                poster:  thumbnail,
+                label:   'Mp3 Song',
+            };
+        });
+
+        console.log(`🎵 Singer recs for "${singerName}": ${songs.length} results`);
+        return res.json({ songs });
+
+    } catch (err) {
+        console.error('❌ Singer recommendations fetch error:', err);
+        return res.status(500).json({ songs: [], error: 'Internal error fetching recommendations' });
+    }
+});
+
+
+// =====================================
 // 📡 DYNAMIC M3U8 STREAM EXTRACTOR
 // Runs the stealth Playwright scraper behind the scenes 
 // without spawning desktop frames on Render.
