@@ -16,7 +16,7 @@ import sys
 import re
 import json
 import requests
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote
 
 DEBUG = False  # set True to see diagnostics
 
@@ -31,9 +31,9 @@ FALLBACK_POLICY_KEY = "BCpkADawqM14f7bO4wGvT1k3zJ-8wN5rCj-C5K7Vz8PzZq"
 _HTTP = requests.Session()
 _HTTP.headers.update({
     "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/126.0.0.0 Safari/537.36"
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
     "Accept-Language": "en-US,en;q=0.9",
 })
@@ -234,7 +234,7 @@ def get_pendujatt_homepage_playwright():
         try:
             browser = p.chromium.launch(headless=True, args=launch_args)
             context = browser.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800}
             )
             page = context.new_page()
@@ -380,95 +380,8 @@ def get_pendujatt_homepage_playwright():
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Playwright-Assisted Interactivity & Dynamic CSE Search Engine
+# Non-Interactive Layout Parsing Matrix
 # ─────────────────────────────────────────────────────────────────────────
-
-def parse_and_select_pendujatt(html_content, current_url):
-    """
-    Parses artist, album, and song links from Pendujatt dynamically by tying
-    anchor nodes together with their true visible text labels and thumbnails.
-    """
-    raw_links = re.findall(r'<a[^>]*?href=["\']((?:https://pendujatt\.com\.se)?/(?:song|album|artist)/[^"\'>\s]+)["\'][^>]*>(.*?)</a>', html_content, re.IGNORECASE | re.DOTALL)
-    
-    seen = set()
-    unique_artists = []
-    unique_albums = []
-    unique_songs = []
-
-    global_artist_poster = "No Artist Poster Available"
-    artist_poster_match = re.search(r'src=["\']((?:https://[^"\']*?pendujatt\.com\.se)?/artist/[^"\']+?\.(?:jpg|jpeg|png))["\']', html_content, re.IGNORECASE)
-    if artist_poster_match:
-        global_artist_poster = artist_poster_match.group(1)
-
-    for path, inner_html in raw_links:
-        full_url = path if path.startswith("http") else "https://pendujatt.com.se" + path
-        if full_url in seen:
-            continue
-            
-        poster_url = global_artist_poster
-
-        clean_title = re.sub(r'<[^>]*>', '', inner_html).strip()
-        clean_title = clean_title.replace("Mp3 Song Download | PendJatt.Com.Se", "")
-        clean_title = clean_title.replace("Mp3 Song Download", "")
-        clean_title = clean_title.replace("Songs Download -", "").replace("All Mp3 Songs", "").strip()
-        
-        if not clean_title or len(clean_title) < 3:
-            clean_title = full_url.split("/")[-1].replace("-", " ").replace(".html", "").title()
-
-        seen.add(full_url)
-        url_lower = full_url.lower()
-
-        if "/artist/" in url_lower:
-            if "artist/" not in current_url.lower():
-                unique_artists.append((full_url, "artist", clean_title, poster_url))
-        elif "/album/" in url_lower:
-            if "album/" not in current_url.lower() and "artist/" not in current_url.lower():
-                unique_albums.append((full_url, "album", clean_title, poster_url))
-        elif "/song/" in url_lower:
-            unique_songs.append((full_url, "song", clean_title, poster_url))
-
-    print("\n=========================================")
-    print("         PENDUJATT SELECTION MENU        ")
-    print("=========================================")
-
-    master_options = []
-
-    if unique_artists:
-        print("\n--- ARTISTS FOUND ---")
-        for full_url, item_type, title, poster in unique_artists:
-            master_options.append((full_url, item_type))
-            print(f"[{len(master_options)}] (Artist) {title}")
-
-    if unique_albums:
-        print("\n--- ALBUMS FOUND ---")
-        for full_url, item_type, title, poster in unique_albums:
-            master_options.append((full_url, item_type))
-            print(f"[{len(master_options)}] (Album) {title}")
-
-    if unique_songs:
-        print("\n--- TRACKS LIST ---")
-        for full_url, item_type, title, poster in unique_songs:
-            master_options.append((full_url, item_type))
-            print(f"[{len(master_options)}] (Song) {title}")
-
-    print("=========================================")
-
-    if not master_options:
-        return None
-
-    while True:
-        try:
-            choice = input(f"\nSelect a numeric choice (1-{len(master_options)}) or 'q' to quit: ").strip()
-            if choice.lower() == 'q':
-                sys.exit(0)
-            choice_idx = int(choice) - 1
-            if 0 <= choice_idx < len(master_options):
-                return master_options[choice_idx]
-            else:
-                print(f"Invalid range. Choose between 1 and {len(master_options)}.")
-        except ValueError:
-            print("Please provide a valid numeric selection.")
-
 
 def extract_pendujatt_download_link(html_tree):
     """Finds the absolute 320kbps MP3 link block inside the Pendujatt tree architecture."""
@@ -493,7 +406,6 @@ def extract_all_pendujatt_download_links(html_tree):
         full_url = "https://pendujatt.com.se" + url
         results[bitrate + "kbps"] = full_url.replace(" ", "%20")
         
-    # Fallback to standard 320/128 extraction if no results were matched
     if not results:
         fallback = extract_pendujatt_download_link(html_tree)
         if fallback:
@@ -503,36 +415,37 @@ def extract_all_pendujatt_download_links(html_tree):
 
 
 def get_pendujatt_download(target_or_query):
-    """Headless Playwright interaction matrix resolving async search layouts, artists, and tracks."""
+    """Headless automated backend path selector targeting song pages directly via un-wrapped paths."""
     from playwright.sync_api import sync_playwright
 
     url = target_or_query
     is_listing_hub = False
+    fallback_search_term = None
     
     if not url.startswith("http"):
-        dbg(f"[Pendujatt] Processing search request: {target_or_query}")
         url = f"https://pendujatt.com.se/search.php?q={quote_plus(target_or_query)}#gsc.tab=0&gsc.q={quote_plus(target_or_query)}&gsc.page=1"
         is_listing_hub = True
     elif "search.php" in url or "/album/" in url or "/artist/" in url:
         is_listing_hub = True
 
-    # FAST-PATH BYPASS: Direct song link bypass executed via rapid pure HTTP
     if not is_listing_hub and "/song/" in url:
         try:
-            dbg("[Pendujatt] Fast track direct URL detected. Running pure HTTP engine...")
             html = _fetch_page(url)
             resolved = extract_pendujatt_download_link(html)
             if resolved:
                 details = get_pendujatt_song_details(html, url)
-                if details:
-                    print("\n--- METADATA TRACK DETAILS ---")
-                    print(json.dumps(details, indent=4))
-                    print("------------------------------")
                 return (resolved, details)
+        except requests.exceptions.HTTPError as http_err:
+            if http_err.response.status_code == 404:
+                slug_fragment = url.split("/song/")[-1].replace(".html", "").replace("-mp3-song", "")
+                fallback_search_term = slug_fragment.replace("-", " ")
+                url = f"https://pendujatt.com.se/search.php?q={quote_plus(fallback_search_term)}#gsc.tab=0&gsc.q={quote_plus(fallback_search_term)}&gsc.page=1"
+                is_listing_hub = True
+            else:
+                dbg(f"Direct path fetch failed: {http_err}")
         except Exception as e:
-            dbg(f"Direct fast path fallback failed: {e}")
+            dbg(f"Fast path failed: {e}")
 
-    # SLOW-PATH: Load browser to parse listing hubs (search grids, albums, or artist track lists)
     resolved_tuple = (None, None)
     launch_args = [
         "--disable-blink-features=AutomationControlled",
@@ -547,51 +460,58 @@ def get_pendujatt_download(target_or_query):
         try:
             browser = p.chromium.launch(headless=True, args=launch_args)
             context = browser.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800}
             )
             page = context.new_page()
             page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             
-            dbg(f"[Pendujatt] Initializing layout navigation: {url}")
+            dbg(f"[Pendujatt] Browser navigating to listing matrix: {url}")
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
             
             if "search.php" in page.url:
-                page.wait_for_selector(".gs-title, a.gs-title, a.gs-image", timeout=10000)
-                page.wait_for_timeout(1500)
-            elif "/artist/" in page.url or "/album/" in page.url:
-                page.wait_for_timeout(1000)
+                try:
+                    page.wait_for_selector("a.gs-title, .gs-webResult", timeout=12000)
+                    page.wait_for_timeout(2000)
+                except Exception:
+                    pass
 
-            while "search.php" in page.url or "/album/" in page.url or "/artist/" in page.url:
+            if "search.php" in page.url:
                 html_content = page.content()
-                selection = parse_and_select_pendujatt(html_content, page.url)
+                raw_links = re.findall(r'href=["\']((?:https://(?:www\.)?google\.com/url\?[^"\'>\s]*?q=)?(?:https://pendujatt\.com\.se)?/song/[^"\'>\s]+)["\']', html_content, re.IGNORECASE)
                 
-                if not selection:
-                    print("Error: No valid elements discovered inside current menu view layer.")
-                    browser.close()
-                    return None
+                target_resolved_url = None
+                for candidate in raw_links:
+                    if "google.com/url?" in candidate.lower() and "q=" in candidate.lower():
+                        q_match = re.search(r'[?&]q=(https://[^&]+)', candidate)
+                        if q_match:
+                            candidate = unquote(q_match.group(1))
                     
-                chosen_url, item_type = selection
-                dbg(f"[Pendujatt] Branching browser location route to: {chosen_url} ({item_type})")
-                page.goto(chosen_url, wait_until="domcontentloaded", timeout=30000)
-                page.wait_for_timeout(1500)
-                
-                if item_type == "song":
-                    break
+                    if "/song/" in candidate.lower():
+                        if fallback_search_term:
+                            clean_keyword = fallback_search_term.split()[0].lower()
+                            if clean_keyword in candidate.lower():
+                                target_resolved_url = candidate
+                                break
+                        else:
+                            target_resolved_url = candidate
+                            break
+
+                if target_resolved_url:
+                    page.goto(target_resolved_url, wait_until="domcontentloaded", timeout=30000)
+                    page.wait_for_timeout(1000)
+                else:
+                    browser.close()
+                    return resolved_tuple
 
             full_dom_html = page.content()
             resolved_url = extract_pendujatt_download_link(full_dom_html)
             details = get_pendujatt_song_details(full_dom_html, page.url)
-            
             if resolved_url:
                 resolved_tuple = (resolved_url, details)
-                if details:
-                    print("\n--- METADATA TRACK DETAILS ---")
-                    print(json.dumps(details, indent=4))
-                    print("------------------------------")
 
         except Exception as e:
-            dbg(f"[Pendujatt] Playwright engine runtime error: {e}")
+            dbg(f"[Playwright Core Exception]: {e}")
         finally:
             if 'browser' in locals():
                 browser.close()
@@ -605,7 +525,6 @@ def get_pendujatt_song_details(html, song_url):
         cover_match = re.search(r'property="og:image"\s+content=["\']([^"\']+)["\']', html)
         cover_url = cover_match.group(1) if cover_match else None
 
-        # Extract details from table
         rows = re.findall(r'<td class="td1">\s*(.*?)\s*</td>\s*<td>\s*(.*?)\s*</td>', html, re.IGNORECASE | re.DOTALL)
         table_data = {}
         for k, v in rows:
@@ -613,7 +532,6 @@ def get_pendujatt_song_details(html, song_url):
             clean_v = re.sub(r'<[^>]*>', '', v).strip()
             table_data[clean_k] = clean_v
 
-        # Extract description paragraph
         description_text = ""
         paragraphs = re.findall(r'<p[^>]*?>(.*?)</p>', html, re.IGNORECASE | re.DOTALL)
         for p in paragraphs:
@@ -622,7 +540,6 @@ def get_pendujatt_song_details(html, song_url):
                 description_text = clean_p
                 break
 
-        # Song title / name
         title = table_data.get("song name")
         if not title:
             title_match = re.search(r'<title>([^<]+)</title>', html)
@@ -631,37 +548,20 @@ def get_pendujatt_song_details(html, song_url):
                 title = re.sub(rf'\b{suffix}\b', '', title, flags=re.IGNORECASE).strip()
             title = re.sub(r'\s+', ' ', title).strip()
 
-        # Singer
         singer = table_data.get("singer")
         if not singer:
             singer_match = re.search(r'sung by\s+([^,|\n.]+)', description_text, re.IGNORECASE)
             singer = singer_match.group(1).strip() if singer_match else "Unknown"
 
-        # Album
         album = table_data.get("album")
         if not album:
             album_match = re.search(r'From\s+["\']([^"\']+)["\']', description_text, re.IGNORECASE)
             album = album_match.group(1).strip() if album_match else "Single"
 
-        # Composer / Music Director
         composer = "Unknown"
         composer_match = re.search(r'composed By\s+([^,|\n.]+)', description_text, re.IGNORECASE)
         if composer_match:
             composer = composer_match.group(1).strip()
-            if ' and ' in composer.lower():
-                parts = re.split(r'\s+and\s+', composer, flags=re.IGNORECASE)
-                truncated = []
-                for p in parts:
-                    if any(k in p.lower() for k in ['lyrics', 'written', 'music']):
-                        break
-                    truncated.append(p)
-                composer = ' and '.join(truncated).strip()
-
-        # Starring / Lyricist
-        starring = "N/A"
-        starring_match = re.search(r'Lyrics written by\s+([^,|\n.]+)', description_text, re.IGNORECASE)
-        if starring_match:
-            starring = starring_match.group(1).strip()
 
         return {
             "title": title,
@@ -669,7 +569,7 @@ def get_pendujatt_song_details(html, song_url):
             "singer": singer,
             "album": album,
             "composer": composer,
-            "starring": starring,
+            "starring": table_data.get("starring", "N/A"),
             "label": table_data.get("label", "N/A"),
             "duration": table_data.get("duration", "N/A"),
             "added_on": table_data.get("added on", "N/A"),
@@ -677,6 +577,177 @@ def get_pendujatt_song_details(html, song_url):
         }
     except Exception:
         return None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Playwright Search Pagination Indexer
+# ─────────────────────────────────────────────────────────────────────────
+
+def get_pendujatt_search_json(query):
+    """
+    Launches Playwright headless browser to run search or listing parse,
+    and returns a dictionary of match objects with tracking wrappers stripped out.
+    """
+    from playwright.sync_api import sync_playwright
+    
+    is_direct_listing = False
+    if query.startswith("album:") or query.startswith("artist:"):
+        is_direct_listing = True
+        parts = query.split(":", 1)
+        item_type = parts[0]
+        slug = parts[1]
+        url = f"https://pendujatt.com.se/{item_type}/{slug}"
+    else:
+        url = f"https://pendujatt.com.se/search.php?q={quote_plus(query)}#gsc.tab=0&gsc.q={quote_plus(query)}&gsc.page=1"
+        
+    launch_args = [
+        "--disable-blink-features=AutomationControlled",
+        "--no-sandbox",
+        "--disable-gpu",
+        "--mute-audio",
+        "--disable-dev-shm-usage",
+        "--disable-features=IsolateOrigins,site-per-process"
+    ]
+    results = {"songs": [], "albums": [], "artists": [], "metadata": {}}
+    
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True, args=launch_args)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800}
+            )
+            page = context.new_page()
+            
+            # Anti-fingerprint injection
+            page.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                window.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
+            """)
+            
+            dbg(f"[Pendujatt Search] Resolving target: {url}")
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            
+            if is_direct_listing:
+                page.wait_for_timeout(1000)
+                html_content = page.content()
+                
+                default_poster = None
+                cover_match = re.search(r'property="og:image"\s+content=["\']([^"\']+)["\']', html_content)
+                if cover_match: default_poster = cover_match.group(1)
+                if not default_poster: default_poster = "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=150&q=80"
+                
+                results["metadata"] = {"poster": default_poster}
+                
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html_content, 'html.parser')
+                
+                song_list_divs = soup.find_all(class_='song-list')
+                if song_list_divs:
+                    for div in song_list_divs:
+                        link = div.find('a', href=True)
+                        if not link or '/song/' not in link['href']: continue
+                        slug = link['href'].split('/song/')[-1].replace('.html', '')
+                        
+                        title_el = div.find(class_='songname')
+                        title = title_el.text.strip() if title_el else slug.replace('-', ' ').title()
+                        img = div.find('img')
+                        poster = img.get('data-src') or img.get('src') if img else default_poster
+                        if not poster or poster.startswith('/'): poster = default_poster
+                            
+                        results["songs"].append({
+                            "id": slug, "title": title, "label": "Mp3 Song", "poster": poster,
+                            "url": link['href'] if link['href'].startswith("http") else "https://pendujatt.com.se" + link['href']
+                        })
+                else:
+                    song_matches = re.findall(r'href=["\']((?:https://pendujatt\.com\.se)?/song/([^"\'>\s]+))["\'][^>]*>(.*?)</a>', html_content, re.IGNORECASE | re.DOTALL)
+                    seen_songs = set()
+                    for full_path, slug, inner_html in song_matches:
+                        full_url = full_path if full_path.startswith("http") else "https://pendujatt.com.se" + full_path
+                        if full_url in seen_songs: continue
+                        seen_songs.add(full_url)
+                        clean_title = re.sub(r'<[^>]*>', '', inner_html).strip()
+                        results["songs"].append({
+                            "id": slug, "title": clean_title, "label": "Mp3 Song", "poster": default_poster, "url": full_url
+                        })
+            else:
+                # ── Custom Search Engine Scraping Execution ──
+                def scrape_page_items(pg):
+                    return pg.evaluate("""() => {
+                        const items = [];
+                        document.querySelectorAll('.gsc-webResult').forEach(el => {
+                            const titleEl = el.querySelector('a.gs-title');
+                            const imgEl = el.querySelector('img.gs-image');
+                            if (titleEl) {
+                                items.push({
+                                    url: titleEl.href,
+                                    title: titleEl.textContent || '',
+                                    poster: imgEl ? imgEl.src : null
+                                });
+                            }
+                        });
+                        return items;
+                    }""")
+
+                def process_items(raw_items, seen, results):
+                    for item in raw_items:
+                        full_url = item.get("url", "")
+                        if not full_url: continue
+                        
+                        if "google.com/url?" in full_url.lower() and "q=" in full_url.lower():
+                            q_match = re.search(r'[?&]q=(https://[^&]+)', full_url)
+                            if q_match: full_url = unquote(q_match.group(1))
+
+                        if full_url in seen: continue
+                        seen.add(full_url)
+
+                        title = item.get("title", "")
+                        title = re.sub(r'\s+', ' ', title).strip()
+                        poster = item.get("poster") or "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=150&q=80"
+                        url_lower = full_url.lower()
+
+                        if "/artist/" in url_lower:
+                            slug = full_url.split("/artist/")[-1].replace(".html", "")
+                            results["artists"].append({"id": slug, "title": title, "poster": poster, "url": full_url})
+                        elif "/album/" in url_lower:
+                            slug = full_url.split("/album/")[-1].replace(".html", "")
+                            results["albums"].append({"id": slug, "title": title, "poster": poster, "url": full_url})
+                        elif "/song/" in url_lower:
+                            slug = full_url.split("/song/")[-1].replace(".html", "")
+                            results["songs"].append({"id": slug, "title": title, "label": "Mp3 Song", "poster": poster, "url": full_url})
+
+                try:
+                    page.wait_for_selector(".gs-title, a.gs-title, a.gs-image", timeout=12000)
+                except Exception:
+                    pass
+                page.wait_for_timeout(1500)
+
+                seen = set()
+                raw_items = scrape_page_items(page)
+                process_items(raw_items, seen, results)
+
+                total_pages = page.evaluate("() => document.querySelectorAll('.gsc-cursor-page').length")
+                dbg(f"[Search Engine] Processing across total paginated levels: {total_pages}")
+
+                encoded_q = quote_plus(query)
+                for pg_num in range(2, min(total_pages + 1, 6)):
+                    try:
+                        page_url = f"https://pendujatt.com.se/search.php?q={encoded_q}#gsc.tab=0&gsc.q={encoded_q}&gsc.page={pg_num}"
+                        page.goto(page_url, wait_until="domcontentloaded", timeout=20000)
+                        page.wait_for_timeout(1200)
+                        raw_items = scrape_page_items(page)
+                        if not raw_items: break
+                        process_items(raw_items, seen, results)
+                    except Exception:
+                        break
+
+        except Exception as e:
+            dbg(f"Search framework error: {e}")
+        finally:
+            if 'browser' in locals():
+                browser.close()
+    return results
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -703,9 +774,9 @@ def get_fifa_stream_playwright(target_url):
             browser = p.chromium.launch(headless=True, args=launch_args)
             context = browser.new_context(
                 user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/126.0.0.0 Safari/537.36"
+                    "Chrome/124.0.0.0 Safari/537.36"
                 ),
                 viewport={"width": 1280, "height": 800},
                 locale="en-US",
@@ -752,7 +823,7 @@ def get_fifa_stream_playwright(target_url):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# Core Routing Hub Entry Point
+# Core Routing Hub Entry Point & Backend API Bindings
 # ─────────────────────────────────────────────────────────────────────────
 
 def get_clean_stream(target_url):
@@ -775,272 +846,52 @@ def get_clean_stream(target_url):
         return get_fifa_stream_playwright(target_url)
 
 
-def get_pendujatt_search_json(query):
-    """Launches Playwright headless browser to run search or listing parse, and returns a dictionary of match objects."""
-    from playwright.sync_api import sync_playwright
-    
-    is_direct_listing = False
-    if query.startswith("album:") or query.startswith("artist:"):
-        is_direct_listing = True
-        parts = query.split(":", 1)
-        item_type = parts[0]
-        slug = parts[1]
-        url = f"https://pendujatt.com.se/{item_type}/{slug}"
-    else:
-        url = f"https://pendujatt.com.se/search.php?q={quote_plus(query)}#gsc.tab=0&gsc.q={quote_plus(query)}&gsc.page=1"
-        
-    launch_args = [
-        "--disable-blink-features=AutomationControlled",
-        "--no-sandbox",
-        "--disable-gpu",
-        "--mute-audio",
-        "--disable-dev-shm-usage",
-        "--disable-features=IsolateOrigins,site-per-process"
-    ]
-    results = {"songs": [], "albums": [], "artists": [], "metadata": {}}
-    
-    with sync_playwright() as p:
-        try:
-            browser = p.chromium.launch(headless=True, args=launch_args)
-            context = browser.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-                viewport={"width": 1280, "height": 800}
-            )
-            page = context.new_page()
-            page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
-            page = context.new_page()
-            
-            dbg(f"[Pendujatt] Navigating search/listing URL: {url}")
-            page.goto(url, wait_until="domcontentloaded", timeout=30000)
-            
-            if is_direct_listing:
-                page.wait_for_timeout(1000)
-                html_content = page.content()
-                
-                default_poster = None
-                cover_match = re.search(r'property="og:image"\s+content=["\']([^"\']+)["\']', html_content)
-                if cover_match:
-                    default_poster = cover_match.group(1)
-                
-                if not default_poster:
-                    cover_class_match = re.search(r'<img[^>]*?class=["\']cover[^"\']*?["\'][^>]*?src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
-                    if cover_class_match:
-                        default_poster = cover_class_match.group(1)
-                
-                if not default_poster:
-                    img_srcs = re.findall(r'<img[^>]*?src=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
-                    for src in img_srcs:
-                        if "/uploads/album/" in src or "/uploads/artist/" in src:
-                            if "/static/load.png" not in src:
-                                default_poster = src
-                                break
-                                
-                if not default_poster:
-                    default_poster = "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=150&q=80"
-                
-                results["metadata"] = {"poster": default_poster}
-                
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(html_content, 'html.parser')
-                
-                # Check for .song-list divs (typical of artist page)
-                song_list_divs = soup.find_all(class_='song-list')
-                if song_list_divs:
-                    for div in song_list_divs:
-                        link = div.find('a', href=True)
-                        if not link:
-                            continue
-                        href = link['href']
-                        if '/song/' not in href:
-                            continue
-                        slug = href.split('/song/')[-1].replace('.html', '')
-                        
-                        # Find title
-                        title_el = div.find(class_='songname')
-                        title = title_el.text.strip() if title_el else ""
-                        if not title:
-                            img = div.find('img')
-                            title = img.get('alt', '').replace(' mp3 song', '').strip() if img else slug.replace('-', ' ').title()
-                            
-                        # Find poster image specific to this song
-                        img = div.find('img')
-                        poster = None
-                        if img:
-                            poster = img.get('data-src') or img.get('src')
-                            if poster == '/static/load.png':
-                                poster = img.get('data-src')
-                        if not poster or poster.startswith('/'):
-                            poster = default_poster
-                            
-                        results["songs"].append({
-                            "id": slug,
-                            "title": title,
-                            "label": "Mp3 Song",
-                            "poster": poster,
-                            "url": href if href.startswith("http") else "https://pendujatt.com.se" + href
-                        })
-                else:
-                    # Fallback to generic link parsing (typical of album page or generic listings)
-                    song_matches = re.findall(r'href=["\']((?:https://pendujatt\.com\.se)?/song/([^"\'>\s]+))["\'][^>]*>(.*?)</a>', html_content, re.IGNORECASE | re.DOTALL)
-                    seen_songs = set()
-                    for full_path, slug, inner_html in song_matches:
-                        full_url = full_path if full_path.startswith("http") else "https://pendujatt.com.se" + full_path
-                        if full_url in seen_songs:
-                            continue
-                        seen_songs.add(full_url)
-                        
-                        clean_title = re.sub(r'<[^>]*>', '', inner_html).strip()
-                        for suffix in [
-                            "Mp3 Song Download | PendJatt.Com.Se",
-                            "Mp3 Song Download",
-                            "Mp3 Songs Download - PendJatt.Com.Se",
-                            "Songs Download -",
-                            "All Mp3 Songs"
-                        ]:
-                            clean_title = clean_title.replace(suffix, "")
-                        clean_title = re.sub(r'\s+', ' ', clean_title).strip()
-                        if not clean_title or len(clean_title) < 2:
-                            clean_title = slug.replace("-", " ").title()
-                            
-                        results["songs"].append({
-                            "id": slug,
-                            "title": clean_title,
-                            "label": "Mp3 Song",
-                            "poster": default_poster,
-                            "url": full_url
-                        })
-            else:
-                # ── Collect all paginated results ──────────────────────────────
-                def scrape_page_items(pg):
-                    """Scrape all result items from the current loaded page."""
-                    return pg.evaluate("""() => {
-                        const items = [];
-                        document.querySelectorAll('.gsc-webResult').forEach(el => {
-                            const titleEl = el.querySelector('a.gs-title');
-                            const imgEl = el.querySelector('img.gs-image');
-                            if (titleEl) {
-                                items.push({
-                                    url: titleEl.href,
-                                    title: titleEl.textContent || '',
-                                    poster: imgEl ? imgEl.src : null
-                                });
-                            }
-                        });
-                        return items;
-                    }""")
-
-                def process_items(raw_items, seen, results):
-                    """Deduplicate and categorize items into results dict."""
-                    for item in raw_items:
-                        full_url = item.get("url", "")
-                        if not full_url or full_url in seen:
-                            continue
-                        seen.add(full_url)
-
-                        title = item.get("title", "")
-                        for suffix in [
-                            "Mp3 Song Download | PendJatt.Com.Se",
-                            "Mp3 Song Download",
-                            "Mp3 Songs Download - PendJatt.Com.Se",
-                            "Songs Download -",
-                            "All Mp3 Songs"
-                        ]:
-                            title = title.replace(suffix, "")
-                        title = re.sub(r'<[^>]*>', '', title).strip()
-                        title = re.sub(r'\s+', ' ', title).strip()
-
-                        poster = item.get("poster") or "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=150&q=80"
-                        url_lower = full_url.lower()
-
-                        if "/artist/" in url_lower:
-                            slug = full_url.split("/artist/")[-1].replace(".html", "")
-                            results["artists"].append({"id": slug, "title": title, "poster": poster, "url": full_url})
-                        elif "/album/" in url_lower:
-                            slug = full_url.split("/album/")[-1].replace(".html", "")
-                            results["albums"].append({"id": slug, "title": title, "poster": poster, "url": full_url})
-                        elif "/song/" in url_lower:
-                            slug = full_url.split("/song/")[-1].replace(".html", "")
-                            results["songs"].append({"id": slug, "title": title, "label": "Mp3 Song", "poster": poster, "url": full_url})
-
-                # Wait for first page to load
-                try:
-                    page.wait_for_selector(".gs-title, a.gs-title, a.gs-image", timeout=10000)
-                except Exception:
-                    pass
-                page.wait_for_timeout(1500)
-
-                seen = set()
-
-                # Scrape page 1
-                raw_items = scrape_page_items(page)
-                process_items(raw_items, seen, results)
-
-                # Find total number of pagination pages (max 10 from CSE)
-                total_pages = page.evaluate("""() => {
-                    const pages = document.querySelectorAll('.gsc-cursor-page');
-                    return pages.length;
-                }""")
-
-                dbg(f"[Search] Found {total_pages} pages of results")
-
-                # Paginate remaining pages by navigating directly to each page URL
-                encoded_q = quote_plus(query)
-                for pg_num in range(2, min(total_pages + 1, 11)):
-                    try:
-                        page_url = f"https://pendujatt.com.se/search.php?q={encoded_q}#gsc.tab=0&gsc.q={encoded_q}&gsc.page={pg_num}"
-                        page.goto(page_url, wait_until="domcontentloaded", timeout=20000)
-                        try:
-                            page.wait_for_selector(".gs-title, a.gs-title", timeout=8000)
-                        except Exception:
-                            break  # no more results
-                        page.wait_for_timeout(1000)
-                        raw_items = scrape_page_items(page)
-                        if not raw_items:
-                            break
-                        process_items(raw_items, seen, results)
-                    except Exception as e:
-                        dbg(f"[Search] Page {pg_num} error: {e}")
-                        break
-
-        except Exception as e:
-            dbg(f"Search error: {e}")
-        finally:
-            if 'browser' in locals():
-                browser.close()
-    return results
-
-
 def get_pendujatt_track_info_json(id_or_url):
-    """Fetches direct download/stream link and metadata for a song slug or URL without prompt or browser when possible."""
+    """Intercepts missing direct tracks, cascades to the tracking-unwrapped worker layout, and maps back clean JSON structures."""
     if not id_or_url.startswith("http"):
         url = f"https://pendujatt.com.se/song/{id_or_url}"
     else:
         url = id_or_url
         
     try:
+        dbg(f"[Backend Port] Running direct resolution tracking payload: {url}")
         html = _fetch_page(url)
         downloads = extract_all_pendujatt_download_links(html)
+        details = get_pendujatt_song_details(html, url)
         
         stream_url = None
-        for br in ["320kbps", "192kbps", "128kbps", "96kbps", "48kbps"]:
+        for br in ["320kbps", "192kbps", "128kbps"]:
             if br in downloads:
                 stream_url = downloads[br]
                 break
-        if not stream_url and downloads:
-            stream_url = list(downloads.values())[0]
-            
-        details = get_pendujatt_song_details(html, url)
+        if not stream_url and downloads: stream_url = list(downloads.values())[0]
+
         return {
             "success": True if downloads else False,
             "stream_url": stream_url,
             "downloads": downloads,
             "metadata": details
         }
+    except requests.exceptions.HTTPError as http_err:
+        if http_err.response.status_code == 404:
+            clean_token = url.split("/song/")[-1].replace(".html", "").replace("-mp3-song", "")
+            fallback_query = clean_token.replace("-", " ")
+            dbg(f"[Backend Interceptor] 404 Found. Invoking extraction engine fallback for: '{fallback_query}'")
+            
+            extraction_result = get_pendujatt_download(fallback_query)
+            if extraction_result and isinstance(extraction_result, tuple):
+                stream_url, details = extraction_result
+                if stream_url:
+                    return {
+                        "success": True,
+                        "stream_url": stream_url,
+                        "downloads": {"320kbps": stream_url},
+                        "metadata": details
+                    }
+            return {"success": False, "error": "Requested content structure could not be resolved."}
+        return {"success": False, "error": str(http_err)}
     except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        return {"success": False, "error": str(e)}
 
 
 if __name__ == "__main__":
@@ -1048,90 +899,42 @@ if __name__ == "__main__":
         flag = sys.argv[1]
         
         if flag == "--homepage":
-            homepage_data = get_pendujatt_homepage_playwright()
-            print(json.dumps(homepage_data))
+            print(json.dumps(get_pendujatt_homepage_playwright()))
             sys.exit(0)
-            
         elif flag == "--search":
-            if len(sys.argv) < 3:
-                print(json.dumps({"error": "Missing search query"}))
-                sys.exit(1)
-            query = sys.argv[2]
-            search_results = get_pendujatt_search_json(query)
-            print(json.dumps(search_results))
+            if len(sys.argv) < 3: sys.exit(1)
+            print(json.dumps(get_pendujatt_search_json(sys.argv[2])))
             sys.exit(0)
-
         elif flag == "--singer":
-            # Returns songs list for a given singer name (used for recommendations)
-            if len(sys.argv) < 3:
-                print(json.dumps({"songs": [], "error": "Missing singer name"}))
-                sys.exit(1)
-            singer_name = sys.argv[2]
-            singer_results = get_pendujatt_search_json(singer_name)
-            # Return only songs (no albums/artists noise) for clean recommendations
+            if len(sys.argv) < 3: sys.exit(1)
+            singer_results = get_pendujatt_search_json(sys.argv[2])
             print(json.dumps({"songs": singer_results.get("songs", [])}))
             sys.exit(0)
-            
         elif flag == "--track":
-            if len(sys.argv) < 3:
-                print(json.dumps({"error": "Missing track ID or URL"}))
-                sys.exit(1)
-            track_id = sys.argv[2]
-            track_info = get_pendujatt_track_info_json(track_id)
-            print(json.dumps(track_info))
+            if len(sys.argv) < 3: sys.exit(1)
+            print(json.dumps(get_pendujatt_track_info_json(sys.argv[2])))
             sys.exit(0)
             
-        # Fallback to standard flow if the argument is a URL or query for manual run
         target = flag
     else:
         target = "https://pendujatt.com.se/"
     
-    # Check if target is a Pendujatt URL or local track request
     if "pendujatt.com" in target or not target.startswith("http"):
         if target.strip().rstrip("/") in ["https://pendujatt.com.se", "http://pendujatt.com.se"]:
-            homepage_data = get_clean_stream(target)
-            print(json.dumps(homepage_data))
+            print(json.dumps(get_clean_stream(target)))
             sys.exit(0)
             
         extraction_result = get_clean_stream(target)
-        
-        if isinstance(extraction_result, tuple):
-            stream_url, metadata = extraction_result
-        else:
-            stream_url, metadata = extraction_result, None
+        stream_url, metadata = extraction_result if isinstance(extraction_result, tuple) else (extraction_result, None)
         
         if stream_url:
             stream_url = stream_url.replace(" ", "%20")
             print(f"\n[RESOLVED SERVER PATH]: {stream_url}")
-            
-            if metadata and metadata.get("title"):
-                clean_name = re.sub(r'[^a-zA-Z0-9\s\-_\(\)]', '', metadata["title"]).strip()
-                clean_name = re.sub(r'\s+', ' ', clean_name)
-                local_filename = f"{clean_name}.mp3"
-            else:
-                local_filename = "Song.mp3"
-                
-            download_choice = input(f"\nWould you like to download this file locally as '{local_filename}'? (y/n): ").strip().lower()
-            if download_choice == 'y':
-                try:
-                    print("Initializing clean file retrieval track...")
-                    response = _HTTP.get(stream_url, stream=True, timeout=60)
-                    response.raise_for_status()
-                    
-                    with open(local_filename, 'wb') as music_file:
-                        for chunk in response.iter_content(chunk_size=8192):
-                            if chunk: music_file.write(chunk)
-                                
-                    print(f"✔️ Success! File saved locally in your workspace as: '{local_filename}'")
-                    sys.exit(0)
-                except Exception as download_error:
-                    print(f"❌ Local storage retrieval engine failed: {download_error}", file=sys.stderr)
-                    sys.exit(1)
+            sys.exit(0)
         else:
-            print("Error: Extraction target resource not found or timed out.", file=sys.stderr)
+            print("Error: Extraction target resource not found.", file=sys.stderr)
             sys.exit(1)
     else:
-        # Standard BCCI / IPL / FIFA stream flow - print ONLY the clean stream URL
         stream_url = get_clean_stream(target)
         if stream_url:
             print(stream_url.strip())
