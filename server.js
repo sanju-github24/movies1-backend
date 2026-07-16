@@ -1420,7 +1420,9 @@ app.get('/api/songs/youtube-preview', async (req, res) => {
     }
 
     try {
-        const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoCategoryId=10&maxResults=5&q=${encodeURIComponent(q + ' song')}&key=${YOUTUBE_API_KEY}`;
+        // Bias the query toward the official upload and fetch enough
+        // candidates to score them properly.
+        const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoCategoryId=10&maxResults=10&q=${encodeURIComponent(q + ' official video')}&key=${YOUTUBE_API_KEY}`;
         const ytRes = await fetch(searchUrl);
         if (!ytRes.ok) {
             const errText = await ytRes.text();
@@ -1428,10 +1430,44 @@ app.get('/api/songs/youtube-preview', async (req, res) => {
             return res.status(ytRes.status).json({ error: 'YouTube API request failed' });
         }
         const data = await ytRes.json();
-        const items = (data.items || []).filter(i => i.id?.videoId);
+        const items = (data.items || []).filter(i => i.id?.videoId && i.snippet?.title);
         if (!items.length) return res.json({ videoId: null });
 
-        const best = items[0];
+        // ── Score candidates so the real official music video wins ──
+        const qTokens = q.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+        const scoreItem = (item) => {
+            const title   = (item.snippet.title || '').toLowerCase();
+            const channel = (item.snippet.channelTitle || '').toLowerCase();
+            let score = 0;
+
+            // Strong signals of the official upload
+            if (/official\s*(music\s*)?video/.test(title))      score += 50;
+            else if (/\bofficial\b/.test(title))                score += 30;
+            if (/\b(full\s*video|video\s*song)\b/.test(title))  score += 15;
+            if (/\bofficial\b/.test(channel)
+                || /\b(records|music|series|films|audio)\b/.test(channel)) score += 10;
+
+            // Auto-generated "Topic" channels are audio-only album art —
+            // a static image makes a poor background video.
+            if (channel.endsWith(' - topic')) score -= 25;
+
+            // Fan uploads / derivatives are not the official video
+            if (/\b(cover|remix|slowed|reverb|8d|16d|live|concert|reaction|shorts|status|mashup|karaoke|instrumental|teaser|trailer|dance|choreo|tutorial|ringtone|whatsapp|bgm)\b/.test(title)) score -= 40;
+            // Lyric videos are acceptable but rank below the real video
+            if (/\b(lyrics?|lyrical)\b/.test(title)) score -= 10;
+
+            // Reward overlap with the actual song title / artist tokens
+            qTokens.forEach(t => {
+                if (title.includes(t))   score += 4;
+                if (channel.includes(t)) score += 3;
+            });
+            return score;
+        };
+
+        const best = items
+            .map(i => [scoreItem(i), i])
+            .sort((a, b) => b[0] - a[0])[0][1];
+
         return res.json({
             videoId:      best.id.videoId,
             ytTitle:      best.snippet?.title || q,
