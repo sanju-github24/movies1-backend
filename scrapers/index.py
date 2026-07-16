@@ -583,6 +583,14 @@ def get_pendujatt_song_details(html, song_url):
 # Playwright Search Pagination Indexer
 # ─────────────────────────────────────────────────────────────────────────
 
+def _clean_result_title(title):
+    """Strip search-engine / site suffix noise so cards render clean names."""
+    t = re.sub(r'\s+', ' ', title or '').strip()
+    t = re.sub(r'\s*[-|–]\s*(?:PendJatt(?:\.Com\.Se)?|Pendujatt(?:\.com\.se)?).*$', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'\b(?:All Mp3 Songs? Download|All Mp3 Songs?|Mp3 Songs? Download|Download Mp3 Songs?|Mp3 Songs?|Songs? Download)\b', '', t, flags=re.IGNORECASE)
+    return re.sub(r'\s+', ' ', t).strip(' -|–').strip()
+
+
 def get_pendujatt_search_json(query):
     """
     Launches Playwright headless browser to run search or listing parse,
@@ -632,45 +640,78 @@ def get_pendujatt_search_json(query):
             if is_direct_listing:
                 page.wait_for_timeout(1000)
                 html_content = page.content()
-                
+
+                # Listing pages exist both with and without the .html suffix —
+                # if the first variant rendered no song links, retry the other.
+                if "/song/" not in html_content:
+                    alt_url = url[:-5] if url.endswith(".html") else url + ".html"
+                    try:
+                        dbg(f"[Pendujatt Listing] no tracks at {url}; retrying {alt_url}")
+                        page.goto(alt_url, wait_until="domcontentloaded", timeout=30000)
+                        page.wait_for_timeout(1000)
+                        html_content = page.content()
+                    except Exception:
+                        pass
+
                 default_poster = None
                 cover_match = re.search(r'property="og:image"\s+content=["\']([^"\']+)["\']', html_content)
                 if cover_match: default_poster = cover_match.group(1)
                 if not default_poster: default_poster = "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=150&q=80"
-                
-                results["metadata"] = {"poster": default_poster}
-                
+
+                # Real listing title (album/artist name) for the frontend header
+                listing_title = None
+                title_match = re.search(r'property="og:title"\s+content=["\']([^"\']+)["\']', html_content)
+                if not title_match:
+                    title_match = re.search(r'<title>([^<]+)</title>', html_content)
+                if title_match:
+                    listing_title = _clean_result_title(title_match.group(1))
+
+                results["metadata"] = {"poster": default_poster, "title": listing_title}
+
                 from bs4 import BeautifulSoup
                 soup = BeautifulSoup(html_content, 'html.parser')
-                
-                song_list_divs = soup.find_all(class_='song-list')
-                if song_list_divs:
-                    for div in song_list_divs:
-                        link = div.find('a', href=True)
-                        if not link or '/song/' not in link['href']: continue
-                        slug = link['href'].split('/song/')[-1].replace('.html', '')
-                        
-                        title_el = div.find(class_='songname')
-                        title = title_el.text.strip() if title_el else slug.replace('-', ' ').title()
-                        img = div.find('img')
-                        poster = img.get('data-src') or img.get('src') if img else default_poster
-                        if not poster or poster.startswith('/'): poster = default_poster
-                            
-                        results["songs"].append({
-                            "id": slug, "title": title, "label": "Mp3 Song", "poster": poster,
-                            "url": link['href'] if link['href'].startswith("http") else "https://pendujatt.com.se" + link['href']
-                        })
-                else:
-                    song_matches = re.findall(r'href=["\']((?:https://pendujatt\.com\.se)?/song/([^"\'>\s]+))["\'][^>]*>(.*?)</a>', html_content, re.IGNORECASE | re.DOTALL)
-                    seen_songs = set()
-                    for full_path, slug, inner_html in song_matches:
-                        full_url = full_path if full_path.startswith("http") else "https://pendujatt.com.se" + full_path
-                        if full_url in seen_songs: continue
-                        seen_songs.add(full_url)
-                        clean_title = re.sub(r'<[^>]*>', '', inner_html).strip()
-                        results["songs"].append({
-                            "id": slug, "title": clean_title, "label": "Mp3 Song", "poster": default_poster, "url": full_url
-                        })
+
+                # Single robust pass over every /song/ anchor: works for the
+                # .song-list layout, panel layouts, and any other markup.
+                seen_slugs = set()
+                for link in soup.find_all('a', href=True):
+                    href = link['href']
+                    if '/song/' not in href:
+                        continue
+                    slug = href.split('/song/')[-1].replace('.html', '').strip('/')
+                    if not slug or slug in seen_slugs:
+                        continue
+
+                    # Title: prefer an explicit .songname node, else the anchor's first text line
+                    title_el = link.find(class_='songname')
+                    if title_el is not None:
+                        title = title_el.get_text(strip=True)
+                    else:
+                        lines = [ln.strip() for ln in link.get_text('\n').split('\n') if ln.strip()]
+                        title = lines[0] if lines else slug.replace('-', ' ').title()
+                    title = _clean_result_title(title) or slug.replace('-', ' ').title()
+                    if len(title) < 2:
+                        continue
+
+                    # Poster: look inside the anchor then its container; honour lazy-load
+                    # attributes and keep relative paths by prefixing the domain.
+                    img = link.find('img')
+                    if img is None and link.parent is not None:
+                        img = link.parent.find('img')
+                    poster = None
+                    if img is not None:
+                        poster = (img.get('data-src') or img.get('data-original')
+                                  or img.get('lazy-src') or img.get('src'))
+                    if poster and poster.startswith('/'):
+                        poster = 'https://pendujatt.com.se' + poster
+                    if not poster or not poster.startswith('http'):
+                        poster = default_poster
+
+                    seen_slugs.add(slug)
+                    results["songs"].append({
+                        "id": slug, "title": title, "label": "Mp3 Song", "poster": poster,
+                        "url": href if href.startswith('http') else 'https://pendujatt.com.se' + href
+                    })
             else:
                 # ── Custom Search Engine Scraping Execution ──
                 def scrape_page_items(pg):
@@ -694,7 +735,7 @@ def get_pendujatt_search_json(query):
                     for item in raw_items:
                         full_url = item.get("url", "")
                         if not full_url: continue
-                        
+
                         if "google.com/url?" in full_url.lower() and "q=" in full_url.lower():
                             q_match = re.search(r'[?&]q=(https://[^&]+)', full_url)
                             if q_match: full_url = unquote(q_match.group(1))
@@ -702,19 +743,24 @@ def get_pendujatt_search_json(query):
                         if full_url in seen: continue
                         seen.add(full_url)
 
-                        title = item.get("title", "")
-                        title = re.sub(r'\s+', ' ', title).strip()
+                        title = _clean_result_title(item.get("title", ""))
                         poster = item.get("poster") or "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=150&q=80"
                         url_lower = full_url.lower()
 
                         if "/artist/" in url_lower:
-                            slug = full_url.split("/artist/")[-1].replace(".html", "")
+                            slug = full_url.split("/artist/")[-1].replace(".html", "").strip("/")
+                            if not slug or any(a["id"] == slug for a in results["artists"]): continue
+                            title = title or slug.replace("-", " ").title()
                             results["artists"].append({"id": slug, "title": title, "poster": poster, "url": full_url})
                         elif "/album/" in url_lower:
-                            slug = full_url.split("/album/")[-1].replace(".html", "")
+                            slug = full_url.split("/album/")[-1].replace(".html", "").strip("/")
+                            if not slug or any(a["id"] == slug for a in results["albums"]): continue
+                            title = title or slug.replace("-", " ").title()
                             results["albums"].append({"id": slug, "title": title, "poster": poster, "url": full_url})
                         elif "/song/" in url_lower:
-                            slug = full_url.split("/song/")[-1].replace(".html", "")
+                            slug = full_url.split("/song/")[-1].replace(".html", "").strip("/")
+                            if not slug or any(s["id"] == slug for s in results["songs"]): continue
+                            title = title or slug.replace("-", " ").title()
                             results["songs"].append({"id": slug, "title": title, "label": "Mp3 Song", "poster": poster, "url": full_url})
 
                 try:
