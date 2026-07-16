@@ -429,16 +429,91 @@ router.get('/tmdb-regional', async (req, res) => {
   const type    = req.query.type    || 'movie';
   const page    = req.query.page    || 1;
   const sort_by = req.query.sort_by || 'popularity.desc';
+  // min_votes: lower it (e.g. 10) to surface far more titles for smaller
+  // languages like Kannada/Malayalam. enrich=0 skips the logo/trailer
+  // enrichment so bulk pages come back with a single TMDB call.
+  const min_votes = Math.max(parseInt(req.query.min_votes, 10) || 50, 0);
+  const enrich    = req.query.enrich !== '0';
   try {
     const r = await axios.get(`${BASE_URL}discover/${type}`, {
-      params:{ api_key:TMDB_API_KEY, with_original_language:lang, sort_by, page, include_adult:false, 'vote_count.gte':50 }
+      params:{ api_key:TMDB_API_KEY, with_original_language:lang, sort_by, page, include_adult:false, 'vote_count.gte':min_votes }
     });
     const items    = (r.data.results||[]).map(item=>_normalise_list_item(item, type));
-    const enriched = await _enrich_batch(items, 6);
+    const enriched = enrich ? await _enrich_batch(items, 6) : items;
     res.json({ success:true, language:lang, language_name:LANG_DISPLAY[lang]||lang, content_type:type, page:r.data.page, total_pages:r.data.total_pages, total_results:r.data.total_results, results:enriched });
   } catch(e){
     console.error(`TMDB Regional [${lang}/${type}]:`,e.message);
     res.status(500).json({ success:false, message:`Failed to fetch ${lang} ${type}.`, details:e.message });
+  }
+});
+
+// ── /tmdb-search ──────────────────────────────────────────────────────────────
+// GET /api/tmdb-search?query=...&type=movie|tv|multi&lang=ta&page=1
+//   Multi-result TMDB search. type narrows to movies or TV shows; lang filters
+//   results to one original language (ISO 639-1). Results are enriched with
+//   logos + trailer keys.
+
+router.get('/tmdb-search', async (req, res) => {
+  const query = (req.query.query || '').trim();
+  if (!query) return res.status(400).json({ success:false, message:'Must provide query.' });
+  const type = ['movie','tv'].includes(req.query.type) ? req.query.type : 'multi';
+  const lang = (req.query.lang || '').trim();
+  const page = req.query.page || 1;
+  try {
+    const r = await axiosWithRetry({ method:"get", url:`${BASE_URL}search/${type}`,
+      params:{ api_key:TMDB_API_KEY, query, page, include_adult:false }
+    });
+    let raw = r.data.results || [];
+    if (type === 'multi') raw = raw.filter(it => it.media_type === 'movie' || it.media_type === 'tv');
+    if (lang) raw = raw.filter(it => it.original_language === lang);
+    const items = raw.slice(0, 18).map(it => _normalise_list_item(it, type === 'multi' ? it.media_type : type));
+    const enriched = await _enrich_batch(items, 6);
+    res.json({ success:true, query, content_type:type, language:lang || null, page:r.data.page, total_pages:r.data.total_pages, results:enriched });
+  } catch(e){
+    console.error(`TMDB Search [${query}]:`, e.message);
+    res.status(500).json({ success:false, message:'Failed to search TMDB.', details:e.message });
+  }
+});
+
+// ── /tmdb-trending-language ───────────────────────────────────────────────────
+// GET /api/tmdb-trending-language?lang=ta&type=movie&limit=5
+//   Top trending titles for one original language: recent releases (last 12
+//   months) sorted by TMDB popularity, topped up from all-time popular if the
+//   recent window is too thin. Results are enriched with logo + trailer.
+
+router.get('/tmdb-trending-language', async (req, res) => {
+  const lang  = req.query.lang || 'ta';
+  const type  = req.query.type === 'tv' ? 'tv' : 'movie';
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 5, 1), 20);
+  const dateField = type === 'tv' ? 'first_air_date' : 'primary_release_date';
+  const today = new Date().toISOString().slice(0, 10);
+  const from  = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  try {
+    const r = await axios.get(`${BASE_URL}discover/${type}`, {
+      params: {
+        api_key: TMDB_API_KEY, with_original_language: lang, sort_by: 'popularity.desc',
+        include_adult: false, 'vote_count.gte': 10,
+        [`${dateField}.gte`]: from, [`${dateField}.lte`]: today,
+      }
+    });
+    let items = (r.data.results || []).slice(0, limit).map(item => _normalise_list_item(item, type));
+
+    if (items.length < limit) {
+      const fb = await axios.get(`${BASE_URL}discover/${type}`, {
+        params: { api_key: TMDB_API_KEY, with_original_language: lang, sort_by: 'popularity.desc', include_adult: false, 'vote_count.gte': 50 }
+      });
+      const have = new Set(items.map(i => i.id));
+      for (const item of fb.data.results || []) {
+        if (items.length >= limit) break;
+        if (!have.has(item.id)) items.push(_normalise_list_item(item, type));
+      }
+    }
+
+    const enriched = await _enrich_batch(items, 5);
+    res.json({ success: true, language: lang, language_name: LANG_DISPLAY[lang] || lang, content_type: type, results: enriched });
+  } catch (e) {
+    console.error(`TMDB Trending Language [${lang}/${type}]:`, e.message);
+    res.status(500).json({ success: false, message: `Failed to fetch trending ${lang} ${type}.`, details: e.message });
   }
 });
 
