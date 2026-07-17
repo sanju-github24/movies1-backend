@@ -1630,6 +1630,16 @@ app.get('/api/songs/singer', async (req, res) => {
 // manifest + segments server-side with the right headers and re-serve them
 // same-origin with CORS, so the stream plays through like a normal file.
 // =====================================
+// Pipe a fetch response body to the client, whichever kind of stream it is.
+// node-fetch hands back a Node stream while undici/global fetch hands back a
+// web one, and Readable.fromWeb() throws ERR_INVALID_ARG_TYPE on the former.
+// This file imports fetch from 'node-fetch', so every segment request was
+// dying in the catch and answering 502 — no audio or video ever loaded.
+function pipeBody(body, res) {
+    if (typeof body.pipe === 'function') return body.pipe(res);
+    return Readable.fromWeb(body).pipe(res);
+}
+
 const GAANA_PROXY_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Referer': 'https://gaana.com/',
@@ -1711,7 +1721,7 @@ app.get('/api/gaana/seg', async (req, res) => {
         // Stream the body straight through instead of buffering the whole
         // segment in memory — critical on a 512 MB host under concurrent loads.
         if (!r.body) return res.end();
-        Readable.fromWeb(r.body).pipe(res);
+        pipeBody(r.body, res);
     } catch (e) {
         console.error('❌ Gaana segment proxy error:', e.message);
         if (!res.headersSent) return res.status(502).send('Proxy error');
@@ -1804,7 +1814,7 @@ app.get('/api/mux/seg', async (req, res) => {
 
         // Stream through instead of buffering the segment in memory.
         if (!r.body) return res.end();
-        Readable.fromWeb(r.body).pipe(res);
+        pipeBody(r.body, res);
     } catch (e) {
         console.error('❌ Mux segment proxy error:', e.message);
         if (!res.headersSent) return res.status(502).send('Proxy error');
