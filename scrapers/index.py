@@ -940,6 +940,453 @@ def get_pendujatt_track_info_json(id_or_url):
         return {"success": False, "error": str(e)}
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# GAANA — search + HLS (.m3u8) stream extraction
+# ─────────────────────────────────────────────────────────────────────────
+# Gaana songs stream over HLS (e.g. https://vodhlsgaana-*.akamaized.net/hls/.../index.m3u8)
+# rather than a plain downloadable MP3, so these tracks are play-only (no download).
+# Song ids are namespaced as "gaana:<seokey>" so the frontend and the --track
+# router can tell a Gaana track apart from a Pendujatt one.
+
+GAANA_FALLBACK_POSTER = "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=150&q=80"
+
+GAANA_LAUNCH_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-sandbox",
+    "--disable-gpu",
+    "--mute-audio",
+    "--disable-dev-shm-usage",
+    "--disable-features=IsolateOrigins,site-per-process",
+]
+
+
+def _gaana_pick(d, *keys):
+    """Return the first truthy value among the given keys of a dict."""
+    if not isinstance(d, dict):
+        return None
+    for k in keys:
+        v = d.get(k)
+        if v:
+            return v
+    return None
+
+
+def _gaana_artist_str(track):
+    """Flatten Gaana's varied artist shapes (list of dicts / list of strings / string)."""
+    a = track.get("artist") if isinstance(track, dict) else None
+    if isinstance(a, list):
+        names = []
+        for it in a:
+            if isinstance(it, dict):
+                names.append(it.get("name") or it.get("artist_name") or "")
+            elif isinstance(it, str):
+                names.append(it)
+        joined = ", ".join(n for n in names if n)
+        if joined:
+            return joined
+    elif isinstance(a, str) and a.strip():
+        return a.strip()
+    return _gaana_pick(track, "artist_name", "singers", "primaryArtist") or "Unknown"
+
+
+def _gaana_artwork(track):
+    """Pick the best artwork URL and upgrade tiny thumbnails to a larger rendition."""
+    art = _gaana_pick(track, "artwork", "atw", "albumartwork", "artworkLink", "atwl", "image")
+    if not art or not isinstance(art, str):
+        return GAANA_FALLBACK_POSTER
+    art = art.replace("size_s", "size_l").replace("size_m", "size_l")
+    if art.startswith("//"):
+        art = "https:" + art
+    return art if art.startswith("http") else GAANA_FALLBACK_POSTER
+
+
+def _gaana_seokey(track):
+    """Extract the song seokey (URL slug) from a track object."""
+    key = _gaana_pick(track, "seokey", "seo_url", "seokey_song", "url", "permaurl")
+    if not key:
+        return None
+    return str(key).rstrip("/").split("/")[-1].replace(".html", "")
+
+
+def _clean_gaana_title(t):
+    """Strip Gaana's SEO title cruft down to just the song name.
+
+    e.g. 'KALYANI : Play & Download New KALYANI online @Gaana' -> 'KALYANI'
+    """
+    if not t or not isinstance(t, str):
+        return ""
+    # Gaana often duplicates the song name across pipe-delimited segments —
+    # the first segment holds the clean name.
+    t = t.split('|')[0]
+    t = re.sub(r'\s*[:|-]\s*Play\s*&\s*Download.*$', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'\s*[-|:]\s*Gaana(?:\.com)?.*$', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'\s*@\s*Gaana.*$', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'\b(?:MP3\s*Song\s*Download|Song\s*Download|MP3\s*Song|Full\s*Song|Video\s*Song|online)\b',
+               '', t, flags=re.IGNORECASE)
+    t = re.sub(r'\s+', ' ', t).strip(' -|:•')
+    return t.strip()
+
+
+def _parse_gaana_desc(desc):
+    """Pull singer / album / duration out of Gaana's og:description sentence.
+
+    Gaana descriptions read like: 'Listen to <Artist> KALYANI MP3 song.
+    KALYANI song from the album <Album> is released on <date>. The duration
+    of song is 03:54. This song is sung by <Artist>.'
+    """
+    out = {}
+    if not desc or not isinstance(desc, str):
+        return out
+    m = re.search(r'sung by\s+([^.|]+)', desc, re.IGNORECASE)
+    if m:
+        out["singer"] = m.group(1).strip(' .,')
+    m = re.search(r'\bfrom\s+(?:the\s+album\s+)?["\']?(.+?)["\']?\s+(?:is|was)\s+released', desc, re.IGNORECASE)
+    if m:
+        out["album"] = m.group(1).strip(' .,"\'')
+    m = re.search(r'duration\s+of\s+(?:the\s+)?song\s+is\s+(\d{1,2}:\d{2})', desc, re.IGNORECASE)
+    if m:
+        out["duration"] = m.group(1).strip()
+    return out
+
+
+def _find_music_ld(ld_texts):
+    """Given raw JSON-LD script bodies, return the MusicRecording-like object."""
+    def looks_musical(obj):
+        if not isinstance(obj, dict):
+            return False
+        t = obj.get("@type", "")
+        types = t if isinstance(t, list) else [t]
+        if any("music" in str(x).lower() for x in types):
+            return True
+        return "byArtist" in obj or "inAlbum" in obj
+
+    for raw in ld_texts or []:
+        try:
+            data = json.loads(raw)
+        except Exception:
+            continue
+        candidates = []
+        if isinstance(data, list):
+            candidates = data
+        elif isinstance(data, dict):
+            if isinstance(data.get("@graph"), list):
+                candidates = data["@graph"]
+            else:
+                candidates = [data]
+        for c in candidates:
+            if looks_musical(c):
+                return c
+    return None
+
+
+def _gaana_search_http(query, limit=25):
+    """Fast pure-HTTP search against Gaana's apiv2 endpoint. Returns a list of raw tracks."""
+    headers = {
+        "Referer": "https://gaana.com/",
+        "X-Requested-With": "XMLHttpRequest",
+        "Accept": "application/json, text/plain, */*",
+    }
+    attempts = [
+        ("https://gaana.com/apiv2", {"type": "search", "subtype": "search_song", "key": query}),
+        ("https://gaana.com/apiv2", {"type": "search", "subtype": "search_all", "key": query}),
+        ("https://apiv2.gaana.com/search/getMoreResults/song", {"keyword": query, "limit": str(limit)}),
+    ]
+    for base, params in attempts:
+        try:
+            r = _HTTP.get(base, params=params, headers=headers, timeout=15)
+            if r.status_code != 200:
+                continue
+            try:
+                data = r.json()
+            except Exception:
+                continue
+
+            tracks = None
+            if isinstance(data, list):
+                tracks = data
+            elif isinstance(data, dict):
+                tracks = (data.get("tracks") or data.get("gongs") or data.get("song")
+                          or data.get("songs") or data.get("data"))
+                if isinstance(tracks, dict):
+                    tracks = (tracks.get("tracks") or tracks.get("song")
+                              or tracks.get("songs") or list(tracks.values()))
+            if tracks:
+                return [t for t in tracks if isinstance(t, dict)][:limit]
+        except Exception as e:
+            dbg(f"[Gaana] HTTP search attempt failed: {e}")
+    return []
+
+
+def _gaana_search_playwright(query, limit=25):
+    """Fallback search: render the Gaana search page and scrape song anchors."""
+    from playwright.sync_api import sync_playwright
+
+    tracks = []
+    url = f"https://gaana.com/search/{quote_plus(query)}"
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True, args=GAANA_LAUNCH_ARGS)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800},
+            )
+            page = context.new_page()
+            page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            try:
+                page.wait_for_selector("a[href*='/song/']", timeout=12000)
+            except Exception:
+                pass
+            page.wait_for_timeout(1500)
+
+            raw = page.evaluate("""() => {
+                const out = [];
+                document.querySelectorAll("a[href*='/song/']").forEach(a => {
+                    const img = a.querySelector('img') || (a.parentElement && a.parentElement.querySelector('img'));
+                    out.push({
+                        href: a.href,
+                        title: (a.getAttribute('title') || a.textContent || '').trim(),
+                        artwork: img ? (img.getAttribute('data-src') || img.src) : null,
+                    });
+                });
+                return out;
+            }""")
+
+            seen = set()
+            for it in raw:
+                href = it.get("href") or ""
+                if "/song/" not in href:
+                    continue
+                slug = href.split("/song/")[-1].rstrip("/").replace(".html", "")
+                if not slug or slug in seen:
+                    continue
+                seen.add(slug)
+                tracks.append({
+                    "seokey": slug,
+                    "title": it.get("title") or slug.replace("-", " ").title(),
+                    "artwork": it.get("artwork"),
+                })
+                if len(tracks) >= limit:
+                    break
+        except Exception as e:
+            dbg(f"[Gaana] Playwright search failed: {e}")
+        finally:
+            if 'browser' in locals():
+                browser.close()
+    return tracks
+
+
+def get_gaana_search_json(query, limit=25):
+    """Return Gaana search results shaped like the Pendujatt card structure."""
+    results = {"songs": [], "albums": [], "artists": []}
+    tracks = _gaana_search_http(query, limit)
+    if not tracks:
+        try:
+            tracks = _gaana_search_playwright(query, limit)
+        except Exception as e:
+            dbg(f"[Gaana] search fallback error: {e}")
+            tracks = []
+
+    seen = set()
+    for t in tracks:
+        seokey = _gaana_seokey(t)
+        if not seokey or seokey in seen:
+            continue
+        seen.add(seokey)
+        raw_title = _gaana_pick(t, "title", "track_title", "name") or seokey.replace("-", " ").title()
+        title = _clean_gaana_title(raw_title) or _clean_result_title(raw_title) or raw_title
+        if len(title) < 2:
+            continue
+        results["songs"].append({
+            "id": f"gaana:{seokey}",
+            "title": title,
+            "label": "Gaana",
+            "poster": _gaana_artwork(t),
+            "url": f"https://gaana.com/song/{seokey}",
+            "source": "gaana",
+            "artist": _gaana_artist_str(t),
+        })
+    return results
+
+
+def _iso_duration_to_clock(iso):
+    """Convert an ISO-8601 duration (e.g. PT3M45S) to m:ss. Returns 'N/A' on failure."""
+    if not iso or not isinstance(iso, str):
+        return "N/A"
+    m = re.match(r'^P(?:T)?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$', iso.strip(), re.IGNORECASE)
+    if not m:
+        return "N/A"
+    h, mi, s = (int(x) if x else 0 for x in m.groups())
+    total = h * 3600 + mi * 60 + s
+    if total <= 0:
+        return "N/A"
+    return f"{total // 60}:{total % 60:02d}"
+
+
+def get_gaana_track_info_json(seokey):
+    """
+    Resolve a Gaana song's HLS (.m3u8) stream + metadata by rendering the song page
+    with Playwright and intercepting the manifest request the player fires.
+    Downloads are intentionally empty — Gaana tracks are play-only.
+    """
+    song_url = f"https://gaana.com/song/{seokey}"
+    captured = {"m3u8": None}
+    metadata = {
+        "title": seokey.replace("-", " ").title(),
+        "cover_image": None,
+        "singer": "Unknown",
+        "album": "Single",
+        "composer": "Unknown",
+        "starring": "N/A",
+        "label": "Gaana",
+        "duration": "N/A",
+        "added_on": "N/A",
+        "page_url": song_url,
+    }
+
+    def handle_request(request):
+        try:
+            u = request.url
+        except Exception:
+            return
+        if ".m3u8" not in u.lower():
+            return
+        # Prefer a master/index manifest; otherwise keep the first .m3u8 seen.
+        if captured["m3u8"] is None or "index.m3u8" in u.lower() or "master.m3u8" in u.lower():
+            captured["m3u8"] = u
+
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception as e:
+        dbg(f"[Gaana] Playwright unavailable: {e}")
+        sync_playwright = None
+
+    if sync_playwright is not None:
+      with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(headless=True, args=GAANA_LAUNCH_ARGS)
+            context = browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+                viewport={"width": 1280, "height": 800},
+            )
+            page = context.new_page()
+            page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+            page.on("request", handle_request)
+
+            page.goto(song_url, wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(1500)
+
+            # ── Scrape metadata: collect ALL JSON-LD blocks + og/meta tags ──
+            try:
+                scraped = page.evaluate("""() => {
+                    const out = {};
+                    out.ldTexts = Array.from(
+                        document.querySelectorAll('script[type="application/ld+json"]')
+                    ).map(s => s.textContent);
+                    const og = (prop) => {
+                        const el = document.querySelector(`meta[property="${prop}"]`)
+                                || document.querySelector(`meta[name="${prop}"]`);
+                        return el ? el.getAttribute('content') : null;
+                    };
+                    out.ogTitle   = og('og:title');
+                    out.ogImage   = og('og:image');
+                    out.ogDesc    = og('og:description');
+                    out.metaDesc  = og('description');
+                    out.pageTitle = document.title || null;
+                    return out;
+                }""")
+            except Exception:
+                scraped = {}
+            if not isinstance(scraped, dict):
+                scraped = {}
+
+            # 1) Structured data (schema.org MusicRecording), if Gaana provides it
+            ld = _find_music_ld(scraped.get("ldTexts"))
+            if isinstance(ld, dict):
+                if ld.get("name"):
+                    metadata["title"] = _clean_gaana_title(ld["name"]) or ld["name"]
+                img = ld.get("image")
+                if isinstance(img, list) and img:
+                    img = img[0]
+                if isinstance(img, str) and img:
+                    metadata["cover_image"] = img
+                by = ld.get("byArtist")
+                if isinstance(by, dict) and by.get("name"):
+                    metadata["singer"] = by["name"]
+                elif isinstance(by, list):
+                    names = [b.get("name") for b in by if isinstance(b, dict) and b.get("name")]
+                    if names:
+                        metadata["singer"] = ", ".join(names)
+                elif isinstance(by, str) and by.strip():
+                    metadata["singer"] = by.strip()
+                album = ld.get("inAlbum")
+                if isinstance(album, dict) and album.get("name"):
+                    metadata["album"] = album["name"]
+                elif isinstance(album, str) and album.strip():
+                    metadata["album"] = album.strip()
+                dur = _iso_duration_to_clock(ld.get("duration"))
+                if dur != "N/A":
+                    metadata["duration"] = dur
+
+            # 2) Description sentence — fills whatever structured data missed
+            desc_fields = _parse_gaana_desc(scraped.get("ogDesc") or scraped.get("metaDesc"))
+            if metadata["singer"] == "Unknown" and desc_fields.get("singer"):
+                metadata["singer"] = desc_fields["singer"]
+            if metadata["album"] == "Single" and desc_fields.get("album"):
+                metadata["album"] = desc_fields["album"]
+            if metadata["duration"] == "N/A" and desc_fields.get("duration"):
+                metadata["duration"] = desc_fields["duration"]
+
+            # 3) Title / cover fallbacks from Open Graph and <title>
+            default_title = seokey.replace("-", " ").title()
+            if metadata["title"] in (default_title, "", None):
+                cleaned = _clean_gaana_title(scraped.get("ogTitle") or scraped.get("pageTitle") or "")
+                if cleaned:
+                    metadata["title"] = cleaned
+            if not metadata["cover_image"] and scraped.get("ogImage"):
+                metadata["cover_image"] = scraped["ogImage"]
+            if not metadata["cover_image"]:
+                metadata["cover_image"] = GAANA_FALLBACK_POSTER
+
+            # ── Nudge the player so the HLS manifest request fires ──
+            play_selectors = [
+                "span.playPause", ".playIcon", ".play_c", "[data-value='play']",
+                "button[aria-label='Play']", "[title='Play']", ".s_play", ".playCta",
+            ]
+            for sel in play_selectors:
+                if captured["m3u8"]:
+                    break
+                try:
+                    el = page.locator(sel).first
+                    if el.count() and el.is_visible():
+                        el.click(force=True, timeout=2000)
+                        page.wait_for_timeout(1200)
+                except Exception:
+                    continue
+
+            # ── Wait for the manifest to be requested ──
+            for _ in range(60):
+                if captured["m3u8"]:
+                    break
+                page.wait_for_timeout(250)
+
+        except Exception as e:
+            dbg(f"[Gaana] track extraction error: {e}")
+        finally:
+            if 'browser' in locals():
+                browser.close()
+
+    stream_url = captured["m3u8"]
+    return {
+        "success": bool(stream_url),
+        "stream_url": stream_url,
+        "downloads": {},          # Gaana is play-only — no downloadable file
+        "metadata": metadata,
+        "source": "gaana",
+        "error": None if stream_url else "Could not resolve Gaana stream manifest.",
+    }
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         flag = sys.argv[1]
@@ -949,7 +1396,26 @@ if __name__ == "__main__":
             sys.exit(0)
         elif flag == "--search":
             if len(sys.argv) < 3: sys.exit(1)
-            print(json.dumps(get_pendujatt_search_json(sys.argv[2])))
+            query = sys.argv[2]
+            # Pendujatt is the primary source; Gaana results are merged in.
+            merged = get_pendujatt_search_json(query)
+            merged.setdefault("songs", [])
+            merged.setdefault("albums", [])
+            merged.setdefault("artists", [])
+            try:
+                gaana = get_gaana_search_json(query)
+                # Interleave the two song lists so Gaana tracks stay visible
+                # instead of being buried after a long Pendujatt list.
+                pj = merged["songs"]
+                gn = gaana.get("songs", [])
+                interleaved = []
+                for i in range(max(len(pj), len(gn))):
+                    if i < len(pj): interleaved.append(pj[i])
+                    if i < len(gn): interleaved.append(gn[i])
+                merged["songs"] = interleaved
+            except Exception as e:
+                dbg(f"[Gaana] merge into search failed: {e}")
+            print(json.dumps(merged))
             sys.exit(0)
         elif flag == "--singer":
             if len(sys.argv) < 3: sys.exit(1)
@@ -958,7 +1424,11 @@ if __name__ == "__main__":
             sys.exit(0)
         elif flag == "--track":
             if len(sys.argv) < 3: sys.exit(1)
-            print(json.dumps(get_pendujatt_track_info_json(sys.argv[2])))
+            track_id = sys.argv[2]
+            if track_id.startswith("gaana:"):
+                print(json.dumps(get_gaana_track_info_json(track_id[len("gaana:"):])))
+            else:
+                print(json.dumps(get_pendujatt_track_info_json(track_id)))
             sys.exit(0)
             
         target = flag
