@@ -8,6 +8,7 @@ import path from 'path';
 import { fileURLToPath } from 'url'; 
 import { dirname } from 'path';
 import { spawn } from 'child_process';
+import { Readable } from 'stream';
 import { startTelegramBot } from "./telegram/bot.js";
 
 import authRouter from './routes/authRoutes.js';
@@ -1685,13 +1686,18 @@ app.get('/api/gaana/seg', async (req, res) => {
         if (cr) res.set('Content-Range', cr);
         const ar = r.headers.get('accept-ranges');
         if (ar) res.set('Accept-Ranges', ar);
+        const cl = r.headers.get('content-length');
+        if (cl) res.set('Content-Length', cl);
         res.set('Cache-Control', 'no-store');
 
-        const buf = Buffer.from(await r.arrayBuffer());
-        return res.send(buf);
+        // Stream the body straight through instead of buffering the whole
+        // segment in memory — critical on a 512 MB host under concurrent loads.
+        if (!r.body) return res.end();
+        Readable.fromWeb(r.body).pipe(res);
     } catch (e) {
         console.error('❌ Gaana segment proxy error:', e.message);
-        return res.status(502).send('Proxy error');
+        if (!res.headersSent) return res.status(502).send('Proxy error');
+        return res.end();
     }
 });
 
