@@ -1721,8 +1721,107 @@ app.get('/api/gaana/seg', async (req, res) => {
 
 
 // =====================================
+// 🎬 MUX HLS PROXY (StayLive / IPL video)
+// Mux enforces a playback restriction on these tokens: the manifest returns
+// 200 to a server with no Referer (or an iplt20.com one) and 403 to a browser
+// on our domain, which always sends Origin/Referer. So the stream can never be
+// played direct from the page — proxy it with the headers Mux accepts and
+// re-serve same-origin with CORS.
+// =====================================
+const MUX_PROXY_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Referer': 'https://www.iplt20.com/',
+    'Origin':  'https://www.iplt20.com',
+    'Accept':  '*/*',
+};
+
+// Only Mux hosts — never an open relay. Manifests redirect to *.fastly.mux.com.
+function muxProxyAllowed(u) {
+    try {
+        const host = new URL(u).hostname.toLowerCase();
+        return host === 'mux.com' || host.endsWith('.mux.com');
+    } catch (_) {
+        return false;
+    }
+}
+
+app.get('/api/mux/hls', async (req, res) => {
+    const url = req.query.url;
+    if (!url || !muxProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
+    try {
+        const r = await fetch(url, { headers: MUX_PROXY_HEADERS });
+        if (!r.ok) {
+            console.error(`❌ Mux HLS proxy upstream ${r.status} for ${url}`);
+            return res.status(r.status).send(`Upstream ${r.status}`);
+        }
+        const text = await r.text();
+        // Mux redirects the master to a regional host; resolve children against
+        // the final URL, not the requested one, or the relative paths break.
+        const base = new URL(r.url || url);
+
+        const rewritten = text.split('\n').map(line => {
+            const t = line.trim();
+            if (!t) return line;
+            if (t.startsWith('#')) {
+                return line.replace(/URI="([^"]+)"/g, (_m, uri) => {
+                    const abs = new URL(uri, base).href;
+                    return `URI="/api/mux/seg?url=${encodeURIComponent(abs)}"`;
+                });
+            }
+            const abs = new URL(t, base).href;
+            const isChildManifest = /\.m3u8(\?|$)/i.test(abs);
+            const proxyPath = isChildManifest ? '/api/mux/hls' : '/api/mux/seg';
+            return `${proxyPath}?url=${encodeURIComponent(abs)}`;
+        }).join('\n');
+
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Content-Type', 'application/vnd.apple.mpegurl');
+        res.set('Cache-Control', 'no-store');
+        return res.send(rewritten);
+    } catch (e) {
+        console.error('❌ Mux HLS proxy error:', e.message);
+        return res.status(502).send('Proxy error');
+    }
+});
+
+app.get('/api/mux/seg', async (req, res) => {
+    const url = req.query.url;
+    if (!url || !muxProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
+    try {
+        const headers = { ...MUX_PROXY_HEADERS };
+        if (req.headers.range) headers['Range'] = req.headers.range;
+        const r = await fetch(url, { headers });
+
+        res.status(r.status);
+        res.set('Access-Control-Allow-Origin', '*');
+        const ct = r.headers.get('content-type');
+        if (ct) res.set('Content-Type', ct);
+        const cr = r.headers.get('content-range');
+        if (cr) res.set('Content-Range', cr);
+        const cl = r.headers.get('content-length');
+        if (cl) res.set('Content-Length', cl);
+        res.set('Accept-Ranges', 'bytes');
+
+        // Stream through instead of buffering the segment in memory.
+        if (!r.body) return res.end();
+        Readable.fromWeb(r.body).pipe(res);
+    } catch (e) {
+        console.error('❌ Mux segment proxy error:', e.message);
+        if (!res.headersSent) return res.status(502).send('Proxy error');
+        return res.end();
+    }
+});
+
+// Wrap a Mux URL so the browser fetches it through our proxy instead of direct.
+// Absolute, because the player runs on the frontend's origin, not this one.
+function toMuxProxyUrl(req, m3u8) {
+    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+    return `${proto}://${req.get('host')}/api/mux/hls?url=${encodeURIComponent(m3u8)}`;
+}
+
+// =====================================
 // 📡 DYNAMIC M3U8 STREAM EXTRACTOR
-// Runs the stealth Playwright scraper behind the scenes 
+// Runs the stealth Playwright scraper behind the scenes
 // without spawning desktop frames on Render.
 // =====================================
 app.get('/api/get-stream', (req, res) => {
@@ -1757,9 +1856,14 @@ app.get('/api/get-stream', (req, res) => {
             });
         }
 
-        // Return the clean live .m3u8 link directly back to your React frontend context
-        console.log(`✅ Successfully extracted fresh token manifest: ${cleanOutput}`);
-        return res.json({ success: true, url: cleanOutput });
+        // Mux tokens are domain-restricted, so hand back the proxied URL — the
+        // raw one 403s in the browser. Everything else plays direct.
+        const finalUrl = muxProxyAllowed(cleanOutput)
+            ? toMuxProxyUrl(req, cleanOutput)
+            : cleanOutput;
+
+        console.log(`✅ Successfully extracted fresh token manifest: ${finalUrl}`);
+        return res.json({ success: true, url: finalUrl });
     });
 });
 
