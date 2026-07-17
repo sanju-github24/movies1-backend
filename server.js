@@ -2078,21 +2078,41 @@ app.get('/api/render', async (req, res) => {
     // never goes quiet and navigation just times out. Wait for the DOM, then for
     // the app to actually put text on the page — that's the thing we're here for.
     await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 20000 });
+
+    // Wait for the page's own <link rel="canonical">, not merely for text.
+    //
+    // "Has text" was satisfied by the word "Loading match…", so the snapshot was
+    // taken mid-fetch: the crawler got a spinner, the site-wide default title and
+    // no structured data. Every page we publish for search sets a canonical
+    // through Helmet, and the match page's loading branch returns before that —
+    // so its presence means the real page has rendered, not a placeholder.
     await page.waitForFunction(
       () => {
+        if (!document.querySelector('link[rel="canonical"]')) return false;
         const root = document.querySelector('#root, #app');
         return !!root && root.innerText.trim().length > 0;
       },
-      { timeout: 12000, polling: 300 },
+      { timeout: 15000, polling: 300 },
     ).catch(() => {
-      // Fall through and return whatever rendered — a partial page still beats
-      // the empty shell, and the meta tags are in <head> by this point anyway.
-      console.warn('⚠️  prerender: no body text after 12s:', target);
+      // Return whatever rendered rather than 502 — but say so, because this
+      // means the crawler is getting a page we didn't intend to publish.
+      console.warn('⚠️  prerender: no canonical after 15s (placeholder?):', target);
     });
     // Small settle so data arriving just after first paint makes the snapshot.
     await new Promise(r => setTimeout(r, 700));
 
     const html = await page.content();
+
+    // A snapshot with no canonical is a placeholder — a spinner still carrying
+    // index.html's site-wide title. Serving that is worse than serving nothing:
+    // the crawler would index a loading screen under the wrong title, where the
+    // shell at least lets Google render the page itself. Don't return it, and
+    // don't cache it for the next five minutes either.
+    if (!/rel=["']canonical["']/.test(html)) {
+      console.warn('⚠️  prerender: incomplete render, not serving:', target);
+      return res.status(502).type('text/plain').send('Render incomplete: page did not finish loading');
+    }
+
     renderCacheSet(target, html);
     res.set('Content-Type', 'text/html; charset=utf-8');
     res.set('X-Render-Cache', 'MISS');
