@@ -950,8 +950,10 @@ def get_pendujatt_track_info_json(id_or_url):
 
 GAANA_FALLBACK_POSTER = "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=150&q=80"
 
-# Lean flags to keep headless Chromium within a 512 MB host: single process,
-# no zygote, no GPU/extensions, images disabled. Prevents OOM on Render free tier.
+# Modest memory savings that do NOT interfere with the Gaana player starting
+# playback (which is required for it to request the HLS manifest we capture).
+# Aggressive flags like --single-process / capped V8 heap were removed because
+# they crash/stall the player and break stream extraction.
 GAANA_LAUNCH_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--no-sandbox",
@@ -960,20 +962,13 @@ GAANA_LAUNCH_ARGS = [
     "--mute-audio",
     "--disable-dev-shm-usage",
     "--disable-features=IsolateOrigins,site-per-process",
-    "--single-process",
-    "--no-zygote",
     "--disable-extensions",
-    "--disable-background-networking",
     "--disable-software-rasterizer",
-    "--renderer-process-limit=1",
-    "--blink-settings=imagesEnabled=false",
-    "--js-flags=--max-old-space-size=256",
 ]
 
-# Resource types we never need while scraping — blocking them slashes memory
-# and bandwidth. The manifest URL is still captured via the request event even
-# if the actual media/segment fetch is aborted.
-_GAANA_BLOCK_TYPES = {"image", "font", "media", "stylesheet"}
+# Only block images/fonts — resources the player never needs. Media/stylesheet
+# are left alone so the player initialises and requests the manifest normally.
+_GAANA_BLOCK_TYPES = {"image", "font"}
 
 def _gaana_block_heavy(route):
     try:
@@ -1207,13 +1202,11 @@ def _gaana_search_playwright(query, limit=25):
 def get_gaana_search_json(query, limit=25):
     """Return Gaana search results shaped like the Pendujatt card structure."""
     results = {"songs": [], "albums": [], "artists": []}
+    # HTTP-only on purpose: search runs in the same process as the Pendujatt
+    # (Playwright) search, so launching a second Chromium here risks OOM-killing
+    # the whole process on a small host — which would take Pendujatt's results
+    # down with it. Gaana track playback still uses its own Playwright process.
     tracks = _gaana_search_http(query, limit)
-    if not tracks:
-        try:
-            tracks = _gaana_search_playwright(query, limit)
-        except Exception as e:
-            dbg(f"[Gaana] search fallback error: {e}")
-            tracks = []
 
     seen = set()
     for t in tracks:
