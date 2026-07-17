@@ -950,14 +950,41 @@ def get_pendujatt_track_info_json(id_or_url):
 
 GAANA_FALLBACK_POSTER = "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=150&q=80"
 
+# Lean flags to keep headless Chromium within a 512 MB host: single process,
+# no zygote, no GPU/extensions, images disabled. Prevents OOM on Render free tier.
 GAANA_LAUNCH_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--no-sandbox",
+    "--disable-setuid-sandbox",
     "--disable-gpu",
     "--mute-audio",
     "--disable-dev-shm-usage",
     "--disable-features=IsolateOrigins,site-per-process",
+    "--single-process",
+    "--no-zygote",
+    "--disable-extensions",
+    "--disable-background-networking",
+    "--disable-software-rasterizer",
+    "--renderer-process-limit=1",
+    "--blink-settings=imagesEnabled=false",
+    "--js-flags=--max-old-space-size=256",
 ]
+
+# Resource types we never need while scraping — blocking them slashes memory
+# and bandwidth. The manifest URL is still captured via the request event even
+# if the actual media/segment fetch is aborted.
+_GAANA_BLOCK_TYPES = {"image", "font", "media", "stylesheet"}
+
+def _gaana_block_heavy(route):
+    try:
+        if route.request.resource_type in _GAANA_BLOCK_TYPES:
+            return route.abort()
+        return route.continue_()
+    except Exception:
+        try:
+            return route.continue_()
+        except Exception:
+            return None
 
 
 def _gaana_pick(d, *keys):
@@ -1130,6 +1157,7 @@ def _gaana_search_playwright(query, limit=25):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800},
             )
+            context.route("**/*", _gaana_block_heavy)
             page = context.new_page()
             page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             page.goto(url, wait_until="domcontentloaded", timeout=30000)
@@ -1269,6 +1297,10 @@ def get_gaana_track_info_json(seokey):
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 viewport={"width": 1280, "height": 800},
             )
+            # Block heavy resources to stay within the host's memory budget.
+            # The manifest URL is still captured by handle_request (the request
+            # event fires before the route abort), so blocking media is safe.
+            context.route("**/*", _gaana_block_heavy)
             page = context.new_page()
             page.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
             page.on("request", handle_request)
