@@ -2012,11 +2012,43 @@ async function getRenderBrowser() {
   return _renderBrowser;
 }
 
+// Rendering is slow — tens of seconds cold, and the caller can only wait so long
+// before it gives up and serves the crawler an empty shell. Keep finished HTML
+// briefly so the second crawl of a page is instant instead of paying again.
+// Small on purpose: this shares 512 MB with everything else.
+const _renderCache = new Map();   // url -> { html, ts }
+const RENDER_CACHE_MS = 5 * 60 * 1000;
+const RENDER_CACHE_MAX = 60;
+
+function renderCacheGet(url) {
+  const hit = _renderCache.get(url);
+  if (!hit) return null;
+  if (Date.now() - hit.ts > RENDER_CACHE_MS) { _renderCache.delete(url); return null; }
+  return hit.html;
+}
+
+function renderCacheSet(url, html) {
+  if (_renderCache.size >= RENDER_CACHE_MAX) {
+    // Oldest first — Map keeps insertion order.
+    _renderCache.delete(_renderCache.keys().next().value);
+  }
+  _renderCache.set(url, { html, ts: Date.now() });
+}
+
 app.get('/api/render', async (req, res) => {
   const target = req.query.url;
   if (!target || !renderTargetAllowed(target)) {
     return res.status(400).send('Invalid or disallowed url');
   }
+
+  const cached = renderCacheGet(target);
+  if (cached) {
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    res.set('X-Render-Cache', 'HIT');
+    res.set('Cache-Control', 'public, max-age=0, s-maxage=120, stale-while-revalidate=600');
+    return res.send(cached);
+  }
+
   if (_rendersInFlight >= RENDER_MAX_CONCURRENT) {
     // Shed load rather than OOM the box; the caller falls back to the SPA.
     return res.status(503).send('Renderer busy');
@@ -2061,7 +2093,9 @@ app.get('/api/render', async (req, res) => {
     await new Promise(r => setTimeout(r, 700));
 
     const html = await page.content();
+    renderCacheSet(target, html);
     res.set('Content-Type', 'text/html; charset=utf-8');
+    res.set('X-Render-Cache', 'MISS');
     // Short: a live scorecard goes stale in minutes, but repeat crawls in the
     // same burst shouldn't each cost a render.
     res.set('Cache-Control', 'public, max-age=0, s-maxage=120, stale-while-revalidate=600');
