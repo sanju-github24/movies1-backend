@@ -1648,10 +1648,16 @@ const GAANA_PROXY_HEADERS = {
 };
 
 // Only allow proxying Gaana / Akamai hosts — never an open relay.
+// Exact host or subdomain only. The old /gaana/ substring test also matched
+// attacker-controlled hosts like gaana.evil.com, which made this an open relay.
+const MUSIC_PROXY_HOSTS = [
+    'gaana.com', 'gaanacdn.com', 'akamaized.net', 'akamai.net',
+    'jiosaavn.com', 'saavn.com', 'saavncdn.com',
+];
 function gaanaProxyAllowed(u) {
     try {
         const host = new URL(u).hostname.toLowerCase();
-        return /akamaized\.net$/.test(host) || /gaana/.test(host) || /gaanacdn/.test(host) || /akamai/.test(host);
+        return MUSIC_PROXY_HOSTS.some(d => host === d || host.endsWith('.' + d));
     } catch (_) {
         return false;
     }
