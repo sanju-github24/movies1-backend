@@ -1321,10 +1321,15 @@ def _saavn_card(s):
     pid = s.get("id")
     if not pid:
         return None
+    album = html_unescape(s.get("album") or "").strip()
+    year = str(s.get("year") or "").strip()
     return {
         "id": f"saavn__{pid}",
         "title": html_unescape(s.get("song") or "").strip() or "Untitled",
-        "label": "JioSaavn",
+        # The cards render `label` as the line under the title. Put the album
+        # there — it's what a listener wants to see, and naming the source in
+        # the UI serves nobody.
+        "label": " · ".join(x for x in (album, year) if x) or "Single",
         "poster": _saavn_img(s.get("image")),
         "url": s.get("perma_url") or f"https://www.jiosaavn.com/song/{pid}",
         "source": "saavn",
@@ -1343,6 +1348,60 @@ def get_saavn_search_json(query, limit=25):
     results = (d or {}).get("results") or []
     songs = [c for c in (_saavn_card(s) for s in results if isinstance(s, dict)) if c]
     return {"songs": songs[:limit], "albums": [], "artists": []}
+
+
+# Languages the home page opens with, in the order they're shown. JioSaavn keeps
+# a trending list per language; these are the ones worth leading with.
+SAAVN_HOME_LANGUAGES = [
+    "hindi", "english", "punjabi", "tamil",
+    "telugu", "kannada", "malayalam", "marathi",
+]
+
+
+def _saavn_trending(language, limit=20):
+    """Trending songs for one language, shaped as cards."""
+    d = _saavn_get({
+        "__call": "content.getTrending",
+        "entity_type": "song",
+        "entity_language": language,
+    })
+    if not isinstance(d, list):
+        return []
+    cards = []
+    for item in d:
+        if not isinstance(item, dict) or item.get("type") != "song":
+            continue
+        card = _saavn_card(item.get("details") or {})
+        if card:
+            cards.append(card)
+    return cards[:limit]
+
+
+def get_saavn_homepage_json(languages=None, per_language=20):
+    """Home page sections: trending songs per language, fetched concurrently.
+
+    Replaces scraping Pendujatt's homepage with a browser — that cost ~30s and a
+    Chromium launch to read a page that was never ours to depend on. Each section
+    here is one HTTP call, so the whole page lands in about a second.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    langs = languages or SAAVN_HOME_LANGUAGES
+
+    def one(lang):
+        try:
+            return lang, _saavn_trending(lang, per_language)
+        except Exception as e:
+            dbg(f"[Saavn] trending {lang} failed: {e}")
+            return lang, []
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(one, langs))
+
+    # Dict of section -> tracks, which is the shape the home page already renders.
+    # Skip empty sections so a language outage leaves a gap rather than a header
+    # over nothing.
+    return {f"Trending in {lang.title()}": cards for lang, cards in results if cards}
 
 
 def get_saavn_track_info_json(pid):
@@ -1853,7 +1912,10 @@ if __name__ == "__main__":
         flag = sys.argv[1]
         
         if flag == "--homepage":
-            print(json.dumps(get_pendujatt_homepage_playwright()))
+            # Trending per language, over HTTP. Pendujatt's homepage needed a
+            # browser to read, took ~30s, and gave us whatever it happened to be
+            # promoting; this is a section per language in about a second.
+            print(json.dumps(get_saavn_homepage_json()))
             sys.exit(0)
         elif flag == "--search":
             if len(sys.argv) < 3: sys.exit(1)
