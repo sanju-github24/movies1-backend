@@ -1914,6 +1914,83 @@ app.get('/api/get-stream', (req, res) => {
 });
 
 // -------------------- Test route --------------------
+// =====================================
+// 🔎 DYNAMIC SITEMAP
+// Served on the site's own domain via a Vercel rewrite (see vercel.json) —
+// a sitemap has to live on the host whose URLs it lists.
+//
+// Generated per request rather than committed as a file: fixtures and posts
+// appear the moment they exist, and <lastmod> tells Google what actually
+// changed. The static public/sitemap.xml it replaces still pointed at
+// 1anchormovies.live and was last touched by hand in 2025.
+// =====================================
+const SITE_ORIGIN = (process.env.SITE_ORIGIN || 'https://www.1anchormovies.buzz').replace(/\/$/, '');
+
+function xmlEscape(s) {
+  return String(s).replace(/[<>&'"]/g, c => (
+    { '<': '&lt;', '>': '&gt;', '&': '&amp;', "'": '&apos;', '"': '&quot;' }[c]
+  ));
+}
+
+function urlEntry({ loc, lastmod, changefreq, priority }) {
+  return [
+    '  <url>',
+    `    <loc>${xmlEscape(loc)}</loc>`,
+    lastmod    ? `    <lastmod>${lastmod}</lastmod>` : '',
+    changefreq ? `    <changefreq>${changefreq}</changefreq>` : '',
+    priority   ? `    <priority>${priority}</priority>` : '',
+    '  </url>',
+  ].filter(Boolean).join('\n');
+}
+
+app.get('/sitemap.xml', async (req, res) => {
+  const today = new Date().toISOString().slice(0, 10);
+  const urls = [
+    { loc: `${SITE_ORIGIN}/sports`, changefreq: 'hourly', priority: '0.9', lastmod: today },
+    { loc: `${SITE_ORIGIN}/blogs`,  changefreq: 'daily',  priority: '0.8', lastmod: today },
+    { loc: `${SITE_ORIGIN}/music`,  changefreq: 'daily',  priority: '0.7', lastmod: today },
+  ];
+
+  // ── Blog posts (original writing — the pages most worth indexing) ──
+  try {
+    const { data, error } = await supabase
+      .from('blogs')
+      .select('slug, created_at, updated_at')
+      .order('created_at', { ascending: false })
+      .limit(1000);
+    if (error) throw error;
+    for (const b of data || []) {
+      if (!b.slug) continue;
+      const changed = b.updated_at || b.created_at;
+      urls.push({
+        loc: `${SITE_ORIGIN}/blogs/${encodeURIComponent(b.slug)}`,
+        lastmod: changed ? new Date(changed).toISOString().slice(0, 10) : undefined,
+        changefreq: 'weekly',
+        priority: '0.7',
+      });
+    }
+  } catch (e) {
+    // A sitemap missing a section beats a 500 that tells Google nothing.
+    console.error('❌ sitemap blogs:', e.message);
+  }
+
+  const body = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    ...urls.map(urlEntry),
+    '</urlset>',
+  ].join('\n');
+
+  res.set('Content-Type', 'application/xml; charset=utf-8');
+  res.set('Cache-Control', 'public, max-age=0, s-maxage=900, stale-while-revalidate=3600');
+  return res.send(body);
+});
+
+app.get('/robots.txt', (req, res) => {
+  res.set('Content-Type', 'text/plain; charset=utf-8');
+  res.send(`User-agent: *\nAllow: /\n\nSitemap: ${SITE_ORIGIN}/sitemap.xml\n`);
+});
+
 app.get('/', (req, res) => res.send('✅ API is live'));
 
 // -------------------- Start server --------------------
