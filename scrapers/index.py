@@ -945,7 +945,7 @@ def get_pendujatt_track_info_json(id_or_url):
 # ─────────────────────────────────────────────────────────────────────────
 # Gaana songs stream over HLS (e.g. https://vodhlsgaana-*.akamaized.net/hls/.../index.m3u8)
 # rather than a plain downloadable MP3, so these tracks are play-only (no download).
-# Song ids are namespaced as "gaana:<seokey>" so the frontend and the --track
+# Song ids are namespaced as "gaana__<seokey>" so the frontend and the --track
 # router can tell a Gaana track apart from a Pendujatt one.
 
 GAANA_FALLBACK_POSTER = "https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=150&q=80"
@@ -1198,7 +1198,7 @@ def get_gaana_search_json(query, limit=25):
         if len(title) < 2:
             continue
         results["songs"].append({
-            "id": f"gaana:{seokey}",
+            "id": f"gaana__{seokey}",
             "title": title,
             "label": "Gaana",
             "poster": _gaana_artwork(t),
@@ -1425,8 +1425,11 @@ if __name__ == "__main__":
         elif flag == "--track":
             if len(sys.argv) < 3: sys.exit(1)
             track_id = sys.argv[2]
-            if track_id.startswith("gaana:"):
-                print(json.dumps(get_gaana_track_info_json(track_id[len("gaana:"):])))
+            # Accept both the new "gaana__" namespace and the legacy "gaana:" one
+            # (older cached ids) so a stale client id still resolves.
+            if track_id.startswith("gaana__") or track_id.startswith("gaana:"):
+                seokey = track_id.split("__", 1)[-1] if "__" in track_id else track_id.split(":", 1)[-1]
+                print(json.dumps(get_gaana_track_info_json(seokey)))
             else:
                 print(json.dumps(get_pendujatt_track_info_json(track_id)))
             sys.exit(0)
