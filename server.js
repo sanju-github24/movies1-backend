@@ -1915,6 +1915,151 @@ app.get('/api/get-stream', (req, res) => {
 
 // -------------------- Test route --------------------
 // =====================================
+// 🔗 MATCH SLUGS
+// Match pages used to be /match-center/<base64 of the whole match object>. That
+// URL says nothing to a reader or to Google, and it changes whenever any field
+// in the payload does — a new URL for the same match every time a score moves,
+// which is duplicate content and wasted crawl budget. A slug is stable for the
+// life of the fixture and reads as what it is.
+// =====================================
+function slugify(s) {
+  return String(s || '')
+    .toLowerCase()
+    .normalize('NFKD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+}
+
+// The id is last so it can be read back without ambiguity, whatever the teams
+// are called: england-vs-india-3rd-odi-19-jul-2026-bcci-2119
+function buildMatchSlug({ home, away, extra, date, type, id }) {
+  return [slugify(home), 'vs', slugify(away), slugify(extra), slugify(date), type, id]
+    .filter(Boolean).join('-');
+}
+
+function parseMatchSlug(slug) {
+  const m = String(slug || '').match(/-(ipl|bcci)-(\d+)$/);
+  return m ? { type: m[1], id: m[2] } : null;
+}
+
+// Normalise one BCCI row into the slug + the payload the match page renders.
+function bcciMatchEntry(m) {
+  const home = m.HomeTeamName || m.FirstBattingTeamName || '';
+  const away = m.AwayTeamName || m.SecondBattingTeamName || '';
+  if (!m.MatchID || !home || !away) return null;
+  return {
+    slug: buildMatchSlug({
+      home, away, extra: m.MatchOrder, date: m.MatchDateNew || m.MatchDate,
+      type: 'bcci', id: m.MatchID,
+    }),
+    lastmod: m.MatchDate || null,
+    status: m.MatchStatus || '',
+    payload: {
+      sport: 'cricket',
+      type: 'bcci',
+      matchId: String(m.MatchID),
+      homeCode: m.FirstBattingTeamCode || home.slice(0, 3).toUpperCase(),
+      awayCode: m.SecondBattingTeamCode || away.slice(0, 3).toUpperCase(),
+      leagueLabel: m.CompetitionName || 'India Cricket',
+      matchData: {
+        MatchID: m.MatchID, CompetitionID: m.CompetitionID,
+        CompetitionName: m.CompetitionName, MatchOrder: m.MatchOrder,
+        MatchDate: m.MatchDate, MatchTime: m.MatchTime, MatchType: m.MatchType,
+        GroundName: m.GroundName, HomeTeamName: home, AwayTeamName: away,
+      },
+    },
+  };
+}
+
+function iplMatchEntry(m) {
+  if (!m.smMatchId || !m.team1 || !m.team2) return null;
+  return {
+    slug: buildMatchSlug({
+      home: m.team1, away: m.team2,
+      extra: m.matchNum ? `match-${m.matchNum}` : '',
+      date: m.matchDate, type: 'ipl', id: m.smMatchId,
+    }),
+    lastmod: null,
+    status: m.status || '',
+    payload: {
+      sport: 'cricket',
+      type: 'ipl',
+      matchId: String(m.smMatchId),
+      homeCode: m.team1,
+      awayCode: m.team2,
+      leagueLabel: 'Indian Premier League 2026',
+      matchData: {
+        MatchID: m.smMatchId, CompetitionName: 'Indian Premier League 2026',
+        MatchOrder: m.matchNum ? `Match ${m.matchNum}` : '',
+        MatchDate: m.matchDate, MatchTime: m.time,
+        GroundName: m.venue, HomeTeamName: m.team1, AwayTeamName: m.team2,
+      },
+    },
+  };
+}
+
+// Every match we can name right now, across both feeds.
+async function collectMatchEntries() {
+  const out = [];
+
+  // India / international — live, upcoming and recent are separate feeds.
+  const bcciFeeds = [
+    ['live', 'liveMatches'], ['upcoming', 'upcomingMatches'], ['recent', 'recentMatches'],
+  ];
+  await Promise.all(bcciFeeds.map(async ([path, key]) => {
+    try {
+      const url = `https://scores2.bcci.tv/get${path[0].toUpperCase()}${path.slice(1)}Matches?platform=international&previousMatchesCount=0&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false`;
+      const r = await fetch(url, { headers: BCCI_HEADERS, signal: AbortSignal.timeout(10000) });
+      if (!r.ok) return;
+      const j = await r.json();
+      for (const row of (j?.[key] || [])) {
+        const e = bcciMatchEntry(row);
+        if (e) out.push(e);
+      }
+    } catch (e) {
+      console.error(`❌ match entries bcci/${path}:`, e.message);
+    }
+  }));
+
+  // IPL season fixtures.
+  try {
+    const r = await fetch(`http://127.0.0.1:${port}/api/ipl/2026/all-matches`, {
+      signal: AbortSignal.timeout(12000),
+    });
+    if (r.ok) {
+      const j = await r.json();
+      for (const row of (j?.matches || [])) {
+        const e = iplMatchEntry(row);
+        if (e) out.push(e);
+      }
+    }
+  } catch (e) {
+    console.error('❌ match entries ipl:', e.message);
+  }
+
+  // Same fixture can appear in more than one feed (live and recent, say).
+  const seen = new Set();
+  return out.filter(e => !seen.has(e.slug) && seen.add(e.slug));
+}
+
+// Resolve a slug back to the payload the match page needs.
+app.get('/api/match/resolve', async (req, res) => {
+  const parsed = req.query.slug ? parseMatchSlug(req.query.slug)
+    : (req.query.type && req.query.id ? { type: req.query.type, id: String(req.query.id) } : null);
+  if (!parsed) return res.status(400).json({ ok: false, error: 'slug, or type and id, required' });
+
+  try {
+    const entries = await collectMatchEntries();
+    const hit = entries.find(e => e.payload.type === parsed.type && e.payload.matchId === String(parsed.id));
+    if (!hit) return res.status(404).json({ ok: false, error: 'Match not found' });
+    return res.json({ ok: true, slug: hit.slug, payload: hit.payload, status: hit.status });
+  } catch (e) {
+    console.error('❌ match resolve:', e.message);
+    return res.status(502).json({ ok: false, error: 'Could not resolve match' });
+  }
+});
+
+// =====================================
 // 🔎 DYNAMIC SITEMAP
 // Served on the site's own domain via a Vercel rewrite (see vercel.json) —
 // a sitemap has to live on the host whose URLs it lists.
@@ -1972,6 +2117,24 @@ app.get('/sitemap.xml', async (req, res) => {
   } catch (e) {
     // A sitemap missing a section beats a 500 that tells Google nothing.
     console.error('❌ sitemap blogs:', e.message);
+  }
+
+  // ── Matches (IPL + India/international) ──
+  // The point of generating this per request: a fixture is listed the moment the
+  // feed knows about it, so a live match is discoverable while it's still on.
+  try {
+    for (const e of await collectMatchEntries()) {
+      const live = /live|progress/i.test(e.status);
+      urls.push({
+        loc: `${SITE_ORIGIN}/match/${e.slug}`,
+        lastmod: e.lastmod || today,
+        // A live scorecard changes by the minute; a finished one never will.
+        changefreq: live ? 'hourly' : /complete|result|abandon/i.test(e.status) ? 'monthly' : 'daily',
+        priority: live ? '0.9' : '0.6',
+      });
+    }
+  } catch (e) {
+    console.error('❌ sitemap matches:', e.message);
   }
 
   const body = [
