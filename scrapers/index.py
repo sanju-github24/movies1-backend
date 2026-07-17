@@ -1101,42 +1101,139 @@ def _find_music_ld(ld_texts):
     return None
 
 
-def _gaana_search_http(query, limit=25):
-    """Fast pure-HTTP search against Gaana's apiv2 endpoint. Returns a list of raw tracks."""
-    headers = {
-        "Referer": "https://gaana.com/",
-        "X-Requested-With": "XMLHttpRequest",
-        "Accept": "application/json, text/plain, */*",
-    }
-    attempts = [
-        ("https://gaana.com/apiv2", {"type": "search", "subtype": "search_song", "key": query}),
-        ("https://gaana.com/apiv2", {"type": "search", "subtype": "search_all", "key": query}),
-        ("https://apiv2.gaana.com/search/getMoreResults/song", {"keyword": query, "limit": str(limit)}),
-    ]
-    for base, params in attempts:
-        try:
-            r = _HTTP.get(base, params=params, headers=headers, timeout=15)
-            if r.status_code != 200:
-                continue
-            try:
-                data = r.json()
-            except Exception:
-                continue
+def _gaana_song_page_meta(seokey):
+    """Parse a Gaana song page's metadata straight out of the server-rendered HTML.
 
-            tracks = None
-            if isinstance(data, list):
-                tracks = data
-            elif isinstance(data, dict):
-                tracks = (data.get("tracks") or data.get("gongs") or data.get("song")
-                          or data.get("songs") or data.get("data"))
-                if isinstance(tracks, dict):
-                    tracks = (tracks.get("tracks") or tracks.get("song")
-                              or tracks.get("songs") or list(tracks.values()))
-            if tracks:
-                return [t for t in tracks if isinstance(t, dict)][:limit]
-        except Exception as e:
-            dbg(f"[Gaana] HTTP search attempt failed: {e}")
-    return []
+    The song page ships og: tags and a schema.org MusicRecording block before any
+    JavaScript runs, so title/artist/album/duration/artwork need no browser.
+    Only the HLS manifest itself is JS-generated (see get_gaana_track_info_json).
+    """
+    out = {}
+    try:
+        r = _HTTP.get(f"https://gaana.com/song/{seokey}", timeout=15)
+        if r.status_code != 200:
+            return out
+        html = r.text
+    except Exception as e:
+        dbg(f"[Gaana] song page fetch failed for {seokey}: {e}")
+        return out
+
+    # schema.org MusicRecording — richest source when present.
+    ld = _find_music_ld(re.findall(
+        r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.S))
+    if isinstance(ld, dict):
+        if ld.get("name"):
+            out["title"] = _clean_gaana_title(ld["name"]) or ld["name"]
+        img = ld.get("image")
+        if isinstance(img, list) and img:
+            img = img[0]
+        if isinstance(img, str) and img.startswith("http"):
+            out["artwork"] = img
+        by = ld.get("byArtist")
+        if isinstance(by, dict) and by.get("name"):
+            out["artist"] = by["name"]
+        elif isinstance(by, list):
+            names = [b.get("name") for b in by if isinstance(b, dict) and b.get("name")]
+            if names:
+                out["artist"] = ", ".join(names)
+        elif isinstance(by, str) and by.strip():
+            out["artist"] = by.strip()
+        album = ld.get("inAlbum")
+        if isinstance(album, dict) and album.get("name"):
+            out["album"] = album["name"]
+        elif isinstance(album, str) and album.strip():
+            out["album"] = album.strip()
+        dur = _iso_duration_to_clock(ld.get("duration"))
+        if dur != "N/A":
+            out["duration"] = dur
+
+    # og: tags fill whatever the structured data missed. Note Gaana renders these
+    # with a data-react-helmet attribute before `property`, so don't anchor on it.
+    def og(prop):
+        m = re.search(r'<meta[^>]+property="%s"[^>]+content="([^"]*)"' % re.escape(prop), html)
+        return m.group(1) if m else None
+
+    if not out.get("artwork"):
+        image = og("og:image")
+        if image and image.startswith("http"):
+            out["artwork"] = image
+    if not out.get("title"):
+        cleaned = _clean_gaana_title(og("og:title") or "")
+        if cleaned:
+            out["title"] = cleaned
+
+    desc = og("og:description")
+    if desc:
+        fields = _parse_gaana_desc(desc)
+        for k in ("singer", "album", "duration"):
+            if fields.get(k):
+                out.setdefault("artist" if k == "singer" else k, fields[k])
+    return out
+
+
+def _gaana_search_http(query, limit=25):
+    """Pure-HTTP Gaana search — scrapes the server-rendered search page.
+
+    Gaana's search results are rendered server-side into `article.cardArticle`
+    blocks, so no browser is needed. (The old gaana.com/apiv2 endpoint this used
+    to call now 404s, which silently pushed every search onto the Playwright
+    fallback — the reason search died on hosts without a working Chromium.)
+    Artwork/artist are lazy-loaded client-side, so they're filled in concurrently
+    from each song page's server-rendered metadata.
+    """
+    from bs4 import BeautifulSoup
+    from concurrent.futures import ThreadPoolExecutor
+
+    try:
+        r = _HTTP.get(f"https://gaana.com/search/{quote_plus(query)}", timeout=20)
+        if r.status_code != 200:
+            dbg(f"[Gaana] search page status {r.status_code}")
+            return []
+    except Exception as e:
+        dbg(f"[Gaana] search page fetch failed: {e}")
+        return []
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    tracks, seen = [], set()
+    for a in soup.select('a[href*="/song/"]'):
+        href = a.get("href") or ""
+        slug = href.split("/song/")[-1].strip("/").replace(".html", "")
+        if not slug or "/" in slug or slug in seen:
+            continue
+        seen.add(slug)
+        # Card anchors read "View details for <song>"; strip that lead-in.
+        title = (a.get("title") or a.get("aria-label") or "").strip()
+        title = re.sub(r"^View details for\s+", "", title, flags=re.I)
+        tracks.append({
+            "seokey": slug,
+            "title": title or slug.replace("-", " ").title(),
+        })
+        if len(tracks) >= limit:
+            break
+
+    if not tracks:
+        return []
+
+    # Enrich concurrently — ~25 light HTML fetches finish in ~1-2s, still far
+    # cheaper (and far more portable) than launching a browser.
+    def enrich(t):
+        try:
+            meta = _gaana_song_page_meta(t["seokey"])
+        except Exception:
+            return t
+        for k in ("artwork", "artist", "album", "duration"):
+            if meta.get(k):
+                t[k] = meta[k]
+        if meta.get("title"):
+            t["title"] = meta["title"]
+        return t
+
+    try:
+        with ThreadPoolExecutor(max_workers=8) as ex:
+            tracks = list(ex.map(enrich, tracks))
+    except Exception as e:
+        dbg(f"[Gaana] search enrichment failed: {e}")
+    return tracks
 
 
 def _gaana_search_playwright(query, limit=25):
@@ -1276,10 +1373,23 @@ def get_gaana_track_info_json(seokey):
         if captured["m3u8"] is None or "index.m3u8" in u.lower() or "master.m3u8" in u.lower():
             captured["m3u8"] = u
 
+    # Metadata comes from the server-rendered page — no browser required. This
+    # means a track still returns full details even if Chromium can't launch.
+    http_meta = _gaana_song_page_meta(seokey)
+    for key, field in (("title", "title"), ("artwork", "cover_image"),
+                       ("artist", "singer"), ("album", "album"), ("duration", "duration")):
+        if http_meta.get(key):
+            metadata[field] = http_meta[key]
+    if not metadata["cover_image"]:
+        metadata["cover_image"] = GAANA_FALLBACK_POSTER
+
+    launch_error = None
+
     try:
         from playwright.sync_api import sync_playwright
     except Exception as e:
         dbg(f"[Gaana] Playwright unavailable: {e}")
+        launch_error = f"Playwright is not installed: {e}"
         sync_playwright = None
 
     if sync_playwright is not None:
@@ -1397,18 +1507,27 @@ def get_gaana_track_info_json(seokey):
 
         except Exception as e:
             dbg(f"[Gaana] track extraction error: {e}")
+            launch_error = str(e)
         finally:
             if 'browser' in locals():
                 browser.close()
 
     stream_url = captured["m3u8"]
+    # Surface the underlying reason rather than a generic failure — a browser that
+    # can't start (missing binary or system libs on the host) looks identical to a
+    # site change from the client's side otherwise.
+    error = None
+    if not stream_url:
+        error = "Could not resolve Gaana stream manifest."
+        if launch_error:
+            error += f" (browser: {launch_error})"
     return {
         "success": bool(stream_url),
         "stream_url": stream_url,
         "downloads": {},          # Gaana is play-only — no downloadable file
         "metadata": metadata,
         "source": "gaana",
-        "error": None if stream_url else "Could not resolve Gaana stream manifest.",
+        "error": error,
     }
 
 

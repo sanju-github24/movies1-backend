@@ -1,2 +1,7 @@
 node_modules
 .env
+__pycache__/
+*.pyc
+
+# Playwright browsers are installed at build time (PLAYWRIGHT_BROWSERS_PATH)
+.playwright/

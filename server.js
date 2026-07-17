@@ -52,12 +52,20 @@ function makeUUID() {
   return `${s(8)}-${s(4)}-4${s(3)}-${variant}${s(3)}-${s(12)}`;
 }
 
+// Locate a Chrome for Puppeteer. /app/pw-browsers only existed in the old Docker
+// image, so on the native runtime this finds nothing and returns null — which is
+// correct: Puppeteer then uses its own bundled download. Deliberately does NOT
+// look in PLAYWRIGHT_BROWSERS_PATH; Playwright's Chromium is a different build
+// (often headless_shell) and handing it to Puppeteer is not reliable.
 const getChromiumPath = () => {
-    try {
-        return execSync('find /app/pw-browsers -name chrome -type f | head -n 1').toString().trim();
-    } catch (e) {
-        return null;
+    for (const root of ['/app/pw-browsers', process.env.PUPPETEER_CACHE_DIR].filter(Boolean)) {
+        try {
+            if (!fs.existsSync(root)) continue;
+            const found = execSync(`find ${root} -name chrome -type f | head -n 1`).toString().trim();
+            if (found) return found;
+        } catch (e) { /* try the next root */ }
     }
+    return null;
 };
 
 const __filename = fileURLToPath(import.meta.url);
