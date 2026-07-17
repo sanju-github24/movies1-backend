@@ -16,6 +16,7 @@ import sys
 import re
 import json
 import requests
+from html import unescape as html_unescape
 from urllib.parse import quote_plus, unquote
 
 DEBUG = False  # set True to see diagnostics
@@ -1203,6 +1204,102 @@ def _find_music_ld(ld_texts):
     return None
 
 
+# ─────────────────────────────────────────────────────────────────────────
+# JIOSAAVN — stream source for hosts Gaana won't serve
+# ─────────────────────────────────────────────────────────────────────────
+# Gaana embeds its player's stream data only for IPs it will stream to, so from
+# a datacenter there is nothing to play, browser or not. JioSaavn hands back a
+# signed, ready-to-play audio URL over plain HTTP, so it stands in for the
+# stream while Gaana still supplies search and metadata.
+
+SAAVN_API = "https://www.jiosaavn.com/api.php"
+_SAAVN_BASE = {"_format": "json", "_marker": "0", "ctx": "web6dot0"}
+
+
+def _saavn_get(params):
+    p = dict(_SAAVN_BASE)
+    p.update(params)
+    try:
+        r = _HTTP.get(SAAVN_API, params=p, timeout=20)
+        if r.status_code != 200:
+            dbg(f"[Saavn] {params.get('__call')} -> {r.status_code}")
+            return None
+        return r.json()
+    except Exception as e:
+        dbg(f"[Saavn] {params.get('__call')} failed: {e}")
+        return None
+
+
+def _saavn_norm(s):
+    """Loose key for title matching — strips case, punctuation and bracketed asides."""
+    s = html_unescape(s or "").lower()
+    s = re.sub(r"\((?:from|feat|with)[^)]*\)", " ", s)
+    return re.sub(r"[^a-z0-9]+", "", s)
+
+
+def _saavn_auth_url(encrypted_media_url, bitrate="320"):
+    """Trade the encrypted media url for a signed, playable one."""
+    d = _saavn_get({
+        "__call": "song.generateAuthToken",
+        "url": encrypted_media_url,
+        "bitrate": bitrate,
+        "api_version": "4",
+    })
+    return (d or {}).get("auth_url")
+
+
+def get_saavn_stream(title, artist=None):
+    """Find `title` on JioSaavn and return a playable audio URL, or None.
+
+    Matches on the normalised title and, when several songs share it, prefers one
+    whose artists overlap — otherwise a cover or remix can win over the original.
+    """
+    if not title:
+        return None
+    query = f"{title} {artist}".strip() if artist and artist != "Unknown" else title
+    d = _saavn_get({"__call": "autocomplete.get", "query": query})
+    songs = ((d or {}).get("songs") or {}).get("data") or []
+    if not songs:
+        return None
+
+    want = _saavn_norm(title)
+    artist_key = _saavn_norm(artist) if artist and artist != "Unknown" else ""
+
+    def score(s):
+        got = _saavn_norm(s.get("title"))
+        if not got:
+            return -1
+        pts = 2 if got == want else (1 if (want in got or got in want) else -1)
+        if pts < 0:
+            return -1
+        singers = _saavn_norm((s.get("more_info") or {}).get("singers"))
+        if artist_key and singers:
+            # Any shared artist token is enough — Gaana and Saavn credit differently.
+            if any(t and t in singers for t in re.split(r"[^a-z0-9]+", _saavn_norm(artist)) if len(t) > 3):
+                pts += 1
+        return pts
+
+    ranked = sorted(((score(s), s) for s in songs), key=lambda x: x[0], reverse=True)
+    best_score, best = ranked[0]
+    if best_score < 0:
+        dbg(f"[Saavn] no title match for {title!r}")
+        return None
+
+    detail = _saavn_get({"__call": "song.getDetails", "pids": best.get("id")})
+    entries = (detail or {}).get("songs") or []
+    if not entries:
+        return None
+    song = entries[0]
+    enc = song.get("encrypted_media_url") or (song.get("more_info") or {}).get("encrypted_media_url")
+    if not enc:
+        dbg("[Saavn] detail carried no encrypted_media_url")
+        return None
+    url = _saavn_auth_url(enc)
+    if url:
+        dbg(f"[Saavn] matched {title!r} -> {song.get('song')!r} (score {best_score})")
+    return url
+
+
 def _gaana_song_page_meta(seokey):
     """Parse a Gaana song page's metadata straight out of the server-rendered HTML.
 
@@ -1498,16 +1595,26 @@ def get_gaana_track_info_json(seokey):
 
     # Without stream data on the page there is nothing for the player to request,
     # so launching a browser would just burn ~60s and a few hundred MB to fail.
+    # Play the same song from JioSaavn instead — Gaana's metadata still stands.
     if not http_meta.get("_has_stream_data", True):
+        alt = get_saavn_stream(metadata["title"], metadata["singer"])
+        if alt:
+            return {
+                "success": True,
+                "stream_url": alt,
+                "downloads": {},
+                "metadata": metadata,
+                "source": "saavn",
+                "error": None,
+            }
         return {
             "success": False,
             "stream_url": None,
             "downloads": {},
             "metadata": metadata,
             "source": "gaana",
-            "error": ("Gaana did not serve stream data to this server — it withholds it "
-                      "from this host's region/IP. Playback needs a request coming from a "
-                      "region Gaana streams to."),
+            "error": ("Gaana withholds stream data from this host's region, and no "
+                      "JioSaavn match was found for this song."),
         }
 
     try:

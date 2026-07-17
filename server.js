@@ -1647,6 +1647,49 @@ const GAANA_PROXY_HEADERS = {
     'Accept':  '*/*',
 };
 
+// Each CDN only serves its own site's Referer — saavncdn answers 403 without a
+// jiosaavn.com one — so pick headers per host rather than sending Gaana's to
+// everything.
+function musicProxyHeaders(u) {
+    let host = '';
+    try { host = new URL(u).hostname.toLowerCase(); } catch (_) {}
+    if (/(^|\.)(jiosaavn|saavn|saavncdn)\.com$/.test(host)) {
+        return {
+            'User-Agent': GAANA_PROXY_HEADERS['User-Agent'],
+            'Referer': 'https://www.jiosaavn.com/',
+            'Origin':  'https://www.jiosaavn.com',
+            'Accept':  '*/*',
+        };
+    }
+    return GAANA_PROXY_HEADERS;
+}
+
+// Range-aware byte passthrough — used for segments and for whole audio files.
+async function proxyPassthrough(url, req, res) {
+    const headers = { ...musicProxyHeaders(url) };
+    if (req.headers.range) headers['Range'] = req.headers.range;
+    const r = await fetch(url, { headers });
+
+    res.status(r.status);
+    res.set('Access-Control-Allow-Origin', '*');
+    for (const h of ['content-type', 'content-range', 'accept-ranges']) {
+        const v = r.headers.get(h);
+        if (v) res.set(h, v);
+    }
+    // fetch already decompressed the body, so upstream's Content-Length describes
+    // the *compressed* bytes. Forwarding it truncates the response at that many
+    // bytes — a gzipped page arrives cut off mid-way. Only pass it through when
+    // the body was not encoded (media files, which is where seeking needs it).
+    if (!r.headers.get('content-encoding')) {
+        const cl = r.headers.get('content-length');
+        if (cl) res.set('Content-Length', cl);
+    }
+    if (!r.headers.get('accept-ranges')) res.set('Accept-Ranges', 'bytes');
+    res.set('Cache-Control', 'no-store');
+    if (!r.body) return res.end();
+    return pipeBody(r.body, res);
+}
+
 // Only allow proxying Gaana / Akamai hosts — never an open relay.
 // Exact host or subdomain only. The old /gaana/ substring test also matched
 // attacker-controlled hosts like gaana.evil.com, which made this an open relay.
@@ -1668,7 +1711,13 @@ app.get('/api/gaana/hls', async (req, res) => {
     const url = req.query.url;
     if (!url || !gaanaProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
     try {
-        const r = await fetch(url, { headers: GAANA_PROXY_HEADERS });
+        // The frontend routes every music stream through here, but a JioSaavn
+        // track is a plain audio file, not a manifest. Rewriting its bytes as
+        // playlist lines would corrupt it, so pass it through byte-for-byte with
+        // Range support (seeking needs it).
+        if (!/\.m3u8(\?|$)/i.test(url)) return await proxyPassthrough(url, req, res);
+
+        const r = await fetch(url, { headers: musicProxyHeaders(url) });
         if (!r.ok) {
             console.error(`❌ Gaana HLS proxy upstream ${r.status} for ${url}`);
             return res.status(r.status).send(`Upstream ${r.status}`);
@@ -1708,26 +1757,7 @@ app.get('/api/gaana/seg', async (req, res) => {
     const url = req.query.url;
     if (!url || !gaanaProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
     try {
-        const headers = { ...GAANA_PROXY_HEADERS };
-        if (req.headers.range) headers['Range'] = req.headers.range;
-        const r = await fetch(url, { headers });
-
-        res.status(r.status);
-        res.set('Access-Control-Allow-Origin', '*');
-        const ct = r.headers.get('content-type');
-        if (ct) res.set('Content-Type', ct);
-        const cr = r.headers.get('content-range');
-        if (cr) res.set('Content-Range', cr);
-        const ar = r.headers.get('accept-ranges');
-        if (ar) res.set('Accept-Ranges', ar);
-        const cl = r.headers.get('content-length');
-        if (cl) res.set('Content-Length', cl);
-        res.set('Cache-Control', 'no-store');
-
-        // Stream the body straight through instead of buffering the whole
-        // segment in memory — critical on a 512 MB host under concurrent loads.
-        if (!r.body) return res.end();
-        pipeBody(r.body, res);
+        await proxyPassthrough(url, req, res);
     } catch (e) {
         console.error('❌ Gaana segment proxy error:', e.message);
         if (!res.headersSent) return res.status(502).send('Proxy error');
