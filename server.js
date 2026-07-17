@@ -1915,6 +1915,118 @@ app.get('/api/get-stream', (req, res) => {
 
 // -------------------- Test route --------------------
 // =====================================
+// 🖨️  SELF-HOSTED PRERENDER
+// Crawlers don't run our JS, so they'd see index.html's empty <div>. Render the
+// page here with the Chromium this box already has and hand back finished HTML.
+// This replaces prerender.io — same job, no subscription.
+//
+// Only ever renders our own site: this endpoint is public, and a renderer that
+// fetches arbitrary URLs is an open proxy into anything the host can reach,
+// including Render's internal network.
+// =====================================
+const RENDER_ALLOWED_ORIGINS = [
+  (process.env.SITE_ORIGIN || 'https://www.1anchormovies.buzz').replace(/\/$/, ''),
+  'https://www.1anchormovies.buzz',
+  'https://1anchormovies.buzz',
+];
+
+function renderTargetAllowed(u) {
+  try {
+    const url = new URL(u);
+    if (url.protocol !== 'https:') return false;
+    return RENDER_ALLOWED_ORIGINS.includes(url.origin);
+  } catch (_) {
+    return false;
+  }
+}
+
+// One browser, reused. Launching Chromium per request would blow the memory
+// budget on a 512 MB host; closing it when idle gives the RAM back between the
+// bursts of crawling this actually sees.
+let _renderBrowser = null;
+let _renderIdleTimer = null;
+let _rendersInFlight = 0;
+const RENDER_IDLE_MS = 5 * 60 * 1000;
+const RENDER_MAX_CONCURRENT = 2;
+
+function _touchRenderBrowser() {
+  clearTimeout(_renderIdleTimer);
+  _renderIdleTimer = setTimeout(async () => {
+    if (_rendersInFlight > 0) return _touchRenderBrowser();
+    const b = _renderBrowser;
+    _renderBrowser = null;
+    try { await b?.close(); } catch (_) {}
+    console.log('🖨️  prerender browser closed (idle)');
+  }, RENDER_IDLE_MS);
+}
+
+async function getRenderBrowser() {
+  if (_renderBrowser && _renderBrowser.isConnected()) {
+    _touchRenderBrowser();
+    return _renderBrowser;
+  }
+  _renderBrowser = await puppeteer.launch({
+    headless: true,
+    executablePath: getChromiumPath() || undefined,
+    // Same args the BookMyShow scrape already runs with on this host.
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process'],
+  });
+  _touchRenderBrowser();
+  console.log('🖨️  prerender browser launched');
+  return _renderBrowser;
+}
+
+app.get('/api/render', async (req, res) => {
+  const target = req.query.url;
+  if (!target || !renderTargetAllowed(target)) {
+    return res.status(400).send('Invalid or disallowed url');
+  }
+  if (_rendersInFlight >= RENDER_MAX_CONCURRENT) {
+    // Shed load rather than OOM the box; the caller falls back to the SPA.
+    return res.status(503).send('Renderer busy');
+  }
+
+  _rendersInFlight++;
+  let page;
+  try {
+    const browser = await getRenderBrowser();
+    page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (compatible; SelfHostedPrerender/1.0)');
+    await page.setViewport({ width: 1280, height: 900 });
+
+    // Images and fonts cost time and memory and never reach a crawler anyway —
+    // it reads markup. Stylesheets are dropped for the same reason.
+    await page.setRequestInterception(true);
+    page.on('request', r => {
+      const type = r.resourceType();
+      if (type === 'image' || type === 'font' || type === 'media' || type === 'stylesheet') return r.abort();
+      return r.continue();
+    });
+
+    await page.goto(target, { waitUntil: 'networkidle2', timeout: 25000 });
+    // The app renders into #root; wait for it to have something in it rather
+    // than trusting network idle alone, which can fire before React paints.
+    await page.waitForFunction(
+      () => document.querySelector('#root, #app')?.children.length > 0,
+      { timeout: 8000 },
+    ).catch(() => {});
+
+    const html = await page.content();
+    res.set('Content-Type', 'text/html; charset=utf-8');
+    // Short: a live scorecard goes stale in minutes, but repeat crawls in the
+    // same burst shouldn't each cost a render.
+    res.set('Cache-Control', 'public, max-age=0, s-maxage=120, stale-while-revalidate=600');
+    return res.send(html);
+  } catch (e) {
+    console.error('❌ prerender:', e.message);
+    return res.status(502).send('Render failed');
+  } finally {
+    try { await page?.close(); } catch (_) {}
+    _rendersInFlight--;
+  }
+});
+
+// =====================================
 // 🔗 MATCH SLUGS
 // Match pages used to be /match-center/<base64 of the whole match object>. That
 // URL says nothing to a reader or to Google, and it changes whenever any field
@@ -2021,17 +2133,21 @@ async function collectMatchEntries() {
     }
   }));
 
-  // IPL season fixtures.
+  // IPL season fixtures. Goes through our own route to reuse its season cache
+  // and its S3/scores fallbacks — but that means a cold cache pays for the
+  // upstream fetch, so allow for it rather than aborting and silently dropping
+  // every IPL fixture from the sitemap.
   try {
     const r = await fetch(`http://127.0.0.1:${port}/api/ipl/2026/all-matches`, {
-      signal: AbortSignal.timeout(12000),
+      signal: AbortSignal.timeout(25000),
     });
-    if (r.ok) {
-      const j = await r.json();
-      for (const row of (j?.matches || [])) {
-        const e = iplMatchEntry(row);
-        if (e) out.push(e);
-      }
+    if (!r.ok) throw new Error(`self-fetch responded ${r.status}`);
+    const j = await r.json();
+    const rows = j?.matches || [];
+    if (!rows.length) console.warn('⚠️  match entries ipl: route returned no matches');
+    for (const row of rows) {
+      const e = iplMatchEntry(row);
+      if (e) out.push(e);
     }
   } catch (e) {
     console.error('❌ match entries ipl:', e.message);
@@ -2043,7 +2159,10 @@ async function collectMatchEntries() {
 }
 
 // Resolve a slug back to the payload the match page needs.
-app.get('/api/match/resolve', async (req, res) => {
+// Deliberately not /api/match/resolve: "/api/match/:id" is registered far above
+// and Express matches in order, so that path resolves as id="resolve" and hits
+// the scores feed instead of this handler.
+app.get('/api/match-resolve', async (req, res) => {
   const parsed = req.query.slug ? parseMatchSlug(req.query.slug)
     : (req.query.type && req.query.id ? { type: req.query.type, id: String(req.query.id) } : null);
   if (!parsed) return res.status(400).json({ ok: false, error: 'slug, or type and id, required' });
