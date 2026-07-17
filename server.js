@@ -1960,6 +1960,38 @@ function _touchRenderBrowser() {
   }, RENDER_IDLE_MS);
 }
 
+// Find a Chrome this host actually has.
+//
+// Puppeteer downloads its own during build into ~/.cache/puppeteer, but Render
+// doesn't carry that directory into the runtime container, so at request time
+// it's gone and launch() fails with "Could not find Chrome". Playwright's copy
+// does survive, because PLAYWRIGHT_BROWSERS_PATH points inside the project — so
+// fall back to that. It's an ordinary Chrome build; Puppeteer can drive it.
+let _chromePathCache;
+function findChromeExecutable() {
+  if (_chromePathCache !== undefined) return _chromePathCache;
+
+  const candidates = [];
+  const own = getChromiumPath();          // /app/pw-browsers or PUPPETEER_CACHE_DIR
+  if (own) candidates.push(own);
+
+  const pw = process.env.PLAYWRIGHT_BROWSERS_PATH;
+  if (pw) {
+    try {
+      // chromium-<rev>/chrome-linux/chrome — prefer full Chrome over
+      // headless_shell, which Puppeteer can't drive the same way.
+      const found = execSync(
+        `find ${pw} -type f -name chrome -path '*chrome-linux*' 2>/dev/null | head -n 1`
+      ).toString().trim();
+      if (found) candidates.push(found);
+    } catch (_) { /* nothing there */ }
+  }
+
+  _chromePathCache = candidates.find(p => { try { return fs.existsSync(p); } catch { return false; } }) || null;
+  console.log(`🖨️  chrome executable: ${_chromePathCache || 'puppeteer default (bundled)'}`);
+  return _chromePathCache;
+}
+
 async function getRenderBrowser() {
   if (_renderBrowser && _renderBrowser.isConnected()) {
     _touchRenderBrowser();
@@ -1967,7 +1999,7 @@ async function getRenderBrowser() {
   }
   _renderBrowser = await puppeteer.launch({
     headless: true,
-    executablePath: getChromiumPath() || undefined,
+    executablePath: findChromeExecutable() || undefined,
     // Same args the BookMyShow scrape already runs with on this host.
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process'],
   });
@@ -2019,7 +2051,11 @@ app.get('/api/render', async (req, res) => {
     return res.send(html);
   } catch (e) {
     console.error('❌ prerender:', e.message);
-    return res.status(502).send('Render failed');
+    // Say why. A bare "Render failed" is indistinguishable between "Chrome isn't
+    // installed", "the page timed out" and "the site is down", and the caller
+    // (edge middleware) only ever sees this response, never the log.
+    _renderBrowser = null;   // A dead browser shouldn't be handed to the next request.
+    return res.status(502).type('text/plain').send(`Render failed: ${e.message}`);
   } finally {
     try { await page?.close(); } catch (_) {}
     _rendersInFlight--;
