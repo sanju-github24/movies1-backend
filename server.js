@@ -2217,18 +2217,19 @@ function iplMatchEntry(m) {
   };
 }
 
-// Every match we can name right now, across both feeds.
-async function collectMatchEntries() {
-  const out = [];
+// Fixtures barely change, and gathering them is expensive — the IPL route can
+// degrade to scanning a whole season of match ids one by one. Cache per source
+// so a page render never waits on that twice.
+const _matchEntriesCache = new Map();   // 'bcci' | 'ipl' -> { data, ts }
+const MATCH_ENTRIES_TTL = 10 * 60 * 1000;
 
-  // India / international — live, upcoming and recent are separate feeds.
-  const bcciFeeds = [
-    ['live', 'liveMatches'], ['upcoming', 'upcomingMatches'], ['recent', 'recentMatches'],
-  ];
-  await Promise.all(bcciFeeds.map(async ([path, key]) => {
+async function bcciEntries() {
+  const out = [];
+  const feeds = [['live', 'liveMatches'], ['upcoming', 'upcomingMatches'], ['recent', 'recentMatches']];
+  await Promise.all(feeds.map(async ([path, key]) => {
     try {
       const url = `https://scores2.bcci.tv/get${path[0].toUpperCase()}${path.slice(1)}Matches?platform=international&previousMatchesCount=0&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false`;
-      const r = await fetch(url, { headers: BCCI_HEADERS, signal: AbortSignal.timeout(10000) });
+      const r = await fetch(url, { headers: BCCI_HEADERS, signal: AbortSignal.timeout(15000) });
       if (!r.ok) return;
       const j = await r.json();
       for (const row of (j?.[key] || [])) {
@@ -2239,11 +2240,11 @@ async function collectMatchEntries() {
       console.error(`❌ match entries bcci/${path}:`, e.message);
     }
   }));
+  return out;
+}
 
-  // IPL season fixtures. Goes through our own route to reuse its season cache
-  // and its S3/scores fallbacks — but that means a cold cache pays for the
-  // upstream fetch, so allow for it rather than aborting and silently dropping
-  // every IPL fixture from the sitemap.
+async function iplEntries() {
+  const out = [];
   try {
     const r = await fetch(`http://127.0.0.1:${port}/api/ipl/2026/all-matches`, {
       signal: AbortSignal.timeout(25000),
@@ -2259,10 +2260,27 @@ async function collectMatchEntries() {
   } catch (e) {
     console.error('❌ match entries ipl:', e.message);
   }
+  return out;
+}
+
+// `types` narrows which feeds are touched. Resolving one match should never cost
+// a sweep of every fixture in both competitions — a slug already says which one
+// it belongs to, and the IPL sweep alone can mean 100+ upstream requests.
+async function collectMatchEntries(types = ['bcci', 'ipl']) {
+  const fetchers = { bcci: bcciEntries, ipl: iplEntries };
+  const lists = await Promise.all(types.map(async (t) => {
+    const hit = _matchEntriesCache.get(t);
+    if (hit && Date.now() - hit.ts < MATCH_ENTRIES_TTL) return hit.data;
+    const data = await fetchers[t]();
+    // Don't cache an empty result — that's an upstream failure, not "no
+    // fixtures", and caching it would keep the page broken for ten minutes.
+    if (data.length) _matchEntriesCache.set(t, { data, ts: Date.now() });
+    return data;
+  }));
 
   // Same fixture can appear in more than one feed (live and recent, say).
   const seen = new Set();
-  return out.filter(e => !seen.has(e.slug) && seen.add(e.slug));
+  return lists.flat().filter(e => !seen.has(e.slug) && seen.add(e.slug));
 }
 
 // Resolve a slug back to the payload the match page needs.
@@ -2275,9 +2293,12 @@ app.get('/api/match-resolve', async (req, res) => {
   if (!parsed) return res.status(400).json({ ok: false, error: 'slug, or type and id, required' });
 
   try {
-    const entries = await collectMatchEntries();
+    // Only the competition the slug names — an IPL sweep to answer a BCCI
+    // lookup is what left the match page loading until the renderer gave up.
+    const entries = await collectMatchEntries([parsed.type]);
     const hit = entries.find(e => e.payload.type === parsed.type && e.payload.matchId === String(parsed.id));
     if (!hit) return res.status(404).json({ ok: false, error: 'Match not found' });
+    res.set('Cache-Control', 'public, max-age=0, s-maxage=300, stale-while-revalidate=600');
     return res.json({ ok: true, slug: hit.slug, payload: hit.payload, status: hit.status });
   } catch (e) {
     console.error('❌ match resolve:', e.message);
