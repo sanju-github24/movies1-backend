@@ -1300,6 +1300,86 @@ def get_saavn_stream(title, artist=None):
     return url
 
 
+def _saavn_img(url, size="500x500"):
+    """Bump JioSaavn's 150x150 thumbnail up to something worth showing."""
+    if not url or not url.startswith("http"):
+        return GAANA_FALLBACK_POSTER
+    return re.sub(r"\d+x\d+", size, url, count=1)
+
+
+def _saavn_clock(seconds):
+    try:
+        s = int(seconds)
+    except (TypeError, ValueError):
+        return "N/A"
+    m, s = divmod(s, 60)
+    return f"{m}:{s:02d}"
+
+
+def _saavn_card(s):
+    """Shape one search result like the cards the frontend already renders."""
+    pid = s.get("id")
+    if not pid:
+        return None
+    return {
+        "id": f"saavn__{pid}",
+        "title": html_unescape(s.get("song") or "").strip() or "Untitled",
+        "label": "JioSaavn",
+        "poster": _saavn_img(s.get("image")),
+        "url": s.get("perma_url") or f"https://www.jiosaavn.com/song/{pid}",
+        "source": "saavn",
+        "artist": html_unescape(s.get("singers") or s.get("primary_artists") or "").strip() or "Unknown",
+    }
+
+
+def get_saavn_search_json(query, limit=25):
+    """Search JioSaavn. One HTTP call, no browser, and every result is playable.
+
+    search.getResults already carries the artwork, artists and the encrypted
+    media url, so the id a card is built from is the id that resolves the audio —
+    no title matching between two catalogues, so a click can't land on a remix.
+    """
+    d = _saavn_get({"__call": "search.getResults", "q": query, "p": "1", "n": str(limit)})
+    results = (d or {}).get("results") or []
+    songs = [c for c in (_saavn_card(s) for s in results if isinstance(s, dict)) if c]
+    return {"songs": songs[:limit], "albums": [], "artists": []}
+
+
+def get_saavn_track_info_json(pid):
+    """Resolve a JioSaavn song id to a playable url plus its metadata."""
+    d = _saavn_get({"__call": "song.getDetails", "pids": pid})
+    entries = (d or {}).get("songs") or []
+    if not entries:
+        return {
+            "success": False, "stream_url": None, "downloads": {},
+            "metadata": {"title": pid, "label": "JioSaavn"},
+            "source": "saavn", "error": "JioSaavn has no song with that id.",
+        }
+    s = entries[0]
+    metadata = {
+        "title": html_unescape(s.get("song") or "").strip() or pid,
+        "cover_image": _saavn_img(s.get("image")),
+        "singer": html_unescape(s.get("singers") or s.get("primary_artists") or "").strip() or "Unknown",
+        "album": html_unescape(s.get("album") or "").strip() or "Single",
+        "composer": html_unescape(s.get("music") or "").strip() or "Unknown",
+        "starring": html_unescape(s.get("starring") or "").strip() or "N/A",
+        "label": html_unescape(s.get("label") or "").strip() or "JioSaavn",
+        "duration": _saavn_clock(s.get("duration")),
+        "added_on": s.get("release_date") or s.get("year") or "N/A",
+        "page_url": s.get("perma_url") or f"https://www.jiosaavn.com/song/{pid}",
+    }
+    enc = s.get("encrypted_media_url")
+    stream = _saavn_auth_url(enc) if enc else None
+    return {
+        "success": bool(stream),
+        "stream_url": stream,
+        "downloads": {},          # play-only, same as the Gaana path was
+        "metadata": metadata,
+        "source": "saavn",
+        "error": None if stream else "JioSaavn returned no playable url for this song.",
+    }
+
+
 def _gaana_song_page_meta(seokey):
     """Parse a Gaana song page's metadata straight out of the server-rendered HTML.
 
@@ -1784,18 +1864,22 @@ if __name__ == "__main__":
             merged.setdefault("albums", [])
             merged.setdefault("artists", [])
             try:
-                gaana = get_gaana_search_json(query)
-                # Interleave the two song lists so Gaana tracks stay visible
+                # JioSaavn rather than Gaana: one HTTP call, and the id behind a
+                # card is the id that resolves its audio, so what you click is
+                # what plays. Gaana's cards had to be matched by title against
+                # another catalogue to find a stream at all.
+                saavn = get_saavn_search_json(query)
+                # Interleave the two song lists so JioSaavn tracks stay visible
                 # instead of being buried after a long Pendujatt list.
                 pj = merged["songs"]
-                gn = gaana.get("songs", [])
+                sv = saavn.get("songs", [])
                 interleaved = []
-                for i in range(max(len(pj), len(gn))):
+                for i in range(max(len(pj), len(sv))):
                     if i < len(pj): interleaved.append(pj[i])
-                    if i < len(gn): interleaved.append(gn[i])
+                    if i < len(sv): interleaved.append(sv[i])
                 merged["songs"] = interleaved
             except Exception as e:
-                dbg(f"[Gaana] merge into search failed: {e}")
+                dbg(f"[Saavn] merge into search failed: {e}")
             print(json.dumps(merged))
             sys.exit(0)
         elif flag == "--singer":
@@ -1806,9 +1890,12 @@ if __name__ == "__main__":
         elif flag == "--track":
             if len(sys.argv) < 3: sys.exit(1)
             track_id = sys.argv[2]
-            # Accept both the new "gaana__" namespace and the legacy "gaana:" one
-            # (older cached ids) so a stale client id still resolves.
-            if track_id.startswith("gaana__") or track_id.startswith("gaana:"):
+            if track_id.startswith("saavn__"):
+                print(json.dumps(get_saavn_track_info_json(track_id.split("__", 1)[1])))
+            # Gaana ids only turn up now from links and caches predating the move
+            # to JioSaavn. Keep resolving them — the audio comes from JioSaavn
+            # either way. Accept the legacy "gaana:" spelling too.
+            elif track_id.startswith("gaana__") or track_id.startswith("gaana:"):
                 seokey = track_id.split("__", 1)[-1] if "__" in track_id else track_id.split(":", 1)[-1]
                 print(json.dumps(get_gaana_track_info_json(seokey)))
             else:
