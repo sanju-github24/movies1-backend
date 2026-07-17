@@ -1406,12 +1406,46 @@ app.get('/api/songs/track', (req, res) => {
 
 
 // =====================================
+// 🗃️  YOUTUBE RESULT CACHE — conserve the daily Search-API quota
+// The YouTube Data API allows only ~100 searches/day per project (each
+// search_list call costs 100 units of the 10k daily budget). Song→video and
+// singer→songs mappings are stable, so we cache successful lookups for a week
+// and empty results for an hour. This turns repeated identical lookups (same
+// song reopened, same artist across tracks, many users) into zero-cost hits.
+// =====================================
+const ytCache = new Map(); // key -> { value, expires }
+const YT_TTL_HIT   = 7 * 24 * 60 * 60 * 1000; // 7 days for real results
+const YT_TTL_EMPTY = 60 * 60 * 1000;          // 1 hour for "no match"
+const YT_CACHE_MAX = 5000;
+
+function ytCacheGet(key) {
+    const e = ytCache.get(key);
+    if (!e) return undefined;
+    if (Date.now() > e.expires) { ytCache.delete(key); return undefined; }
+    ytCache.delete(key); ytCache.set(key, e); // refresh LRU recency
+    return e.value;
+}
+function ytCacheSet(key, value, ttl) {
+    if (ytCache.size >= YT_CACHE_MAX) {
+        const oldest = ytCache.keys().next().value;
+        if (oldest !== undefined) ytCache.delete(oldest);
+    }
+    ytCache.set(key, { value, expires: Date.now() + ttl });
+}
+
+
+// =====================================
 // 🎬 YOUTUBE PREVIEW — music video lookup
 // Returns { videoId, startSeconds, ytTitle } for the MiniYouTubePlayer
 // =====================================
 app.get('/api/songs/youtube-preview', async (req, res) => {
     const q = (req.query.q || '').trim();
     if (!q) return res.status(400).json({ error: 'Missing q parameter' });
+
+    // Serve from cache when possible — no quota spent.
+    const cacheKey = `preview:${q.toLowerCase()}`;
+    const cached = ytCacheGet(cacheKey);
+    if (cached !== undefined) return res.json(cached);
 
     const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
     if (!YOUTUBE_API_KEY) {
@@ -1427,11 +1461,17 @@ app.get('/api/songs/youtube-preview', async (req, res) => {
         if (!ytRes.ok) {
             const errText = await ytRes.text();
             console.error(`❌ YouTube API error ${ytRes.status}: ${errText}`);
-            return res.status(ytRes.status).json({ error: 'YouTube API request failed' });
+            // Degrade gracefully (no background video) and DON'T cache a quota
+            // error, so it recovers automatically once the quota resets.
+            return res.json({ videoId: null });
         }
         const data = await ytRes.json();
         const items = (data.items || []).filter(i => i.id?.videoId && i.snippet?.title);
-        if (!items.length) return res.json({ videoId: null });
+        if (!items.length) {
+            const empty = { videoId: null };
+            ytCacheSet(cacheKey, empty, YT_TTL_EMPTY);
+            return res.json(empty);
+        }
 
         // ── Score candidates so the real official music video wins ──
         const qTokens = q.toLowerCase().split(/\s+/).filter(w => w.length > 2);
@@ -1468,11 +1508,13 @@ app.get('/api/songs/youtube-preview', async (req, res) => {
             .map(i => [scoreItem(i), i])
             .sort((a, b) => b[0] - a[0])[0][1];
 
-        return res.json({
+        const result = {
             videoId:      best.id.videoId,
             ytTitle:      best.snippet?.title || q,
             startSeconds: 60,   // skip intro, land near first chorus
-        });
+        };
+        ytCacheSet(cacheKey, result, YT_TTL_HIT);
+        return res.json(result);
     } catch (err) {
         console.error('❌ YouTube preview fetch error:', err);
         return res.status(500).json({ error: 'Internal error fetching YouTube preview' });
@@ -1495,6 +1537,11 @@ app.get('/api/songs/singer', async (req, res) => {
         return res.status(503).json({ songs: [], error: 'YouTube API not configured' });
     }
 
+    // Serve from cache when possible — no quota spent.
+    const cacheKey = `singer:${singerName.toLowerCase()}`;
+    const cached = ytCacheGet(cacheKey);
+    if (cached !== undefined) return res.json(cached);
+
     try {
         // Search YouTube for songs by this artist (music category = 10)
         const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoCategoryId=10&maxResults=20&q=${encodeURIComponent(singerName + ' songs')}&key=${YOUTUBE_API_KEY}`;
@@ -1503,7 +1550,9 @@ app.get('/api/songs/singer', async (req, res) => {
         if (!ytRes.ok) {
             const err = await ytRes.text();
             console.error(`❌ YouTube singer API error ${ytRes.status}: ${err}`);
-            return res.status(ytRes.status).json({ songs: [], error: 'YouTube API failed' });
+            // Degrade gracefully (no recs) without caching a quota error, so it
+            // recovers automatically once the daily quota resets.
+            return res.json({ songs: [] });
         }
 
         const data = await ytRes.json();
@@ -1541,11 +1590,108 @@ app.get('/api/songs/singer', async (req, res) => {
         });
 
         console.log(`🎵 Singer recs for "${singerName}": ${songs.length} results`);
-        return res.json({ songs });
+        const result = { songs };
+        // Cache real results for a week, empty results briefly.
+        ytCacheSet(cacheKey, result, songs.length ? YT_TTL_HIT : YT_TTL_EMPTY);
+        return res.json(result);
 
     } catch (err) {
         console.error('❌ Singer recommendations fetch error:', err);
         return res.status(500).json({ songs: [], error: 'Internal error fetching recommendations' });
+    }
+});
+
+
+// =====================================
+// 🎧 GAANA HLS PROXY — makes tokenized Akamai streams play cleanly
+// Gaana serves audio as HLS from *.akamaized.net with a path-embedded token.
+// The browser can't set the Referer/Origin the CDN checks, and the CDN may omit
+// CORS headers, so a segment fetch hls.js makes can be rejected mid-stream and
+// kill playback (plays a bit, then stops, never recovers). We proxy the
+// manifest + segments server-side with the right headers and re-serve them
+// same-origin with CORS, so the stream plays through like a normal file.
+// =====================================
+const GAANA_PROXY_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Referer': 'https://gaana.com/',
+    'Origin':  'https://gaana.com',
+    'Accept':  '*/*',
+};
+
+// Only allow proxying Gaana / Akamai hosts — never an open relay.
+function gaanaProxyAllowed(u) {
+    try {
+        const host = new URL(u).hostname.toLowerCase();
+        return /akamaized\.net$/.test(host) || /gaana/.test(host) || /gaanacdn/.test(host) || /akamai/.test(host);
+    } catch (_) {
+        return false;
+    }
+}
+
+// Rewrite every child URI in an HLS manifest to route back through this proxy.
+app.get('/api/gaana/hls', async (req, res) => {
+    const url = req.query.url;
+    if (!url || !gaanaProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
+    try {
+        const r = await fetch(url, { headers: GAANA_PROXY_HEADERS });
+        if (!r.ok) {
+            console.error(`❌ Gaana HLS proxy upstream ${r.status} for ${url}`);
+            return res.status(r.status).send(`Upstream ${r.status}`);
+        }
+        const text = await r.text();
+        const base = new URL(url);
+
+        const rewritten = text.split('\n').map(line => {
+            const t = line.trim();
+            if (!t) return line;
+            if (t.startsWith('#')) {
+                // Rewrite URI="..." inside tags like EXT-X-KEY / EXT-X-MAP.
+                return line.replace(/URI="([^"]+)"/g, (_m, uri) => {
+                    const abs = new URL(uri, base).href;
+                    return `URI="/api/gaana/seg?url=${encodeURIComponent(abs)}"`;
+                });
+            }
+            // A media segment or a child playlist line.
+            const abs = new URL(t, base).href;
+            const isChildManifest = /\.m3u8(\?|$)/i.test(abs);
+            const proxyPath = isChildManifest ? '/api/gaana/hls' : '/api/gaana/seg';
+            return `${proxyPath}?url=${encodeURIComponent(abs)}`;
+        }).join('\n');
+
+        res.set('Access-Control-Allow-Origin', '*');
+        res.set('Content-Type', 'application/vnd.apple.mpegurl');
+        res.set('Cache-Control', 'no-store');
+        return res.send(rewritten);
+    } catch (e) {
+        console.error('❌ Gaana HLS proxy error:', e.message);
+        return res.status(502).send('Proxy error');
+    }
+});
+
+// Stream a single segment (or key / init) through, forwarding Range for byte-range requests.
+app.get('/api/gaana/seg', async (req, res) => {
+    const url = req.query.url;
+    if (!url || !gaanaProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
+    try {
+        const headers = { ...GAANA_PROXY_HEADERS };
+        if (req.headers.range) headers['Range'] = req.headers.range;
+        const r = await fetch(url, { headers });
+
+        res.status(r.status);
+        res.set('Access-Control-Allow-Origin', '*');
+        const ct = r.headers.get('content-type');
+        if (ct) res.set('Content-Type', ct);
+        const cr = r.headers.get('content-range');
+        if (cr) res.set('Content-Range', cr);
+        const ar = r.headers.get('accept-ranges');
+        if (ar) res.set('Accept-Ranges', ar);
+        res.set('Cache-Control', 'no-store');
+
+        const buf = Buffer.from(await r.arrayBuffer());
+        return res.send(buf);
+    } catch (e) {
+        console.error('❌ Gaana segment proxy error:', e.message);
+        return res.status(502).send('Proxy error');
     }
 });
 
