@@ -1,0 +1,30 @@
+name: Keep API awake
+
+# Render's free tier sleeps after ~15 minutes idle, and waking takes 30-60s.
+# Anything arriving cold gets a 502 or times out — which is why Search Console
+# reports "Couldn't fetch" for a sitemap that serves perfectly when warm, and why
+# a crawl can miss the prerender and fall through to the empty shell. We can't
+# choose when Googlebot turns up, so keep the service from sleeping at all.
+#
+# GitHub's scheduler is best-effort and often runs late, so ping well inside the
+# 15-minute window rather than at the edge of it.
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:        # so it can be triggered by hand too
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping sitemap (wakes the app and warms the match/blog caches)
+        run: |
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 90 \
+              https://movies1-backend.onrender.com/sitemap.xml || echo 000)
+            echo "attempt $i -> $code"
+            # A cold start can exceed the first request; retry before calling it.
+            [ "$code" = "200" ] && exit 0
+            sleep 30
+          done
+          echo "::warning::sitemap did not return 200 after 3 attempts"
