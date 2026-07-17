@@ -209,6 +209,59 @@ def get_cricket_stream_http(target_url, domain_info):
 
 
 # ─────────────────────────────────────────────────────────────────────────
+# STAYLIVE — IPL video (pure HTTP, no browser)
+# ─────────────────────────────────────────────────────────────────────────
+# IPL video no longer runs on Brightcove: iplt20.com/video is a StayLive SPA
+# now, so the Brightcove path here can never resolve it. StayLive's own API
+# hands back a ready-to-play Mux HLS URL, so this needs no browser at all.
+#
+# The Mux token is short-lived (~24h), so always resolve fresh — never cache
+# the playback_url itself.
+
+def _staylive_seo(target_url):
+    """Pull the video's seo_string out of any StayLive URL shape."""
+    m = re.search(r"/videos?/([A-Za-z0-9\-_]+)", target_url)
+    if m:
+        return m.group(1)
+    # Bare seo_string (e.g. "s-ipl-2026-final-rcb-vs-gt-match-highlights-o1hffe")
+    slug = target_url.rstrip("/").split("/")[-1].split("?")[0]
+    return slug or None
+
+
+def get_staylive_stream(target_url):
+    """Resolve a StayLive video to its Mux .m3u8 playback URL over plain HTTP."""
+    seo = _staylive_seo(target_url)
+    if not seo:
+        dbg("[StayLive] could not parse a seo_string from:", target_url)
+        return None
+
+    api = f"https://api.staylive.tv/videos/{seo}"
+    try:
+        r = _HTTP.get(api, headers={"Accept": "application/json"}, timeout=20)
+        dbg(f"[StayLive] {api} -> {r.status_code}")
+        if r.status_code != 200:
+            return None
+        msg = (r.json() or {}).get("message") or {}
+    except Exception as e:
+        dbg("[StayLive] api fetch failed:", e)
+        return None
+
+    # StayLive geo-fences some titles; the host's country decides this, so it can
+    # pass locally and fail from a datacenter. Say so rather than looking generic.
+    geo = msg.get("geo_restricted") or {}
+    if geo and geo.get("allowed") is False:
+        dbg(f"[StayLive] geo-blocked from this host (country={geo.get('currentCountry')})")
+        return None
+
+    playback = msg.get("playback_url")
+    if not playback:
+        dbg("[StayLive] response carried no playback_url")
+        return None
+    dbg(f"[StayLive] resolved '{msg.get('name')}' ({msg.get('duration')})")
+    return playback
+
+
+# ─────────────────────────────────────────────────────────────────────────
 # Playwright Pendujatt Homepage Scraper (Flexible Element Evaluator)
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -875,11 +928,21 @@ def get_fifa_stream_playwright(target_url):
 def get_clean_stream(target_url):
     target_lower = target_url.lower()
     
-    if "bcci.tv" in target_lower:
+    if "staylive.tv" in target_lower:
+        return get_staylive_stream(target_url)
+
+    # A Mux URL is already the manifest — but its token expires in ~24h, so this
+    # only helps a fresh one. Prefer passing the StayLive URL and resolving live.
+    elif "stream.mux.com" in target_lower:
+        return target_url
+
+    elif "bcci.tv" in target_lower:
         domain_info = {"label": "BCCI", "origin": "https://www.bcci.tv", "referer": "https://www.bcci.tv/"}
         return get_cricket_stream_http(target_url, domain_info)
-        
+
     elif "iplt20.com" in target_lower:
+        # iplt20.com/video is a StayLive SPA now; the Brightcove path below is
+        # kept only for legacy links that still carry a Brightcove video id.
         domain_info = {"label": "IPL", "origin": "https://www.iplt20.com", "referer": "https://www.iplt20.com/"}
         return get_cricket_stream_http(target_url, domain_info)
         
