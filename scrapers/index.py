@@ -1220,6 +1220,15 @@ def _gaana_song_page_meta(seokey):
         dbg(f"[Gaana] song page fetch failed for {seokey}: {e}")
         return out
 
+    # Gaana only embeds the player's stream data ("urls" -> {"message": <encrypted
+    # url>, "expiryTime": ...}) for IPs it will actually stream to. From a
+    # datacenter it serves a stripped page — same og: tags, ~22KB instead of
+    # ~160KB, no stream data — so the player has nothing to fetch and no browser
+    # can ever capture a manifest there. Record it so the caller can skip the
+    # browser entirely instead of waiting a minute to fail.
+    out["_has_stream_data"] = ('"urls"' in html and '"message"' in html)
+    dbg(f"[Gaana] page {len(html)}B, stream data present: {out['_has_stream_data']}")
+
     # schema.org MusicRecording — richest source when present.
     ld = _find_music_ld(re.findall(
         r'<script[^>]+type="application/ld\+json"[^>]*>(.*?)</script>', html, re.S))
@@ -1486,6 +1495,20 @@ def get_gaana_track_info_json(seokey):
         metadata["cover_image"] = GAANA_FALLBACK_POSTER
 
     launch_error = None
+
+    # Without stream data on the page there is nothing for the player to request,
+    # so launching a browser would just burn ~60s and a few hundred MB to fail.
+    if not http_meta.get("_has_stream_data", True):
+        return {
+            "success": False,
+            "stream_url": None,
+            "downloads": {},
+            "metadata": metadata,
+            "source": "gaana",
+            "error": ("Gaana did not serve stream data to this server — it withholds it "
+                      "from this host's region/IP. Playback needs a request coming from a "
+                      "region Gaana streams to."),
+        }
 
     try:
         from playwright.sync_api import sync_playwright
