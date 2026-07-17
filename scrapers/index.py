@@ -1593,28 +1593,33 @@ def get_gaana_track_info_json(seokey):
 
     launch_error = None
 
-    # Without stream data on the page there is nothing for the player to request,
-    # so launching a browser would just burn ~60s and a few hundred MB to fail.
-    # Play the same song from JioSaavn instead — Gaana's metadata still stands.
+    # Resolve the stream from JioSaavn first. It answers over plain HTTP in ~1s
+    # from any host, while capturing Gaana's own manifest means driving a browser
+    # through its player: ~60s and a few hundred MB, and on some hosts the player
+    # never requests the manifest at all, so it just times out. Gaana still gives
+    # us search and metadata; only the audio comes from elsewhere.
+    alt = get_saavn_stream(metadata["title"], metadata["singer"])
+    if alt:
+        return {
+            "success": True,
+            "stream_url": alt,
+            "downloads": {},
+            "metadata": metadata,
+            "source": "saavn",
+            "error": None,
+        }
+
+    # No JioSaavn match — fall back to the browser, which can only work if the
+    # page carried stream data for its player to act on.
     if not http_meta.get("_has_stream_data", True):
-        alt = get_saavn_stream(metadata["title"], metadata["singer"])
-        if alt:
-            return {
-                "success": True,
-                "stream_url": alt,
-                "downloads": {},
-                "metadata": metadata,
-                "source": "saavn",
-                "error": None,
-            }
         return {
             "success": False,
             "stream_url": None,
             "downloads": {},
             "metadata": metadata,
             "source": "gaana",
-            "error": ("Gaana withholds stream data from this host's region, and no "
-                      "JioSaavn match was found for this song."),
+            "error": ("No JioSaavn match for this song, and Gaana's page carried no "
+                      "stream data for this host to fall back on."),
         }
 
     try:
