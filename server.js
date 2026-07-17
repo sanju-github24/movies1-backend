@@ -1930,6 +1930,10 @@ const RENDER_ALLOWED_ORIGINS = [
   'https://1anchormovies.buzz',
 ];
 
+// Third parties that only add latency to a render a crawler will read as text,
+// and that keep the connection count up so the page never looks "idle".
+const AD_ANALYTICS_HOSTS = /doubleclick\.net|googlesyndication\.com|google-analytics\.com|googletagmanager\.com|adservice\.google|facebook\.net|connect\.facebook|popads|popcash|adsystem|amazon-adsystem|taboola|outbrain|hotjar|clarity\.ms|sentry\.io/i;
+
 function renderTargetAllowed(u) {
   try {
     const url = new URL(u);
@@ -2027,21 +2031,34 @@ app.get('/api/render', async (req, res) => {
     await page.setViewport({ width: 1280, height: 900 });
 
     // Images and fonts cost time and memory and never reach a crawler anyway —
-    // it reads markup. Stylesheets are dropped for the same reason.
+    // it reads markup. Stylesheets are dropped for the same reason. Ads and
+    // analytics are dropped too: they're pure latency here, and they're a big
+    // part of why the network never falls quiet on these pages.
     await page.setRequestInterception(true);
     page.on('request', r => {
       const type = r.resourceType();
       if (type === 'image' || type === 'font' || type === 'media' || type === 'stylesheet') return r.abort();
+      if (AD_ANALYTICS_HOSTS.test(r.url())) return r.abort();
       return r.continue();
     });
 
-    await page.goto(target, { waitUntil: 'networkidle2', timeout: 25000 });
-    // The app renders into #root; wait for it to have something in it rather
-    // than trusting network idle alone, which can fire before React paints.
+    // Not networkidle2: these pages poll live scores on a timer, so the network
+    // never goes quiet and navigation just times out. Wait for the DOM, then for
+    // the app to actually put text on the page — that's the thing we're here for.
+    await page.goto(target, { waitUntil: 'domcontentloaded', timeout: 20000 });
     await page.waitForFunction(
-      () => document.querySelector('#root, #app')?.children.length > 0,
-      { timeout: 8000 },
-    ).catch(() => {});
+      () => {
+        const root = document.querySelector('#root, #app');
+        return !!root && root.innerText.trim().length > 0;
+      },
+      { timeout: 12000, polling: 300 },
+    ).catch(() => {
+      // Fall through and return whatever rendered — a partial page still beats
+      // the empty shell, and the meta tags are in <head> by this point anyway.
+      console.warn('⚠️  prerender: no body text after 12s:', target);
+    });
+    // Small settle so data arriving just after first paint makes the snapshot.
+    await new Promise(r => setTimeout(r, 700));
 
     const html = await page.content();
     res.set('Content-Type', 'text/html; charset=utf-8');
