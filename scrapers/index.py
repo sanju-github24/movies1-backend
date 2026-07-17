@@ -26,7 +26,37 @@ def dbg(*a):
 
 # ── Brightcove configuration parameters ───────────────────────────────────
 BC_ACCOUNT_ID = "3588749423001"  # Shared across both BCCI and IPL platforms
-FALLBACK_POLICY_KEY = "BCpkADawqM14f7bO4wGvT1k3zJ-8wN5rCj-C5K7Vz8PzZq"
+
+# Real policy key, read from the account's own Brightcove player bundle. The
+# value that used to live here was a placeholder and every Playback API call
+# returned 401 INVALID_POLICY_KEY, so cricket video could never resolve.
+FALLBACK_POLICY_KEY = (
+    "BCpkADawqM1HAZVeYx6iS1Oqr12hCyvC8IGQSuDaTfRbJK_pYnfZoexbte9KOmx0moKY"
+    "-9kcDMp-YPmJaBTdmZi_SYqnWJs-qANYeAOvpjncLe86hNPaG5XEdSCTTFk-ktvWxZhbK4Yel9UX"
+)
+
+# Brightcove rotates policy keys, so re-read it from the player bundle if the
+# baked-in one is ever rejected. Cached per process — it never changes mid-run.
+BC_PLAYER_JS = f"https://players.brightcove.net/{BC_ACCOUNT_ID}/default_default/index.min.js"
+_policy_key_cache = {}
+
+
+def _brightcove_live_policy_key():
+    """Fetch the current policy key from the account's default player bundle."""
+    if "key" in _policy_key_cache:
+        return _policy_key_cache["key"]
+    try:
+        r = _HTTP.get(BC_PLAYER_JS, timeout=20)
+        if r.status_code == 200:
+            m = re.search(r"BCpk[A-Za-z0-9_\-\.]{40,}", r.text)
+            if m:
+                _policy_key_cache["key"] = m.group(0)
+                dbg("[brightcove] refreshed policy key from player bundle")
+                return m.group(0)
+    except Exception as e:
+        dbg("[brightcove] policy key refresh failed:", e)
+    _policy_key_cache["key"] = None
+    return None
 
 _HTTP = requests.Session()
 _HTTP.headers.update({
@@ -139,28 +169,37 @@ def _brightcove_api(video_id, policy_key):
     try:
         r = _HTTP.get(url, headers=headers, timeout=15)
         dbg(f"brightcove_api video_id={video_id} status={r.status_code}")
+
+        # A rejected key is recoverable: pull the current one and retry once.
+        if r.status_code in (401, 403):
+            live = _brightcove_live_policy_key()
+            if live and live != policy_key:
+                r = _HTTP.get(url, headers={"Accept": f"application/json;pk={live}"}, timeout=15)
+                dbg(f"brightcove_api retry with live key status={r.status_code}")
+
         if r.status_code == 200:
             data = r.json()
             sources = data.get("sources", [])
-            
-            # Keep track of a backup rendition in case master isn't available
-            fallback_rendition = None
-            
+
+            masters, renditions = [], []
             for src in sources:
                 href = src.get("src", "")
-                
-                # Check for the overarching adaptive master index first
                 if "master.m3u8" in href and "rendition" not in href:
-                    return href
-                
-                # Save the first solid absolute rendition stream as our fallback
-                if "rendition.m3u8" in href and not fallback_rendition:
-                    fallback_rendition = href
-            
-            if fallback_rendition:
-                dbg("Master index absent. Falling back to active rendition track.")
-                return fallback_rendition
-                
+                    masters.append(href)
+                elif "rendition.m3u8" in href:
+                    renditions.append(href)
+
+            # Brightcove lists each manifest under both http and https. The player
+            # runs on an https page, so an http source is blocked as mixed content.
+            for group, label in ((masters, "master"), (renditions, "rendition")):
+                if not group:
+                    continue
+                secure = [h for h in group if h.startswith("https://")]
+                chosen = (secure or group)[0]
+                if label == "rendition":
+                    dbg("Master index absent. Falling back to active rendition track.")
+                return chosen
+
             dbg("brightcove response had no valid m3u8 streaming source.")
         else:
             dbg("brightcove_api non-200 body snippet:", r.text[:300])

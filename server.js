@@ -793,7 +793,11 @@ app.get("/api/ipl/:year/all-matches", async (req, res) => {
 // Returns: thumbnail_image, mediaId, short_code, titleUrlSegment
 // =====================================
 const BC_ACCOUNT_ID    = "3588749423001";
-const BC_POLICY_KEY    = "BCpkADawqM14f7bO4wGvT1k3zJ-8wN5rCj-C5K7Vz8PzZq";
+// Real policy key, read from the account's own Brightcove player bundle
+// (players.brightcove.net/<account>/default_default/index.min.js). The previous
+// value was a placeholder: every Playback API call came back 401
+// INVALID_POLICY_KEY, so /api/ipl/stream always fell through to "Stream not found".
+const BC_POLICY_KEY    = "BCpkADawqM1HAZVeYx6iS1Oqr12hCyvC8IGQSuDaTfRbJK_pYnfZoexbte9KOmx0moKY-9kcDMp-YPmJaBTdmZi_SYqnWJs-qANYeAOvpjncLe86hNPaG5XEdSCTTFk-ktvWxZhbK4Yel9UX";
 const BC_PLAYBACK_BASE = `https://edge.api.brightcove.com/playback/v1/accounts/${BC_ACCOUNT_ID}`;
 const IPL_API_BASE     = "https://apiipl.iplt20.com/api/v1/pages";
 
@@ -844,6 +848,19 @@ app.get("/api/ipl/highlight-videos", async (req, res) => {
 // Bypasses page scraping. Used by the IPL highlights row on click.
 // GET /api/ipl/stream?mediaId=6396950799112&shortCode=kg8RgG9N
 // =====================================
+// Brightcove lists each manifest under both http and https. The player runs on
+// an https page, so picking the http one gets blocked as mixed content.
+function pickBrightcoveM3u8(sources = []) {
+  const srcs = sources.map(s => s?.src).filter(Boolean);
+  const masters    = srcs.filter(s => s.includes("master.m3u8") && !s.includes("rendition"));
+  const renditions = srcs.filter(s => s.includes("rendition.m3u8"));
+  for (const group of [masters, renditions]) {
+    if (!group.length) continue;
+    return group.find(s => s.startsWith("https://")) || group[0];
+  }
+  return null;
+}
+
 app.get("/api/ipl/stream", async (req, res) => {
   const { mediaId, shortCode } = req.query;
   if (!mediaId && !shortCode) return res.status(400).json({ ok: false, error: "mediaId or shortCode required" });
@@ -858,11 +875,7 @@ app.get("/api/ipl/stream", async (req, res) => {
       });
       if (r.ok) {
         const data = await r.json();
-        const sources = data.sources || [];
-        // Prefer master.m3u8, fall back to first rendition.m3u8
-        const master = sources.find(s => s.src?.includes("master.m3u8") && !s.src?.includes("rendition"));
-        const rend   = sources.find(s => s.src?.includes("rendition.m3u8"));
-        const m3u8   = master?.src || rend?.src || null;
+        const m3u8 = pickBrightcoveM3u8(data.sources);
         if (m3u8) return res.json({ ok: true, url: m3u8, source: "bc:mediaId" });
       }
     } catch (_) {}
@@ -878,10 +891,7 @@ app.get("/api/ipl/stream", async (req, res) => {
       });
       if (r.ok) {
         const data = await r.json();
-        const sources = data.sources || [];
-        const master = sources.find(s => s.src?.includes("master.m3u8") && !s.src?.includes("rendition"));
-        const rend   = sources.find(s => s.src?.includes("rendition.m3u8"));
-        const m3u8   = master?.src || rend?.src || null;
+        const m3u8 = pickBrightcoveM3u8(data.sources);
         if (m3u8) return res.json({ ok: true, url: m3u8, source: "bc:shortCode" });
       }
     } catch (_) {}
