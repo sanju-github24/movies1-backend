@@ -1132,6 +1132,123 @@ app.get("/api/bcci/match", async (req, res) => {
   }
 });
 
+// ─── INNINGS / SCORECARD / BALL-BY-BALL ───────────────────────────────────────
+// The match centre used to read its scorecard out of getMatchCenterDetails.
+// That endpoint now answers 200 with a zero-byte body, so JSON.parse threw, the
+// scorecard tab fell back to "not available", and the frontend's own retry hit
+// the same dead URL. This serves the scoring feed instead, which is the source
+// the site itself reads and is alive.
+//
+// One call returns every innings: the tab needs them all to offer a selector,
+// and four small fetches beat four round trips from the browser.
+//
+// URL: /api/cricket/innings?type=bcci&id=2119[&test=1]
+const BALL_FIELDS = [
+  'OverNo', 'BallNo', 'ActualBallNo', 'Runs', 'BallRuns', 'ActualRuns',
+  'IsDotball', 'IsFour', 'IsSix', 'IsWicket', 'WicketType', 'Wickets',
+  'IsWide', 'IsNoBall', 'IsBye', 'IsLegBye', 'IsExtra', 'Extras', 'IsMaiden',
+  'BatsManName', 'BowlerName', 'CommentOver', 'TotalRuns', 'TotalWickets',
+  'IsFifty', 'IsHundred', 'Commentry', 'NewCommentry',
+];
+
+// The raw innings is ~600 KB and the per-ball commentary is nearly all of it:
+// a full ODI trims to 424 KB with commentary and about 20 KB without. So the
+// scorecard and the commentary are served separately — opening a match should
+// not download half a megabyte of prose to draw two tables. Ball-by-ball is
+// fetched per innings, only when that tab is actually opened.
+function trimScorecard(inn) {
+  if (!inn) return null;
+  return {
+    Extras: inn.Extras || [],
+    BattingCard: inn.BattingCard || [],
+    BowlingCard: inn.BowlingCard || [],
+    FallOfWickets: inn.FallOfWickets || [],
+    PartnershipScores: inn.PartnershipScores || [],
+    ballCount: (inn.OverHistory || []).length,
+  };
+}
+
+function validType(t) { return t === 'bcci' || t === 'ipl'; }
+
+app.get('/api/cricket/innings', async (req, res) => {
+  const { type = 'bcci', id } = req.query;
+  if (!id) return res.status(400).json({ ok: false, error: 'id is required' });
+  if (!validType(type)) return res.status(400).json({ ok: false, error: 'type must be bcci or ipl' });
+  try {
+    // Only Tests reach a third innings; asking for 3 and 4 on every T20 doubles
+    // the upstream traffic to discover two empties.
+    const wanted = req.query.test === '1' ? [1, 2, 3, 4] : [1, 2];
+    const raw = await Promise.all(wanted.map(n => fetchInnings(type, id, n)));
+    const innings = raw
+      .map((inn, i) => (inn ? { number: wanted[i], ...trimScorecard(inn) } : null))
+      .filter(Boolean);
+    // Live scores move; let a proxy hold this only briefly.
+    res.set('Cache-Control', 'public, max-age=20, s-maxage=20');
+    res.json({ ok: true, innings });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
+// Ball-by-ball for one innings, newest over first — the order a reader wants
+// when a match is in progress.
+// URL: /api/cricket/balls?type=bcci&id=2119&inning=2
+app.get('/api/cricket/balls', async (req, res) => {
+  const { type = 'bcci', id, inning = '1' } = req.query;
+  if (!id) return res.status(400).json({ ok: false, error: 'id is required' });
+  if (!validType(type)) return res.status(400).json({ ok: false, error: 'type must be bcci or ipl' });
+  const n = Number(inning);
+  if (!Number.isInteger(n) || n < 1 || n > 4) {
+    return res.status(400).json({ ok: false, error: 'inning must be 1-4' });
+  }
+  try {
+    const inn = await fetchInnings(type, id, n);
+    if (!inn) return res.json({ ok: true, overs: [] });
+
+    // Group into overs. The feed is a flat ball list and an over's balls can
+    // exceed six (wides and no-balls don't count), so group by OverNo rather
+    // than slicing every six rows — that would drift after the first wide.
+    const byOver = new Map();
+    for (const b of inn.OverHistory || []) {
+      // The IPL feed closes each over with a sentinel row — BallNo 99, every
+      // other field blank. Left in, it counts as a legal delivery (its IsWide
+      // isn't "1"), so overs report seven balls, and because it sorts last it
+      // makes the end-of-over score read "/" instead of the real total.
+      if (String(b.BallNo) === '99' || !String(b.ActualBallNo || '').trim()) continue;
+      const o = {};
+      for (const k of BALL_FIELDS) if (b[k] !== undefined) o[k] = b[k];
+      const key = Number(b.OverNo);
+      if (!byOver.has(key)) byOver.set(key, []);
+      byOver.get(key).push(o);
+    }
+
+    const overs = [...byOver.entries()]
+      .sort((a, b) => b[0] - a[0])     // newest over first
+      .map(([overNo, balls]) => {
+        const legal = balls.filter(b => b.IsWide !== '1' && b.IsNoBall !== '1');
+        return {
+          overNo,
+          balls,
+          runs: balls.reduce((s, b) => s + (Number(b.ActualRuns) || 0) + (Number(b.Extras) || 0), 0),
+          wickets: balls.filter(b => b.IsWicket === '1').length,
+          legalBalls: legal.length,
+          bowler: balls[0]?.BowlerName || '',
+          // Running score after the last ball of the over, straight from the
+          // feed rather than accumulated here — a mid-over refetch would make
+          // any total we computed ourselves disagree with the header.
+          scoreAfter: balls[balls.length - 1]
+            ? `${balls[balls.length - 1].TotalRuns}/${balls[balls.length - 1].TotalWickets}`
+            : '',
+        };
+      });
+
+    res.set('Cache-Control', 'public, max-age=20, s-maxage=20');
+    res.json({ ok: true, inning: n, overs });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
 // ─── BCCI SQUAD ───────────────────────────────────────────────────────────────
 // Fetches the JSONP squad feed from scores.bcci.tv, strips the callback wrapper,
 // and returns plain JSON.  URL: /api/bcci/squad?matchID=2112
@@ -2035,6 +2152,102 @@ function renderCacheSet(url, html) {
   _renderCache.set(url, { html, ts: Date.now() });
 }
 
+// =====================================
+// 📋 SCORECARD FOR THE SNAPSHOT
+// The snapshot used to carry a correct <title> and JSON-LD over ~200 characters
+// of body text: nav plus the word "Advertisement". The scorecard is fetched by
+// the client and paints after we've already taken the picture, and waiting for
+// it is a bad trade — it's the slowest thing on the page, and on a cold instance
+// it may never arrive inside the timeout.
+//
+// So fetch the same feed the page fetches, server-side, and write it into the
+// snapshot as markup. Note this is the *same data the user sees* once the client
+// finishes; we're making the crawler's copy match the reader's, which is the
+// line that separates dynamic rendering from cloaking. Don't put anything here
+// that the page itself wouldn't show.
+// =====================================
+function esc(s) {
+  return String(s ?? '').replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+// IPL and international live in different namespaces, and the ids collide:
+// 2417 is RCB v SRH on the IPL feed and an unrelated domestic fixture on
+// scores.bcci.tv/feeds. Always pair an id with the source it came from.
+// A slow feed must not hold the render open: the caller times out long before
+// these would. fetchIPL takes no abort signal, so bound both paths from outside
+// rather than only the one whose fetch we own.
+function withTimeout(promise, ms) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('feed timeout')), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+
+async function fetchInnings(type, id, n) {
+  try {
+    if (type === 'ipl') {
+      const data = await withTimeout(fetchIPL(`${id}-Innings${n}.js`), 8000);
+      return data?.[`Innings${n}`]?.BattingCard ? data[`Innings${n}`] : null;
+    }
+    const url = 'https://www.bcci.tv/fetch-inning'
+      + `?inning=Innings${n}&competitionId=${encodeURIComponent(id)}`
+      + '&feedSource=https://scores.bcci.tv/feeds-international/scoringfeeds'
+      + '&section=scorecard&refresh=false';
+    const r = await withTimeout(fetch(url, { headers: BCCI_HEADERS }), 8000);
+    if (!r.ok) return null;
+    const data = await r.json();
+    // An innings that hasn't been played yet comes back as [], not as an object.
+    return (data && !Array.isArray(data) && data.BattingCard) ? data : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function inningsHtml(inn, n) {
+  const ex = (inn.Extras || [])[0] || {};
+  const bat = (inn.BattingCard || []).filter(b => b.PlayingOrder != null || Number(b.Balls) > 0);
+  const bowl = (inn.BowlingCard || []).filter(b => Number(b.TotalLegalBallsBowled) > 0 || Number(b.Overs) > 0);
+  const fow = inn.FallOfWickets || [];
+
+  const rows = bat.map(b => `<tr><td>${esc(b.PlayerName).trim()}</td><td>${esc(b.OutDesc || 'not out')}</td>`
+    + `<td>${esc(b.Runs)}</td><td>${esc(b.Balls)}</td><td>${esc(b.Fours)}</td>`
+    + `<td>${esc(b.Sixes)}</td><td>${esc(b.StrikeRate)}</td></tr>`).join('');
+
+  const bowlRows = bowl.map(b => `<tr><td>${esc(b.PlayerName).trim()}</td><td>${esc(b.Overs)}</td>`
+    + `<td>${esc(b.Maidens)}</td><td>${esc(b.Runs)}</td><td>${esc(b.Wickets)}</td>`
+    + `<td>${esc(b.Economy)}</td></tr>`).join('');
+
+  const fowText = fow.map(w => `${esc(w.Score)} ${esc(w.PlayerName)}`).join(', ');
+
+  return `<section class="seo-innings">`
+    + `<h2>${esc(ex.BattingTeamName || `Innings ${n}`)} innings${ex.Total ? ` — ${esc(ex.Total)}` : ''}</h2>`
+    + (ex.BowlingTeamName ? `<p>${esc(ex.BattingTeamName)} batting, ${esc(ex.BowlingTeamName)} bowling.`
+        + ` Run rate ${esc(ex.CurrentRunRate)}. Extras ${esc(ex.TotalExtras)}`
+        + ` (b ${esc(ex.Byes)}, lb ${esc(ex.LegByes)}, w ${esc(ex.Wides)}, nb ${esc(ex.NoBalls)}).</p>` : '')
+    + `<h3>Batting</h3><table><thead><tr><th>Batter</th><th>Dismissal</th><th>R</th>`
+    + `<th>B</th><th>4s</th><th>6s</th><th>SR</th></tr></thead><tbody>${rows}</tbody></table>`
+    + `<h3>Bowling</h3><table><thead><tr><th>Bowler</th><th>O</th><th>M</th><th>R</th>`
+    + `<th>W</th><th>Econ</th></tr></thead><tbody>${bowlRows}</tbody></table>`
+    + (fowText ? `<h3>Fall of wickets</h3><p>${fowText}</p>` : '')
+    + `</section>`;
+}
+
+async function buildScorecardHtml(type, id, slug = '') {
+  // Only Tests have a third and fourth innings, and every limited-overs match
+  // has a second — so "fetch 3 and 4 if 2 exists" would mean four requests for
+  // every IPL game to find two empties. The slug already says the format.
+  const isTest = /-test-/.test(slug);
+  const innings = await Promise.all(
+    (isTest ? [1, 2, 3, 4] : [1, 2]).map(n => fetchInnings(type, id, n)),
+  );
+  const parts = innings.map((inn, i) => (inn ? inningsHtml(inn, i + 1) : '')).filter(Boolean);
+  if (!parts.length) return '';
+  return `<div id="seo-scorecard">${parts.join('')}</div>`;
+}
+
 app.get('/api/render', async (req, res) => {
   const target = req.query.url;
   if (!target || !renderTargetAllowed(target)) {
@@ -2101,7 +2314,27 @@ app.get('/api/render', async (req, res) => {
     // Small settle so data arriving just after first paint makes the snapshot.
     await new Promise(r => setTimeout(r, 700));
 
-    const html = await page.content();
+    let html = await page.content();
+
+    // If this is a match page, make sure the snapshot actually contains the
+    // scorecard rather than whatever had painted by the time we looked. Only
+    // inject when the client hasn't already rendered one, so a fast render
+    // stays the source of truth and we never publish it twice.
+    const slugMatch = new URL(target).pathname.match(/^\/match\/(.+)$/);
+    const parsed = slugMatch ? parseMatchSlug(slugMatch[1]) : null;
+    if (parsed && !/id=["']seo-scorecard["']/.test(html)) {
+      try {
+        const card = await buildScorecardHtml(parsed.type, parsed.id, slugMatch[1]);
+        if (card && html.includes('</body>')) {
+          html = html.replace('</body>', `${card}</body>`);
+        } else if (card) {
+          html += card;
+        }
+      } catch (e) {
+        // A missing scorecard is worse SEO, not a broken page — serve the rest.
+        console.warn('⚠️  prerender: scorecard injection failed:', e.message);
+      }
+    }
 
     // A snapshot with no canonical is a placeholder — a spinner still carrying
     // index.html's site-wide title. Serving that is worse than serving nothing:
