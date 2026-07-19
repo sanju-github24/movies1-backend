@@ -2030,7 +2030,43 @@ function toMuxProxyUrl(req, m3u8) {
 // Runs the stealth Playwright scraper behind the scenes
 // without spawning desktop frames on Render.
 // =====================================
-app.get('/api/get-stream', (req, res) => {
+// BCCI video pages serve the file directly now: the main player is a plain
+// <video id="mypagePlayers"> with a <source> pointing at an S3 mp4. The
+// Playwright scraper still looks for a Brightcove id in JSON — "mediaId": "…" —
+// which the page stopped emitting; it's data-mediaId="…" on the playlist items
+// today. So extraction found nothing and every BCCI clip failed with the
+// scraper's catch-all "Stream extraction timed out", which is what it prints
+// whenever it comes back empty, timeout or not.
+//
+// Read the page and take the <source>. No browser, no policy key: a GET and a
+// regex, in about a second. The scraper stays as the fallback for everything
+// else, and for BCCI pages that don't match this shape.
+async function bcciDirectMp4(pageUrl) {
+    const r = await withTimeout(fetch(pageUrl, {
+        redirect: 'follow',            // /bccilink/videos/<code> → /video/<id>/<slug>
+        headers: { 'User-Agent': BCCI_HEADERS['User-Agent'], 'Referer': 'https://www.bcci.tv/' },
+    }), 12000);
+    if (!r.ok) return null;
+    const html = await r.text();
+
+    // The page also lists related clips, each with its own mp4 — so anchor on
+    // the main player rather than taking the first mp4 on the page, or every
+    // video resolves to whatever happens to be top of the sidebar.
+    const player = html.indexOf('id="mypagePlayers"');
+    if (player !== -1) {
+        const m = html.slice(player).match(/<source\s+src="([^"]+\.mp4[^"]*)"/i);
+        if (m) return m[1];
+    }
+    // Fall back to the poster, which embeds the same media id:
+    // .../output/input/<mediaId>-<ts>.jpg
+    const poster = html.match(/poster="[^"]*\/(\d{10,})-\d+\.jpg"/i);
+    if (poster) {
+        return `https://brightcove-videos-bcci-ipl.s3.ap-south-1.amazonaws.com/videos-BCCI/${poster[1]}.mp4`;
+    }
+    return null;
+}
+
+app.get('/api/get-stream', async (req, res) => {
     let targetUrl = req.query.url || '';
     try { targetUrl = decodeURIComponent(targetUrl).trim(); } catch {}
 
@@ -2039,6 +2075,19 @@ app.get('/api/get-stream', (req, res) => {
     }
 
     console.log(`📡 Stream extraction requested for: ${targetUrl}`);
+
+    if (/(^|\.)bcci\.tv$/i.test((() => { try { return new URL(targetUrl).hostname; } catch { return ''; } })())) {
+        try {
+            const mp4 = await bcciDirectMp4(targetUrl);
+            if (mp4) {
+                console.log(`✅ bcci direct mp4: ${mp4}`);
+                return res.json({ success: true, url: mp4, source: 'bcci:source-tag' });
+            }
+            console.warn('⚠️  bcci page had no <source> mp4, falling back to scraper');
+        } catch (e) {
+            console.warn('⚠️  bcci direct extraction failed, falling back:', e.message);
+        }
+    }
 
     // Adjusting target to look into your scrapers folder ('./scrapers/index.py')
     const pythonProcess = spawn('python3', ['./scrapers/index.py', targetUrl]);
