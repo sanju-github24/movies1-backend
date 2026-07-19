@@ -1446,6 +1446,47 @@ app.post("/api/icc/play", async (req, res) => {
 
 app.use(express.static("public"));
 
+// ─── MATCH PHOTO ──────────────────────────────────────────────────────────────
+// The hero has no image of its own, so it uses a match photo from the same
+// content API the highlights come from.
+//
+// The feed returns newest first, and the newest photo mid-match is whatever
+// was shot minutes ago — a fielder mid-throw, a crowd cutaway. The earliest
+// upload is the pre-match set (teams, toss, ground), which is what actually
+// reads as a match thumbnail. So take the oldest.
+//
+// Picked by created_date rather than by taking the last element: the array
+// arrives close to sorted but not exactly (uploads share timestamps), and
+// position would stop meaning anything if BCCI ever flipped the order.
+// URL: /api/cricket/photo?smMatchId=2119
+app.get('/api/cricket/photo', async (req, res) => {
+  const { smMatchId, tournament = 'international' } = req.query;
+  if (!smMatchId) return res.status(400).json({ ok: false, error: 'smMatchId is required' });
+  try {
+    const url = `https://api.bcci.tv/api/v1/pages/getcontentbymatchid`
+      + `?smMatchId=${encodeURIComponent(smMatchId)}&type=photo`
+      + `&tournament_type=${encodeURIComponent(tournament)}`;
+    const r = await withTimeout(fetch(url, { headers: BCCI_HEADERS }), 8000);
+    if (!r.ok) return res.status(502).json({ ok: false, error: `Upstream ${r.status}` });
+    const json = await r.json();
+    const photos = (json?.data || []).filter(p => p?.imageUrl);
+    if (!photos.length) return res.json({ ok: true, photo: null, count: 0 });
+
+    const pick = photos.reduce((a, b) =>
+      (Number(b.created_date) || Infinity) < (Number(a.created_date) || Infinity) ? b : a);
+
+    // Photos for a finished match don't change; a live one gains a few an hour.
+    res.set('Cache-Control', 'public, max-age=600, s-maxage=600');
+    res.json({
+      ok: true,
+      count: photos.length,
+      photo: { url: pick.imageUrl, title: pick.title || '', description: pick.description || '' },
+    });
+  } catch (e) {
+    res.status(502).json({ ok: false, error: e.message });
+  }
+});
+
 app.get("/api/bcci/highlight", async (req, res) => {
   const { smMatchId } = req.query;
   const r = await fetch(`https://api.bcci.tv/api/v1/pages/getcontentbymatchid?smMatchId=${smMatchId}&type=video&tournament_type=international`);
