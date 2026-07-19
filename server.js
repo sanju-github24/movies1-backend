@@ -1487,6 +1487,8 @@ app.get('/api/cricket/photo', async (req, res) => {
   }
 });
 
+// International only. IPL video comes from apiipl.iplt20.com instead, via
+// /api/ipl/highlight-videos above — this API has no IPL library.
 app.get("/api/bcci/highlight", async (req, res) => {
   const { smMatchId } = req.query;
   const r = await fetch(`https://api.bcci.tv/api/v1/pages/getcontentbymatchid?smMatchId=${smMatchId}&type=video&tournament_type=international`);
