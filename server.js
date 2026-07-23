@@ -481,12 +481,25 @@ app.options('/api/icc/vod/*', (req, res) => {
 });
 app.get('/api/icc/vod/*', iccVodProxy);
 
-// ICC highlights list — harvested from the ICC site (videoData carries the uuid),
-// cached 1h. Each item: { uuid, title, image, duration }. The frontend plays a
-// uuid via /api/icc/play.
+// ICC highlights list. Served INSTANTLY from a seed of real Men's T20 WC 2026
+// highlight uuids; a background harvester refreshes it hourly from the ICC site.
+// Each item: { uuid, title, image, duration }. Frontend plays a uuid via /api/icc/play.
+const ICC_HL_IMG = (u) => `https://feedpublisher-icc.akamaized.net/divauni/ICC/fe/images/${u}/${u}-thumbnail.png`;
+const ICC_SEED = [
+  { uuid: 'eb697574-68f4-4c06-abdd-e6537fc19b1a', title: 'India clinch a landmark win in style | Final | Match Highlights | T20WC 2026' },
+  { uuid: 'fe0c6673-4e7b-4050-b5c5-4808c0c46a3e', title: 'Bumrah runs the show in Ahmedabad | Final | POTM | T20WC 2026' },
+  { uuid: '38d21b6a-89b4-4725-a650-b9f0be1a07ce', title: 'India edge a run-fest to make the Final | Match Highlights | T20WC 2026' },
+  { uuid: 'f5fafa5c-de6c-4f78-8071-8c73fc05f522', title: 'New Zealand dominate to book Final spot | Match Highlights | T20WC 2026' },
+  { uuid: 'c43aad4d-f50c-4923-8bd8-40c9aefe5f9b', title: 'Clinical India power into the last four | Match Highlights | T20WC 2026' },
+  { uuid: '9ea71a42-9bf6-44cc-ad2c-70ff5436eeb9', title: "Recovery ensures South Africa's perfect run | Match Highlights | T20WC 2026" },
+  { uuid: 'dbb62fbf-1b31-4c48-a3d9-c0891556d577', title: 'Pakistan win a blockbuster contest in Kandy | Match Highlights | T20WC 2026' },
+].map(s => ({ ...s, image: ICC_HL_IMG(s.uuid), duration: 0 }));
+
 let _iccHlCache = { list: [], ts: 0 };
+let _iccHarvesting = false;
 async function iccHarvestHighlights() {
-  if (_iccHlCache.list.length && Date.now() - _iccHlCache.ts < 60 * 60 * 1000) return _iccHlCache.list;
+  if (_iccHarvesting) return;
+  _iccHarvesting = true;
   const browser = await puppeteer.launch({
     headless: true, executablePath: getChromiumPath(),
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process'],
@@ -500,31 +513,35 @@ async function iccHarvestHighlights() {
       if (!m) return;
       try {
         const j = await r.json();
-        if (j && j.videoId && j.sources && j.sources.length) {
-          found.set(j.videoId, {
-            uuid: j.videoId,
-            title: j.title || 'ICC Highlights',
-            image: j.image || `https://feedpublisher-icc.akamaized.net/divauni/ICC/fe/images/${j.videoId}/${j.videoId}-thumbnail.png`,
-            duration: j.expectedDuration || 0,
-          });
-        }
+        if (j && j.videoId && j.sources && j.sources.length)
+          found.set(j.videoId, { uuid: j.videoId, title: j.title || 'ICC Highlights', image: j.image || ICC_HL_IMG(j.videoId), duration: j.expectedDuration || 0 });
       } catch {}
     });
-    await page.goto('https://www.icc-cricket.com/index', { waitUntil: 'networkidle2', timeout: 60000 });
-    for (let y = 0; y < 6; y++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await new Promise(r => setTimeout(r, 900)); }
+    await page.goto('https://www.icc-cricket.com/tournaments/mens-t20-world-cup-2026/videos/category/highlights-icc-men-s-t20-world-cup-2026', { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+    for (let y = 0; y < 5; y++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await new Promise(r => setTimeout(r, 800)); }
     const links = await page.evaluate(() => [...new Set(
-      Array.from(document.querySelectorAll('a[href*="/videos/"]'))
-        .map(a => a.href).filter(h => /match-highlights|t20wc|t20-world-cup|world-cup/i.test(h))
-    )].slice(0, 8));
-    for (const l of links) { try { await page.goto(l, { waitUntil: 'networkidle2', timeout: 45000 }); await new Promise(r => setTimeout(r, 2800)); } catch {} }
-    const list = [...found.values()];
-    if (list.length) _iccHlCache = { list, ts: Date.now() };
-    return list;
-  } finally { await browser.close(); }
+      Array.from(document.querySelectorAll('a[href*="/videos/"]')).map(a => a.href).filter(h => /highlights/i.test(h))
+    )].slice(0, 12));
+    // Faster per page: domcontentloaded + wait for the videoData response (or 5s).
+    for (const l of links) {
+      try {
+        await Promise.race([
+          page.goto(l, { waitUntil: 'domcontentloaded', timeout: 30000 }).then(() => new Promise(r => setTimeout(r, 3500))),
+          new Promise(r => setTimeout(r, 8000)),
+        ]);
+      } catch {}
+    }
+    if (found.size) _iccHlCache = { list: [...found.values()], ts: Date.now() };
+  } finally {
+    await browser.close().catch(() => {});
+    _iccHarvesting = false;
+  }
 }
-app.get('/api/icc/highlights', async (req, res) => {
-  try { res.json({ success: true, videos: await iccHarvestHighlights() }); }
-  catch (e) { res.status(502).json({ success: false, error: e.message }); }
+app.get('/api/icc/highlights', (req, res) => {
+  const videos = _iccHlCache.list.length ? _iccHlCache.list : ICC_SEED;
+  res.json({ success: true, videos });
+  // Refresh in the background when stale (never blocks the response).
+  if (Date.now() - _iccHlCache.ts > 60 * 60 * 1000) iccHarvestHighlights().catch(() => {});
 });
 
 // -------------------- Routes --------------------
