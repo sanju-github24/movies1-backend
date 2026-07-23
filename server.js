@@ -370,6 +370,163 @@ app.get('/api/icc/video/:videoId', async (req, res) => {
   }
 });
 
+// =====================================
+// 🏏 ICC HIGHLIGHTS — mint + proxy (Path A)
+//
+// Flow (all server-side, so the Akamai token is bound to THIS server's IP):
+//   1. videoData(uuid) → base DASH source URL
+//   2. POST entitlement (AuthType:Open, no DRM/PAL/login) → ContentUrl (hdnts, ~40s)
+//   3. follow the 302 → final hdntl URL (8h token as a path prefix, covers
+//      the manifest AND all relative segments)
+//   4. cache that base; serve manifest + segments through /api/icc/vod/* so the
+//      viewer's browser only ever talks to us (CORS added, IP always ours).
+// =====================================
+const ICC_HDRS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+  'Referer': 'https://www.icc-cricket.com/',
+  'Origin':  'https://www.icc-cricket.com',
+};
+const ICC_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const _iccBaseCache = new Map(); // videoId -> { base, exp }
+
+async function iccResolveBase(videoId) {
+  const cached = _iccBaseCache.get(videoId);
+  if (cached && cached.exp > Date.now() + 60000) return cached.base;
+
+  // 1. videoData → base DASH source
+  const vd = await fetch(`https://feedpublisher-icc.akamaized.net/divauni/ICC/fe/video/videodata/v2/${videoId}`,
+    { headers: { ...ICC_HDRS, Accept: 'application/json' } }).then(r => r.json());
+  const sources = vd.sources || [];
+  const dash = sources.find(s => s.format === 'DASH' && /Desktop-DASH/i.test(s.name)) || sources.find(s => s.format === 'DASH');
+  if (!dash) throw new Error('No DASH source in videoData');
+
+  // 2. entitlement → ContentUrl (hdnts, short-lived)
+  const g = (globalThis.crypto?.randomUUID?.() || (Date.now() + '-' + Math.random().toString(36).slice(2)));
+  const body = {
+    Type: 1, VideoId: videoId, VideoSource: dash.uri, VideoKind: 'vod', AssetState: '3',
+    PlayerType: 'HTML5', VideoSourceFormat: 'DASH', VideoSourceName: 'Desktop-DASH',
+    DRMType: '', AuthType: 'Open', ContentKeyData: '',
+    SessionId: g, PlaybackSessionId: g, Other: `${g}|HTML5`, VideoOfferType: 'Free', User: '',
+  };
+  const ent = await fetch('https://prd-api.icc-volt.com/api/entitlement/api/v2/icc/videos',
+    { method: 'POST', headers: { ...ICC_HDRS, 'Content-Type': 'application/json' }, body: JSON.stringify(body) }
+  ).then(r => r.json());
+  if (ent.Response !== 'OK' || !ent.ContentUrl) throw new Error('Entitlement failed: ' + (ent.Message || ent.Response));
+
+  // 3. follow redirect → final hdntl base
+  const resp = await fetch(ent.ContentUrl, { headers: ICC_HDRS, redirect: 'follow' });
+  const finalUrl = resp.url || ent.ContentUrl;
+  const base = finalUrl.replace(/\/manifest\.mpd.*$/i, '');
+  const m = /exp=(\d+)/.exec(base);
+  const exp = m ? parseInt(m[1], 10) * 1000 : Date.now() + 7 * 3600 * 1000;
+  _iccBaseCache.set(videoId, { base, exp });
+  return base;
+}
+
+// Returns { manifestUrl } — a proxied DASH manifest the frontend hands to Shaka.
+app.get('/api/icc/play', async (req, res) => {
+  const videoId = String(req.query.videoId || '');
+  if (!ICC_UUID_RE.test(videoId)) return res.status(400).json({ success: false, error: 'Invalid videoId' });
+  try {
+    const base = await iccResolveBase(videoId);            // https://host/Content/.../hdntl=.../
+    const proxied = base.replace(/^https:\/\//i, '');       // host/Content/.../hdntl=.../
+    const origin = `${req.protocol}://${req.get('host')}`;
+    res.json({ success: true, manifestUrl: `${origin}/api/icc/vod/${proxied}/manifest.mpd` });
+  } catch (err) {
+    res.status(502).json({ success: false, error: err.message });
+  }
+});
+
+// Path-based media proxy. Relative DASH segments resolve against this URL, so
+// the manifest needs no rewriting — everything flows back through us.
+async function iccVodProxy(req, res) {
+  const marker = '/api/icc/vod/';
+  const raw = req.originalUrl.slice(req.originalUrl.indexOf(marker) + marker.length); // host/path...token/file
+  if (!raw) return res.status(400).end('missing path');
+  const target = 'https://' + raw;
+  const isText = /\.mpd(\?|$)/i.test(raw) || /\.m3u8(\?|$)/i.test(raw);
+  const cors = {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+    'Access-Control-Allow-Headers': '*',
+    'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type',
+  };
+  Object.entries(cors).forEach(([k, v]) => res.setHeader(k, v));
+  try {
+    const upstream = await axios({
+      method: 'GET', url: target, responseType: isText ? 'text' : 'stream',
+      transformResponse: isText ? [(d) => d] : undefined,
+      headers: ICC_HDRS, timeout: 30000, maxRedirects: 5, validateStatus: () => true,
+    });
+    if (upstream.status >= 400) return res.status(upstream.status).end();
+    if (isText) {
+      res.setHeader('Content-Type', /\.mpd/i.test(raw) ? 'application/dash+xml' : 'application/x-mpegURL');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.send(upstream.data);
+    }
+    if (upstream.headers['content-type']) res.setHeader('Content-Type', upstream.headers['content-type']);
+    if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
+    if (upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
+    upstream.data.pipe(res);
+    upstream.data.on('error', () => { if (!res.headersSent) res.status(502).end(); });
+  } catch (err) {
+    if (!res.headersSent) res.status(502).json({ error: err.message });
+  }
+}
+app.options('/api/icc/vod/*', (req, res) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', '*');
+  res.status(204).end();
+});
+app.get('/api/icc/vod/*', iccVodProxy);
+
+// ICC highlights list — harvested from the ICC site (videoData carries the uuid),
+// cached 1h. Each item: { uuid, title, image, duration }. The frontend plays a
+// uuid via /api/icc/play.
+let _iccHlCache = { list: [], ts: 0 };
+async function iccHarvestHighlights() {
+  if (_iccHlCache.list.length && Date.now() - _iccHlCache.ts < 60 * 60 * 1000) return _iccHlCache.list;
+  const browser = await puppeteer.launch({
+    headless: true, executablePath: getChromiumPath(),
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process'],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36');
+    const found = new Map();
+    page.on('response', async r => {
+      const m = r.url().match(/video\/videodata\/v2\/([0-9a-f-]{36})/i);
+      if (!m) return;
+      try {
+        const j = await r.json();
+        if (j && j.videoId && j.sources && j.sources.length) {
+          found.set(j.videoId, {
+            uuid: j.videoId,
+            title: j.title || 'ICC Highlights',
+            image: j.image || `https://feedpublisher-icc.akamaized.net/divauni/ICC/fe/images/${j.videoId}/${j.videoId}-thumbnail.png`,
+            duration: j.expectedDuration || 0,
+          });
+        }
+      } catch {}
+    });
+    await page.goto('https://www.icc-cricket.com/index', { waitUntil: 'networkidle2', timeout: 60000 });
+    for (let y = 0; y < 6; y++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await new Promise(r => setTimeout(r, 900)); }
+    const links = await page.evaluate(() => [...new Set(
+      Array.from(document.querySelectorAll('a[href*="/videos/"]'))
+        .map(a => a.href).filter(h => /match-highlights|t20wc|t20-world-cup|world-cup/i.test(h))
+    )].slice(0, 8));
+    for (const l of links) { try { await page.goto(l, { waitUntil: 'networkidle2', timeout: 45000 }); await new Promise(r => setTimeout(r, 2800)); } catch {} }
+    const list = [...found.values()];
+    if (list.length) _iccHlCache = { list, ts: Date.now() };
+    return list;
+  } finally { await browser.close(); }
+}
+app.get('/api/icc/highlights', async (req, res) => {
+  try { res.json({ success: true, videos: await iccHarvestHighlights() }); }
+  catch (e) { res.status(502).json({ success: false, error: e.message }); }
+});
+
 // -------------------- Routes --------------------
 app.use("/api/bms",    bmsRouter);
 app.use('/api/auth',   authRouter);
