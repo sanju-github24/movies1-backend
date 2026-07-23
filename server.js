@@ -495,53 +495,81 @@ const ICC_SEED = [
   { uuid: 'dbb62fbf-1b31-4c48-a3d9-c0891556d577', title: 'Pakistan win a blockbuster contest in Kandy | Match Highlights | T20WC 2026' },
 ].map(s => ({ ...s, image: ICC_HL_IMG(s.uuid), duration: 0 }));
 
-let _iccHlCache = { list: [], ts: 0 };
+// Persist highlights in Supabase (table `icc_highlights`: uuid text PK, title
+// text, image text, sort int, created_at timestamptz default now()). Harvest once
+// → stored → served paginated for Load More. No re-harvest on every request.
+async function iccUpsert(list) {
+  if (!list || !list.length) return;
+  try {
+    await supabase.from('icc_highlights').upsert(
+      list.map((v, i) => ({ uuid: v.uuid, title: v.title, image: v.image || ICC_HL_IMG(v.uuid), sort: v.sort ?? i })),
+      { onConflict: 'uuid', ignoreDuplicates: false }
+    );
+  } catch (e) { console.warn('[icc] upsert failed (create table?):', e.message); }
+}
+// Best-effort seed of the known highlights on boot.
+iccUpsert(ICC_SEED.map((v, i) => ({ ...v, sort: i })));
+
 let _iccHarvesting = false;
+let _iccHarvestedOnce = false;
 async function iccHarvestHighlights() {
   if (_iccHarvesting) return;
   _iccHarvesting = true;
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36';
+  const wait = (ms) => new Promise(r => setTimeout(r, ms));
   const browser = await puppeteer.launch({
     headless: true, executablePath: getChromiumPath(),
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process'],
   });
   try {
     const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36');
-    const found = new Map();
-    page.on('response', async r => {
-      const m = r.url().match(/video\/videodata\/v2\/([0-9a-f-]{36})/i);
-      if (!m) return;
-      try {
-        const j = await r.json();
-        if (j && j.videoId && j.sources && j.sources.length)
-          found.set(j.videoId, { uuid: j.videoId, title: j.title || 'ICC Highlights', image: j.image || ICC_HL_IMG(j.videoId), duration: j.expectedDuration || 0 });
-      } catch {}
-    });
+    await page.setUserAgent(UA);
     await page.goto('https://www.icc-cricket.com/tournaments/mens-t20-world-cup-2026/videos/category/highlights-icc-men-s-t20-world-cup-2026', { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
-    for (let y = 0; y < 5; y++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await new Promise(r => setTimeout(r, 800)); }
+    for (let y = 0; y < 12; y++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await wait(700); }
     const links = await page.evaluate(() => [...new Set(
-      Array.from(document.querySelectorAll('a[href*="/videos/"]')).map(a => a.href).filter(h => /highlights/i.test(h))
-    )].slice(0, 12));
-    // Faster per page: domcontentloaded + wait for the videoData response (or 5s).
-    for (const l of links) {
-      try {
-        await Promise.race([
-          page.goto(l, { waitUntil: 'domcontentloaded', timeout: 30000 }).then(() => new Promise(r => setTimeout(r, 3500))),
-          new Promise(r => setTimeout(r, 8000)),
-        ]);
-      } catch {}
+      Array.from(document.querySelectorAll('a[href*="/videos/"]')).map(a => a.href).filter(h => h && !/\/category\//.test(h) && /\/videos\//.test(h))
+    )]).then(a => a.slice(0, 40));
+    let sort = ICC_SEED.length;
+    for (const l of links) {                       // sequential = reliable; persist incrementally
+      const found = new Map();
+      const handler = async (r) => {
+        const m = r.url().match(/video\/videodata\/v2\/([0-9a-f-]{36})/i);
+        if (!m) return;
+        try { const j = await r.json(); if (j && j.videoId && j.sources && j.sources.length) found.set(j.videoId, { uuid: j.videoId, title: j.title || 'ICC Highlights', image: j.image || ICC_HL_IMG(j.videoId) }); } catch {}
+      };
+      page.on('response', handler);
+      try { await Promise.race([ page.goto(l, { waitUntil: 'domcontentloaded', timeout: 30000 }).then(() => wait(3000)), wait(9000) ]); } catch {}
+      page.off('response', handler);
+      if (found.size) await iccUpsert([...found.values()].map(v => ({ ...v, sort: sort++ })));
     }
-    if (found.size) _iccHlCache = { list: [...found.values()], ts: Date.now() };
   } finally {
     await browser.close().catch(() => {});
     _iccHarvesting = false;
   }
 }
-app.get('/api/icc/highlights', (req, res) => {
-  const videos = _iccHlCache.list.length ? _iccHlCache.list : ICC_SEED;
-  res.json({ success: true, videos });
-  // Refresh in the background when stale (never blocks the response).
-  if (Date.now() - _iccHlCache.ts > 60 * 60 * 1000) iccHarvestHighlights().catch(() => {});
+
+// Paginated highlights: ?offset=0&limit=8. Reads from Supabase; falls back to the
+// in-memory seed if the table isn't set up yet. Kicks a one-time background harvest
+// to fill the full list.
+app.get('/api/icc/highlights', async (req, res) => {
+  const limit = Math.min(Math.max(parseInt(req.query.limit) || 8, 1), 40);
+  const offset = Math.max(parseInt(req.query.offset) || 0, 0);
+  try {
+    const { data, count, error } = await supabase
+      .from('icc_highlights')
+      .select('uuid,title,image', { count: 'exact' })
+      .order('sort', { ascending: true })
+      .range(offset, offset + limit - 1);
+    if (!error && data && data.length) {
+      const total = count ?? data.length;
+      res.json({ success: true, videos: data, total, hasMore: offset + data.length < total });
+      if (!_iccHarvestedOnce) { _iccHarvestedOnce = true; iccHarvestHighlights().catch(() => {}); }
+      return;
+    }
+  } catch {}
+  // Fallback: seed only (table missing / empty)
+  const slice = ICC_SEED.slice(offset, offset + limit);
+  res.json({ success: true, videos: slice, total: ICC_SEED.length, hasMore: offset + slice.length < ICC_SEED.length });
 });
 
 // -------------------- Routes --------------------
