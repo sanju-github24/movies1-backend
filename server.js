@@ -430,7 +430,10 @@ app.get('/api/icc/play', async (req, res) => {
   try {
     const base = await iccResolveBase(videoId);            // https://host/Content/.../hdntl=.../
     const proxied = base.replace(/^https:\/\//i, '');       // host/Content/.../hdntl=.../
-    const origin = `${req.protocol}://${req.get('host')}`;
+    // Behind Render/any proxy, req.protocol is http — trust X-Forwarded-Proto so
+    // the manifest URL is https and isn't blocked as mixed content on an https site.
+    const proto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https').split(',')[0].trim();
+    const origin = `${proto}://${req.get('host')}`;
     res.json({ success: true, manifestUrl: `${origin}/api/icc/vod/${proxied}/manifest.mpd` });
   } catch (err) {
     res.status(502).json({ success: false, error: err.message });
