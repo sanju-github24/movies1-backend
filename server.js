@@ -1707,6 +1707,195 @@ app.get("/api/bcci/highlight", async (req, res) => {
 // =====================================
 // 🎵 SONGS & MUSIC SCRA-P-ER ROUTES
 // =====================================
+// MX Player manifest resolver — Playwright (like the cricket flows). Given an MX
+// item's web URL, a real browser captures the CloudFront manifest + a worker playUrl.
+// NOTE: only returns a stream if this backend egresses from a residential Indian IP;
+// from a datacenter MX blanks the stream and this responds success:false.
+app.get('/api/mx/resolve', (req, res) => {
+    const webUrl = req.query.url || '';
+    if (!/^https?:\/\/(www\.)?mxplayer\.in\//.test(webUrl)) {
+        return res.status(400).json({ success: false, error: 'Missing/invalid MX ?url=' });
+    }
+    console.log(`🎬 MX resolve requested for: ${webUrl}`);
+    const pythonProcess = spawn('python3', ['./scrapers/index.py', '--mx', webUrl]);
+    let output = '', errorOutput = '';
+    pythonProcess.stdout.on('data', (d) => { output += d.toString(); });
+    pythonProcess.stderr.on('data', (d) => { errorOutput += d.toString(); });
+    pythonProcess.on('close', (code) => {
+        try {
+            const data = JSON.parse(output.trim());
+            return res.json(data);
+        } catch (e) {
+            console.error(`❌ MX resolve failed (code ${code}). Stderr: ${errorOutput.slice(0, 300)}`);
+            return res.status(502).json({ success: false, error: 'MX resolve failed', details: errorOutput.slice(0, 300) });
+        }
+    });
+});
+
+// ── MX Player detail/episodes (residential fetch; returns empty from datacenter) ──
+const MX_API_BASE = 'https://api.mxplayer.in/v1/web';
+const MX_CDN = 'https://d3sgzbosmwirao.cloudfront.net/';
+const MX_STREAM_WORKER = 'https://silent-scene-b9bb.sanjusanjay0444.workers.dev';
+const MX_FETCH_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36',
+  'Referer': 'https://www.mxplayer.in/', 'Origin': 'https://www.mxplayer.in',
+};
+async function mxApi(path) {
+  const r = await fetch(`${MX_API_BASE}${path}${path.includes('?') ? '&' : '?'}device-density=2`, { headers: MX_FETCH_HEADERS });
+  return JSON.parse(await r.text());
+}
+function mxExtractBlob(html, key) {
+  const i = html.indexOf(key); if (i < 0) return null;
+  const s = html.indexOf('{', i); if (s < 0) return null;
+  let depth = 0, inStr = false, esc = false;
+  for (let j = s; j < html.length; j++) {
+    const c = html[j];
+    if (inStr) { if (esc) esc = false; else if (c === '\\') esc = true; else if (c === '"') inStr = false; }
+    else if (c === '"') inStr = true; else if (c === '{') depth++;
+    else if (c === '}') { if (--depth === 0) return html.slice(s, j + 1); }
+  }
+  return null;
+}
+function mxImg(item, prefs) {
+  const infos = [item.imageInfo, item.titleContentImageInfo].filter(Boolean).flat();
+  for (const t of prefs) { const m = infos.find((i) => i && i.type === t && i.url); if (m) return 'https://qqcdnpictest.mxplay.com/' + m.url; }
+  const any = infos.find((i) => i && i.url); return any ? 'https://qqcdnpictest.mxplay.com/' + any.url : null;
+}
+function mxPlayUrl(hlsPath) {
+  const manifest = hlsPath.startsWith('http') ? hlsPath : MX_CDN + hlsPath;
+  return `${MX_STREAM_WORKER}/hls/index.m3u8?url=${encodeURIComponent(manifest)}`;
+}
+async function mxShowEpisodes(webUrl) {
+  const path = webUrl.replace(/^https?:\/\/[^/]+/, '');
+  const res = await fetch('https://www.mxplayer.in' + path, { headers: MX_FETCH_HEADERS });
+  const blob = mxExtractBlob(await res.text(), 'window.__mxs__');
+  if (!blob) throw new Error('No SSR state (residential IP required)');
+  const ent = (JSON.parse(blob).entities) || {};
+  const idm = /-([0-9a-f]{24,})(?:$|[/?])/i.exec(path);
+  const item = (idm && ent[idm[1]]) || Object.values(ent).find((v) => v && v.title && v.type);
+  if (!item) throw new Error('No entity in SSR state');
+  const base = {
+    title: item.title,
+    poster: mxImg(item, ['portrait_large', 'portrait', 'landscape', 'bigpic']),
+    backdrop: mxImg(item, ['banner_and_static_bg_desktop', 'bigpic', 'landscape']),
+    logo: mxImg(item, ['title_desktop']),
+    description: item.description || '', genres: item.genres || [],
+    year: item.releaseDate ? new Date(item.releaseDate).getFullYear() : null,
+  };
+  const inline = item.stream && item.stream.hls && item.stream.hls.high;
+  if (inline) return { type: 'movie', ...base, playUrl: mxPlayUrl(inline) };
+
+  // Seasons: the show page SSR lists them under the EPISODES tab's `containers`.
+  const epTab = (item.tabs || []).find((t) => /episode/i.test(t.type || ''));
+  let seasonConts = (epTab && epTab.containers) || [];
+  if (!seasonConts.length) {
+    // Single-season fallback: resolve the season via firstVideo → detail/video.
+    const fv = item.firstVideo && item.firstVideo.id;
+    if (!fv) throw new Error('No episodes found');
+    const dv = await mxApi(`/detail/video?type=episode&id=${fv}`);
+    const tab = (dv.tabs || []).find((t) => /episode/i.test(t.type || '') && (t.aroundApi || t.api));
+    const ref = tab && (tab.aroundApi || tab.api);
+    const sm = ref && /[?&]id=([0-9a-f]+)/i.exec(ref);
+    const seasonId = sm ? sm[1] : (dv.container && dv.container.id);
+    if (!seasonId) throw new Error('No season resolved');
+    seasonConts = [{ id: seasonId, sequence: 1, title: 'Season 1' }];
+  }
+  seasonConts = seasonConts.slice().sort((a, b) => (a.sequence || 0) - (b.sequence || 0)); // S1 → Sn
+
+  const eps = [];
+  for (const sc of seasonConts) {
+    let next = '', pages = 0;
+    do {
+      const d = await mxApi(`/detail/tab/tvshowepisodes?type=season&id=${sc.id}${next ? '&' + next : ''}`);
+      (d.items || []).forEach((it) => {
+        const h = it.stream && it.stream.hls && it.stream.hls.high;
+        if (h) eps.push({
+          epId: it.id, season: sc.sequence || 1, number: it.sequence || 1,
+          title: it.title || `Episode ${it.sequence || ''}`,
+          poster: mxImg(it, ['landscape', 'bigpic', 'portrait_large']),
+          description: it.description || '', playUrl: mxPlayUrl(h),
+        });
+      });
+      next = d.next || ''; pages++;
+    } while (next && pages < 6);
+  }
+  const seasons = seasonConts.map((s) => ({ number: s.sequence || 1, title: s.title, episodesCount: s.episodesCount || null }));
+  return { type: 'show', ...base, seasonCount: seasons.length, seasons, episodes: eps };
+}
+// Resolve a movie/episode directly by MX content id (for items that lack a webUrl).
+async function mxResolveById(id, type) {
+  const d = await mxApi(`/detail/video?type=${encodeURIComponent(type)}&id=${encodeURIComponent(id)}`);
+  const hls = d.stream && d.stream.hls && d.stream.hls.high;
+  if (!hls) throw new Error('No stream for ' + id);
+  return {
+    type: 'movie',
+    title: d.title,
+    poster: mxImg(d, ['portrait_large', 'portrait', 'landscape', 'bigpic']),
+    backdrop: mxImg(d, ['banner_and_static_bg_desktop', 'bigpic', 'landscape']),
+    logo: mxImg(d, ['title_desktop']),
+    description: d.description || '', genres: d.genres || [],
+    year: d.releaseDate ? new Date(d.releaseDate).getFullYear() : null,
+    playUrl: mxPlayUrl(hls),
+  };
+}
+// MX Player homepage hero/spotlight slides (title, genres, language, backdrop,
+// logo, trailer manifest). Residential fetch of the homepage SSR banner.
+async function mxHero() {
+  const res = await fetch('https://www.mxplayer.in/', { headers: MX_FETCH_HEADERS });
+  const blob = mxExtractBlob(await res.text(), 'window.__mxs__');
+  if (!blob) throw new Error('No SSR state (residential IP required)');
+  const state = JSON.parse(blob);
+  const banner = (((state.homepage || {}).home || {}).banner) || [];
+  const slides = banner
+    .filter((b) => b && b.title)
+    .map((b) => {
+      const th = b.trailer && b.trailer.hls && b.trailer.hls.high;
+      return {
+        title: b.title,
+        subTitle: b.subTitle || null,
+        type: b.type || null,
+        mxId: b.id || null,
+        mxType: b.type || null,
+        genres: b.genres || [],
+        languages: b.languages || [],
+        rating: b.rating || null,
+        backdrop: mxImg(b, ['desktop_banner_and_featured_card_bg', 'banner_and_static_bg_desktop', 'bigpic']),
+        logo: mxImg(b, ['title_desktop']),
+        poster: mxImg(b, ['bigpic', 'desktop_banner_and_featured_card_bg']),
+        trailer: th ? (th.startsWith('http') ? th : MX_CDN + th) : null,
+        webUrl: b.webUrl ? `https://www.mxplayer.in${b.webUrl}` : null,
+      };
+    })
+    .slice(0, 6);
+  return { slides };
+}
+app.get('/api/mx/hero', async (req, res) => {
+  console.log('🎬 MX hero requested');
+  try {
+    res.json({ success: true, ...(await mxHero()) });
+  } catch (e) {
+    console.error(`❌ MX hero failed: ${e.message}`);
+    res.status(502).json({ success: false, error: e.message });
+  }
+});
+
+app.get('/api/mx/episodes', async (req, res) => {
+  const url = req.query.url || '';
+  const id = req.query.id || '';
+  const type = req.query.type || 'movie';
+  if (!url && !id) return res.status(400).json({ success: false, error: 'Pass ?url= or ?id=&type=' });
+  console.log(`🎬 MX episodes/detail requested for: ${url || id + '/' + type}`);
+  try {
+    const data = url
+      ? await mxShowEpisodes(url)
+      : await mxResolveById(id, type === 'tvshow' || type === 'show' ? 'episode' : type);
+    res.json({ success: true, ...data });
+  } catch (e) {
+    console.error(`❌ MX episodes failed: ${e.message}`);
+    res.status(502).json({ success: false, error: e.message });
+  }
+});
+
 app.get('/api/songs/homepage', (req, res) => {
     console.log(`🎵 Songs homepage requested`);
     const pythonProcess = spawn('python3', ['./scrapers/index.py', '--homepage']);

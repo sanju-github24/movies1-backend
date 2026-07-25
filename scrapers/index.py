@@ -1907,11 +1907,115 @@ def get_gaana_track_info_json(seokey):
     }
 
 
+# ──────────────────────────────────────────────────────────────────────────
+# MX Player manifest resolver (Playwright, like the cricket flows)
+# ──────────────────────────────────────────────────────────────────────────
+# MX serves the stream URL only to residential Indian IPs AND only to a real
+# browser carrying its x-guard-key token. This loads the watch page in a real
+# Chromium, reads the SSR state, and (crucially, for the case where the page
+# comes back as an empty shell) clicks Play to force the app's own manifest
+# fetch — then captures the .m3u8 / detail/video the browser produces.
+MX_CDN = "https://d3sgzbosmwirao.cloudfront.net/"
+MX_WORKER = "https://silent-scene-b9bb.sanjusanjay0444.workers.dev"
+
+def resolve_mx_manifest(web_url):
+    from playwright.sync_api import sync_playwright
+    launch_args = [
+        "--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-gpu",
+        "--mute-audio", "--disable-dev-shm-usage", "--autoplay-policy=no-user-gesture-required",
+        "--disable-features=IsolateOrigins,site-per-process",
+    ]
+    hits = {"m3u8": None, "hls_path": None, "title": None}
+
+    def take_hls(path):
+        if path and not hits["hls_path"]:
+            hits["hls_path"] = path
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True, args=launch_args)
+        context = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800},
+        )
+        page = context.new_page()
+        page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
+
+        def on_request(r):
+            if ".m3u8" in r.url and not hits["m3u8"]:
+                hits["m3u8"] = r.url          # the real manifest the player loaded
+        def on_response(r):
+            if "detail/video" in r.url:        # the app's own fetch (carries guard token)
+                try:
+                    d = r.json()
+                    hits["title"] = hits["title"] or (d or {}).get("title")
+                    take_hls((((d or {}).get("stream") or {}).get("hls") or {}).get("high"))
+                except Exception:
+                    pass
+        page.on("request", on_request)
+        page.on("response", on_response)
+
+        try:
+            page.goto(web_url, wait_until="networkidle", timeout=60000)
+        except Exception as e:
+            dbg(f"[MX] nav: {e}")
+        page.wait_for_timeout(2500)
+
+        # Fast path: the SSR state (residential full page) already holds the stream.
+        try:
+            mxs = page.evaluate("() => window.__mxs__ ? JSON.stringify(window.__mxs__) : null")
+            if mxs:
+                d = json.loads(mxs)
+                ents = d.get("entities") or {}
+                m = re.search(r"-([0-9a-f]{24,})(?:$|[/?])", web_url)
+                item = (ents.get(m.group(1)) if m else None) or next(
+                    (v for v in ents.values() if isinstance(v, dict) and v.get("title") and v.get("type")), None)
+                if item:
+                    hits["title"] = hits["title"] or item.get("title")
+                    take_hls((((item.get("stream") or {}).get("hls") or {}).get("high")))
+        except Exception as e:
+            dbg(f"[MX] mxs read: {e}")
+
+        # If we still have no stream (e.g. datacenter shell), force the player to
+        # fetch it: click the big Play control and wait for the manifest request.
+        if not (hits["m3u8"] or hits["hls_path"]):
+            for sel in ['button:has-text("Play")', '[data-testid*="play" i]',
+                        'button[aria-label*="play" i]', '.player-play', 'video']:
+                try:
+                    el = page.query_selector(sel)
+                    if el:
+                        el.click(timeout=2000)
+                        page.wait_for_timeout(3500)
+                        if hits["m3u8"] or hits["hls_path"]:
+                            break
+                except Exception:
+                    pass
+            page.wait_for_timeout(2500)
+
+        browser.close()
+
+    manifest = hits["m3u8"] or (MX_CDN + hits["hls_path"] if hits["hls_path"] else None)
+    if not manifest:
+        return {"success": False, "error": "No manifest captured (likely datacenter-IP block)"}
+    return {
+        "success": True,
+        "title": hits["title"],
+        "manifest": manifest,
+        # Path ends in .m3u8 so the StreamX player detects HLS (it strips the query
+        # for type detection); the worker ignores the path and reads ?url=.
+        "playUrl": f"{MX_WORKER}/hls/index.m3u8?url={quote_plus(manifest)}",
+    }
+
+
 if __name__ == "__main__":
     if len(sys.argv) > 1:
         flag = sys.argv[1]
-        
-        if flag == "--homepage":
+
+        if flag == "--mx":
+            if len(sys.argv) < 3:
+                print(json.dumps({"success": False, "error": "Missing MX web url"})); sys.exit(1)
+            print(json.dumps(resolve_mx_manifest(sys.argv[2])))
+            sys.exit(0)
+        elif flag == "--homepage":
             # Trending per language, over HTTP. Pendujatt's homepage needed a
             # browser to read, took ~30s, and gave us whatever it happened to be
             # promoting; this is a section per language in about a second.
