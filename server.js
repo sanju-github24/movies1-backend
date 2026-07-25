@@ -1740,8 +1740,25 @@ const MX_FETCH_HEADERS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0 Safari/537.36',
   'Referer': 'https://www.mxplayer.in/', 'Origin': 'https://www.mxplayer.in',
 };
+// MX serves streams/pages only to residential Indian IPs. Locally (home Jio) a
+// direct fetch works; from a datacenter (Render) it returns an empty shell. To
+// make it work in the cloud, route through a residential-Indian scraping proxy
+// when MX_SCRAPER_KEY is set (ScraperAPI-style: fetches the URL from an in-country
+// residential IP and returns the raw response). Falls back to a direct fetch.
+async function mxFetch(url) {
+  const key = process.env.MX_SCRAPER_KEY;
+  if (key) {
+    // ScraperAPI-style: country_code=in + premium=true = RESIDENTIAL Indian IP
+    // (MX blocks datacenter Indian IPs too). No render — __mxs__ is in the HTML.
+    // Override the whole param template via MX_SCRAPER_BASE if using another service.
+    const provider = process.env.MX_SCRAPER_BASE || 'http://api.scraperapi.com/';
+    const proxied = `${provider}?api_key=${key}&country_code=in&premium=true&url=${encodeURIComponent(url)}`;
+    return fetch(proxied, { headers: { 'Accept': '*/*' }, signal: AbortSignal.timeout(70000) });
+  }
+  return fetch(url, { headers: MX_FETCH_HEADERS });
+}
 async function mxApi(path) {
-  const r = await fetch(`${MX_API_BASE}${path}${path.includes('?') ? '&' : '?'}device-density=2`, { headers: MX_FETCH_HEADERS });
+  const r = await mxFetch(`${MX_API_BASE}${path}${path.includes('?') ? '&' : '?'}device-density=2`);
   return JSON.parse(await r.text());
 }
 function mxExtractBlob(html, key) {
@@ -1767,7 +1784,7 @@ function mxPlayUrl(hlsPath) {
 }
 async function mxShowEpisodes(webUrl) {
   const path = webUrl.replace(/^https?:\/\/[^/]+/, '');
-  const res = await fetch('https://www.mxplayer.in' + path, { headers: MX_FETCH_HEADERS });
+  const res = await mxFetch('https://www.mxplayer.in' + path);
   const blob = mxExtractBlob(await res.text(), 'window.__mxs__');
   if (!blob) throw new Error('No SSR state (residential IP required)');
   const ent = (JSON.parse(blob).entities) || {};
@@ -1841,7 +1858,7 @@ async function mxResolveById(id, type) {
 // MX Player homepage hero/spotlight slides (title, genres, language, backdrop,
 // logo, trailer manifest). Residential fetch of the homepage SSR banner.
 async function mxHero() {
-  const res = await fetch('https://www.mxplayer.in/', { headers: MX_FETCH_HEADERS });
+  const res = await mxFetch('https://www.mxplayer.in/');
   const blob = mxExtractBlob(await res.text(), 'window.__mxs__');
   if (!blob) throw new Error('No SSR state (residential IP required)');
   const state = JSON.parse(blob);
