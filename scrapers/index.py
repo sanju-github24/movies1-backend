@@ -1926,6 +1926,7 @@ def resolve_mx_manifest(web_url):
         "--disable-features=IsolateOrigins,site-per-process",
     ]
     hits = {"m3u8": None, "hls_path": None, "title": None}
+    diag = {"mxs": False, "api_calls": [], "detail_status": None, "detail_has_stream": None, "detail_snippet": None}
 
     def take_hls(path):
         if path and not hits["hls_path"]:
@@ -1941,12 +1942,19 @@ def resolve_mx_manifest(web_url):
         page.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
 
         def on_request(r):
-            if ".m3u8" in r.url and not hits["m3u8"]:
-                hits["m3u8"] = r.url          # the real manifest the player loaded
+            u = r.url
+            if ".m3u8" in u and not hits["m3u8"]:
+                hits["m3u8"] = u              # the real manifest the player loaded
+            if "api.mxplayer.in/v1/" in u and len(diag["api_calls"]) < 25:
+                diag["api_calls"].append(u.split("api.mxplayer.in/v1/web/")[-1].split("?")[0][:60])
         def on_response(r):
             if "detail/video" in r.url:        # the app's own fetch (carries guard token)
                 try:
-                    d = r.json()
+                    diag["detail_status"] = r.status
+                    body = r.text()
+                    diag["detail_snippet"] = diag["detail_snippet"] or body[:120]
+                    d = json.loads(body)
+                    diag["detail_has_stream"] = bool((((d or {}).get("stream") or {}).get("hls") or {}).get("high"))
                     hits["title"] = hits["title"] or (d or {}).get("title")
                     take_hls((((d or {}).get("stream") or {}).get("hls") or {}).get("high"))
                 except Exception:
@@ -1954,16 +1962,25 @@ def resolve_mx_manifest(web_url):
         page.on("request", on_request)
         page.on("response", on_response)
 
+        # Boot the SPA on the homepage first (sets device cookies + guard token),
+        # THEN navigate to the target so its client-side detail/video fetch fires
+        # even when the SSR page comes back as a datacenter shell.
+        try:
+            page.goto("https://www.mxplayer.in/", wait_until="domcontentloaded", timeout=45000)
+            page.wait_for_timeout(2500)
+        except Exception as e:
+            dbg(f"[MX] home nav: {e}")
         try:
             page.goto(web_url, wait_until="networkidle", timeout=60000)
         except Exception as e:
             dbg(f"[MX] nav: {e}")
-        page.wait_for_timeout(2500)
+        page.wait_for_timeout(3000)
 
         # Fast path: the SSR state (residential full page) already holds the stream.
         try:
             mxs = page.evaluate("() => window.__mxs__ ? JSON.stringify(window.__mxs__) : null")
             if mxs:
+                diag["mxs"] = True
                 d = json.loads(mxs)
                 ents = d.get("entities") or {}
                 m = re.search(r"-([0-9a-f]{24,})(?:$|[/?])", web_url)
@@ -1995,7 +2012,7 @@ def resolve_mx_manifest(web_url):
 
     manifest = hits["m3u8"] or (MX_CDN + hits["hls_path"] if hits["hls_path"] else None)
     if not manifest:
-        return {"success": False, "error": "No manifest captured (likely datacenter-IP block)"}
+        return {"success": False, "error": "No manifest captured", "diag": diag}
     return {
         "success": True,
         "title": hits["title"],
