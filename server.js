@@ -1287,6 +1287,117 @@ const BCCI_HEADERS = {
   "Origin":     "https://www.bcci.tv",
 };
 
+// ─────────────────────────────────────────────────────────────────────
+// 🎬 BCCI HIGHLIGHTS LISTING — the full men's-international highlights feed
+// (bcci.tv/international/men/videos/highlights). This is the SAME endpoint the
+// site's own "Load More" button hits (found in /js/video.js):
+//   GET /videoslist?slug=highlights&page=N&platform=international&type=men
+//     → { status, total_results, entries_per_page:20, videoData:<HTML cards> }
+// Each card is a plain .mp4 (data-video-url) — no player scrape needed. We parse
+// the cards, persist them to Supabase, and serve ONE page per Load More click so
+// the frontend can keep loading until the last page (page === totalPages).
+//
+// Supabase table `bcci_highlights`:
+//   id text primary key, title text, image text, video_url text, share text,
+//   date text, duration text, views text, sort int,
+//   created_at timestamptz default now()
+// ─────────────────────────────────────────────────────────────────────
+const BCCI_HL_URL = (page) =>
+  `https://www.bcci.tv/videoslist?slug=highlights&page=${page}&platform=international&type=men`;
+
+// Parse the <a class="playerpopup" data-*> cards out of the videoData HTML blob.
+function bcciParseHighlightCards(html) {
+  const out = [];
+  if (!html) return out;
+  const attr = (tag, name) => {
+    const m = tag.match(new RegExp(`data-${name}="([^"]*)"`, "i"));
+    return m ? m[1] : "";
+  };
+  const tags = html.match(/<a[^>]*class="playerpopup"[^>]*>/gi) || [];
+  for (const tag of tags) {
+    const video_url = attr(tag, "video-url");
+    if (!video_url) continue;                       // skip non-video tiles
+    out.push({
+      id:        attr(tag, "videoId") || attr(tag, "mediaId"),
+      title:     attr(tag, "videoTitle") || attr(tag, "title"),
+      image:     attr(tag, "thumbnile"),            // BCCI's own attr spelling
+      video_url,
+      share:     attr(tag, "share"),
+      slug:      attr(tag, "videoslug"),
+      date:      attr(tag, "videoDate"),
+      duration: (attr(tag, "duration") || "").trim(),
+      views:     attr(tag, "videoView"),
+    });
+  }
+  return out;
+}
+
+async function bcciFetchHighlightPage(page) {
+  const r = await fetch(BCCI_HL_URL(page), {
+    headers: { ...BCCI_HEADERS, "X-Requested-With": "XMLHttpRequest" },
+  });
+  const j = await r.json().catch(() => null);
+  if (!j || j.status !== true) return { items: [], total: 0, perPage: 20 };
+  return {
+    items:   bcciParseHighlightCards(j.videoData),
+    total:   Number(j.total_results) || 0,
+    perPage: Number(j.entries_per_page) || 20,
+  };
+}
+
+async function bcciUpsertHighlights(items, baseSort) {
+  if (!items || !items.length) return;
+  try {
+    await supabase.from("bcci_highlights").upsert(
+      items.map((v, i) => ({
+        id: v.id, title: v.title, image: v.image, video_url: v.video_url,
+        share: v.share, date: v.date, duration: v.duration, views: v.views,
+        sort: baseSort + i,
+      })),
+      { onConflict: "id", ignoreDuplicates: false }
+    );
+  } catch (e) { console.warn("[bcci] highlights upsert failed (create table?):", e.message); }
+}
+
+// One Load More click = one page. Fetches live from BCCI (so new matches always
+// appear on page 1), persists to Supabase, and returns that page. If the live
+// fetch fails, falls back to whatever we already saved in the DB for that range.
+app.get("/api/bcci/highlights", async (req, res) => {
+  const page = Math.max(parseInt(req.query.page) || 1, 1);
+  const PER = 20;
+  try {
+    const { items, total, perPage } = await bcciFetchHighlightPage(page);
+    if (items.length) {
+      const totalPages = Math.max(1, Math.ceil(total / (perPage || PER)));
+      bcciUpsertHighlights(items, (page - 1) * (perPage || PER)).catch(() => {});
+      return res.json({
+        success: true, videos: items, page, total, totalPages,
+        hasMore: page < totalPages,
+      });
+    }
+  } catch (e) {
+    console.error("[bcci] highlights live fetch failed:", e.message);
+  }
+  // Fallback: serve saved rows for this page from Supabase.
+  try {
+    const from = (page - 1) * PER;
+    const { data, count } = await supabase
+      .from("bcci_highlights")
+      .select("id,title,image,video_url,share,date,duration,views", { count: "exact" })
+      .order("sort", { ascending: true })
+      .range(from, from + PER - 1);
+    if (data && data.length) {
+      const total = count ?? data.length;
+      return res.json({
+        success: true, videos: data, page, total,
+        totalPages: Math.max(1, Math.ceil(total / PER)),
+        hasMore: from + data.length < total,
+      });
+    }
+  } catch {}
+  return res.json({ success: true, videos: [], page, total: 0, totalPages: 1, hasMore: false });
+});
+
 app.get("/api/bcci/live", async (req, res) => {
   try {
     const url = "https://scores2.bcci.tv/getLiveMatches?platform=international&previousMatchesCount=0&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false";
