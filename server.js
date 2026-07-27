@@ -1280,6 +1280,30 @@ app.get("/api/wt20/commentary", async (req, res) => {
 // =====================================
 // 🇮🇳 BCCI PROXY ROUTES
 // =====================================
+// ─────────────────────────────────────────────────────────────────────
+// 🔐 R2 signed playback — mints a 24h token for our own HLS on the Worker.
+// Matches worker.js HMAC: sig = HMAC-SHA256(SIGNING_SECRET, "movies/<slug>:<exp>").
+// Store the permanent path (movies/<slug>/master.m3u8) in Supabase; the site
+// calls this on Play to get a fresh, expiring URL — never store the signed URL.
+//   GET /api/movie-stream?path=movies/<slug>/master.m3u8[&hours=24]
+// ─────────────────────────────────────────────────────────────────────
+app.get("/api/movie-stream", (req, res) => {
+  let p = String(req.query.path || "").trim().replace(/^\/+/, "");
+  const hours = Math.min(Math.max(parseInt(req.query.hours) || 24, 1), 168);
+  const base = (process.env.R2_WORKER_BASE || "").replace(/\/$/, "");
+  const secret = process.env.SIGNING_SECRET || "";
+  if (!base || !secret) return res.status(500).json({ success: false, error: "streaming not configured" });
+  // accept a bare slug, a full path, or a full URL — normalise to movies/<slug>/master.m3u8
+  if (/^https?:\/\//i.test(p)) { try { p = new URL(p).pathname.replace(/^\/+/, ""); } catch {} }
+  if (!p.includes("/")) p = `movies/${p}/master.m3u8`;
+  else if (!p.endsWith(".m3u8")) p = `${p.replace(/\/+$/, "")}/master.m3u8`;
+  const prefix = p.split("/").slice(0, 2).join("/"); // movies/<slug>
+  const exp = Math.floor(Date.now() / 1000) + hours * 3600;
+  const sig = crypto.createHmac("sha256", secret).update(`${prefix}:${exp}`).digest("hex");
+  const url = `${base.startsWith("http") ? base : "https://" + base}/${p}?t=${exp}.${sig}`;
+  res.json({ success: true, url, expiresAt: exp * 1000 });
+});
+
 const BCCI_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
   "Accept":     "application/json, text/plain, */*",
