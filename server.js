@@ -341,6 +341,91 @@ app.get('/api/live-stream-proxy', async (req, res) => {
 });
 
 // =====================================
+// 🎬 Generic HLS CORS proxy — for third-party Direct-server links that lack
+// CORS headers (hls.js needs CORS on the manifest AND every segment). Fetches
+// upstream with a spoofed Referer/UA (defaults to the target's own origin, or
+// ?ref=), adds CORS, and REWRITES every child playlist / audio rendition /
+// segment / key URL to route back through this proxy so the whole ladder loads.
+// Binary segments stream through (Range forwarded for seeking).
+//   GET /api/hls-proxy?url=<encoded m3u8 or segment>[&ref=<encoded referer>]
+// =====================================
+const HLS_PROXY_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36';
+const hlsProxyBase = (req) => `${req.headers['x-forwarded-proto'] || req.protocol || 'https'}://${req.get('host')}/api/hls-proxy`;
+
+app.options('/api/hls-proxy', (req, res) => {
+  Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
+  res.status(204).end();
+});
+
+app.get('/api/hls-proxy', async (req, res) => {
+  let targetUrl = req.query.url || '';
+  try { targetUrl = decodeURIComponent(targetUrl); } catch {}
+  if (!/^https?:\/\//i.test(targetUrl)) return res.status(400).json({ error: 'Missing/invalid ?url=' });
+
+  let ref = req.query.ref || '';
+  try { ref = decodeURIComponent(ref); } catch {}
+  let referer = ref, origin = '';
+  try { const o = new URL(ref || targetUrl); referer = ref || `${o.origin}/`; origin = o.origin; } catch {}
+
+  Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
+
+  const isM3u8 = /\.m3u8($|\?)/i.test(targetUrl);
+  const upHeaders = {
+    'User-Agent': HLS_PROXY_UA,
+    'Accept': '*/*',
+    'Accept-Language': 'en-US,en;q=0.9',
+    ...(referer ? { 'Referer': referer } : {}),
+    ...(origin ? { 'Origin': origin } : {}),
+  };
+  if (req.headers.range) upHeaders['Range'] = req.headers.range;   // segment seeking
+
+  try {
+    const upstream = await axios({
+      method: 'GET',
+      url: targetUrl,
+      responseType: isM3u8 ? 'text' : 'stream',
+      transformResponse: isM3u8 ? [(d) => d] : undefined,
+      headers: upHeaders,
+      timeout: 30000,
+      maxRedirects: 5,
+      validateStatus: () => true,
+    });
+
+    if (upstream.status >= 400) {
+      return isM3u8
+        ? res.status(upstream.status).send(typeof upstream.data === 'string' ? upstream.data : '')
+        : res.status(upstream.status).end();
+    }
+
+    if (isM3u8) {
+      // Resolve children against the FINAL url (after redirects, e.g. net51→net52).
+      const baseUrl = upstream.request?.res?.responseUrl || targetUrl;
+      const proxy = hlsProxyBase(req);
+      const refQ = ref ? `&ref=${encodeURIComponent(ref)}` : '';
+      const wrap = (u) => { try { return `${proxy}?url=${encodeURIComponent(new URL(u, baseUrl).href)}${refQ}`; } catch { return u; } };
+      const body = String(upstream.data)
+        .replace(/URI="([^"]+)"/g, (_m, u) => `URI="${wrap(u)}"`)          // renditions + keys
+        .replace(/^([^#\r\n][^\r\n]*)\s*$/gm, (_m, u) => wrap(u.trim()));  // variant playlists + segments
+      res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+      res.setHeader('Cache-Control', 'no-store');
+      return res.send(body);
+    }
+
+    const ct = upstream.headers['content-type'];
+    const cl = upstream.headers['content-length'];
+    if (ct) res.setHeader('Content-Type', ct);
+    if (cl) res.setHeader('Content-Length', cl);
+    if (upstream.headers['accept-ranges'])  res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
+    if (upstream.headers['content-range'])  res.setHeader('Content-Range', upstream.headers['content-range']);
+    res.status(upstream.status);   // 200 or 206
+    upstream.data.pipe(res);
+    upstream.data.on('error', () => { if (!res.headersSent) res.status(502).end(); });
+  } catch (err) {
+    if (!res.headersSent) res.status(err.response?.status || 502).json({ error: err.message });
+  }
+});
+
+// =====================================
 // 🎬 ICC VIDEO METADATA — add this to server.js
 // Returns the full video JSON (sources[], title, etc.) from the ICC feed
 // =====================================
