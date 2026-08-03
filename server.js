@@ -1507,40 +1507,89 @@ app.get("/api/bcci/highlights", async (req, res) => {
   return res.json({ success: true, videos: [], page, total: 0, totalPages: 1, hasMore: false });
 });
 
-app.get("/api/bcci/live", async (req, res) => {
+// When BCCI's scores2 API is down (503, common in the off-season) or unreachable,
+// return 200 with an EMPTY list of the expected shape instead of 502/500. The
+// frontend reads `liveMatches`/`upcomingMatches`/`recentMatches` and degrades to
+// "no matches" cleanly, with no console errors — and auto-recovers when BCCI is back.
+async function bcciProxy(res, url, emptyKey) {
   try {
-    const url = "https://scores2.bcci.tv/getLiveMatches?platform=international&previousMatchesCount=0&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false";
     const response = await fetch(url, { headers: BCCI_HEADERS });
     const text = await response.text();
-    if (!response.ok) return res.status(502).json({ ok: false, error: `Upstream ${response.status}` });
+    if (!response.ok) return res.json({ [emptyKey]: [], upstreamUnavailable: true, upstreamStatus: response.status });
     res.json(JSON.parse(text));
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.json({ [emptyKey]: [], upstreamUnavailable: true, error: e.message });
   }
+}
+
+app.get("/api/bcci/live", (req, res) =>
+  bcciProxy(res, "https://scores2.bcci.tv/getLiveMatches?platform=international&previousMatchesCount=0&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false", "liveMatches"));
+
+app.get("/api/bcci/upcoming", (req, res) =>
+  bcciProxy(res, "https://scores2.bcci.tv/getUpcomingMatches?platform=international&previousMatchesCount=0&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false", "upcomingMatches"));
+
+app.get("/api/bcci/recent", (req, res) => {
+  const count = parseInt(req.query.count) || 15;
+  bcciProxy(res, `https://scores2.bcci.tv/getRecentMatches?platform=international&previousMatchesCount=${count}&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false`, "recentMatches");
 });
 
-app.get("/api/bcci/upcoming", async (req, res) => {
-  try {
-    const url = "https://scores2.bcci.tv/getUpcomingMatches?platform=international&previousMatchesCount=0&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false";
-    const response = await fetch(url, { headers: BCCI_HEADERS });
-    const text = await response.text();
-    if (!response.ok) return res.status(502).json({ ok: false, error: `Upstream ${response.status}` });
-    res.json(JSON.parse(text));
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+// ─── FanCode scorecard (public score DATA only — NOT the video stream) ─────────
+// FanCode renders the full cricket scorecard into `window.__INIT_STATE__` on the
+// public match page (no login/token). It routes by the trailing matchId alone, so
+// any slug works. We fetch that page, extract the JSON blob, and normalise it to
+// the same shape the scorecard UI already uses for BCCI/ICC/IPL. This touches only
+// public match statistics — the paid video stream is not involved here.
+const FC_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36";
+function fcExtractInitState(html) {
+  let i = html.indexOf("window.__INIT_STATE__");
+  if (i < 0) return null;
+  i = html.indexOf("{", i);
+  let depth = 0, inStr = false, esc = false, end = -1;
+  for (let k = i; k < html.length; k++) {
+    const c = html[k];
+    if (inStr) { if (esc) esc = false; else if (c === "\\") esc = true; else if (c === '"') inStr = false; }
+    else { if (c === '"') inStr = true; else if (c === "{") depth++; else if (c === "}") { depth--; if (depth === 0) { end = k + 1; break; } } }
   }
+  if (end < 0) return null;
+  try { return JSON.parse(html.slice(i, end)); } catch { return null; }
+}
+const fcInnings = (inn) => ({
+  number: inn.number, desc: inn.inningDescription, team: inn.battingTeamShortName,
+  runs: inn.runs, wickets: inn.wickets, overs: inn.overs, balls: inn.balls,
+  runRate: inn.runRate, status: inn.status, extras: inn.extras, fallOfWickets: inn.fow || [],
+  batsmen: (inn.batsmen || []).map((b) => ({
+    name: b.name, shortName: b.shortName, img: b.avatar?.src || "",
+    runs: b.attributes?.runs, balls: b.attributes?.balls, fours: b.attributes?.fours,
+    sixes: b.attributes?.sixes, sr: b.attributes?.strikeRate,
+    dismissal: b.description || "", out: b.status === "OUT",
+  })),
+  bowlers: (inn.bowlers || []).map((b) => ({
+    name: b.name, shortName: b.shortName, img: b.avatar?.src || "",
+    overs: b.attributes?.overs, maidens: b.attributes?.maiden, runs: b.attributes?.runs,
+    wickets: b.attributes?.wickets, econ: b.attributes?.econ,
+    wides: b.attributes?.wides, noBalls: b.attributes?.noBall,
+  })),
 });
 
-app.get("/api/bcci/recent", async (req, res) => {
+app.get("/api/fancode/scorecard", async (req, res) => {
+  const matchId = String(req.query.matchId || "").replace(/\D/g, "");
+  if (!matchId) return res.status(400).json({ ok: false, error: "matchId required" });
   try {
-    const count = parseInt(req.query.count) || 15;
-    const url = `https://scores2.bcci.tv/getRecentMatches?platform=international&previousMatchesCount=${count}&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false`;
-    const response = await fetch(url, { headers: BCCI_HEADERS });
-    const text = await response.text();
-    if (!response.ok) return res.status(502).json({ ok: false, error: `Upstream ${response.status}` });
-    res.json(JSON.parse(text));
+    const url = `https://www.fancode.com/cricket/tour/x/matches/x-${matchId}/scorecard`;
+    const r = await withTimeout(fetch(url, { headers: { "User-Agent": FC_UA, "Accept": "text/html" } }), 12000);
+    const html = await r.text();
+    const state = fcExtractInitState(html);
+    const cs = state?.[`match-detail/${matchId}/CricketScorecard`]?.matchWithScore?.scorecard?.cricketScore;
+    if (!cs || !Array.isArray(cs.innings)) return res.json({ ok: true, available: false, innings: [] });
+    res.set("Cache-Control", "public, max-age=30, s-maxage=30");
+    res.json({
+      ok: true, available: true, matchId: Number(matchId),
+      description: cs.description || "",
+      currentRunRate: cs.currentRunRate, requiredRunRate: cs.requiredRunRate,
+      innings: cs.innings.map(fcInnings),
+    });
   } catch (e) {
-    res.status(500).json({ ok: false, error: e.message });
+    res.json({ ok: true, available: false, innings: [], error: e.message });
   }
 });
 
@@ -1894,7 +1943,7 @@ app.get('/api/cricket/photo', async (req, res) => {
       + `?smMatchId=${encodeURIComponent(smMatchId)}&type=photo`
       + `&tournament_type=${encodeURIComponent(tournament)}`;
     const r = await withTimeout(fetch(url, { headers: BCCI_HEADERS }), 8000);
-    if (!r.ok) return res.status(502).json({ ok: false, error: `Upstream ${r.status}` });
+    if (!r.ok) return res.json({ ok: true, photo: null, count: 0, upstreamUnavailable: true });
     const json = await r.json();
     const photos = (json?.data || []).filter(p => p?.imageUrl);
     if (!photos.length) return res.json({ ok: true, photo: null, count: 0 });
@@ -1910,7 +1959,7 @@ app.get('/api/cricket/photo', async (req, res) => {
       photo: { url: pick.imageUrl, title: pick.title || '', description: pick.description || '' },
     });
   } catch (e) {
-    res.status(502).json({ ok: false, error: e.message });
+    res.json({ ok: true, photo: null, count: 0, upstreamUnavailable: true, error: e.message });
   }
 });
 
