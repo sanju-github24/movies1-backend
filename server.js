@@ -1382,7 +1382,12 @@ app.get("/api/movie-stream", (req, res) => {
   if (/^https?:\/\//i.test(p)) { try { p = new URL(p).pathname.replace(/^\/+/, ""); } catch {} }
   if (!p.includes("/")) p = `movies/${p}/master.m3u8`;
   else if (!p.endsWith(".m3u8")) p = `${p.replace(/\/+$/, "")}/master.m3u8`;
-  const prefix = p.split("/").slice(0, 2).join("/"); // movies/<slug>
+  // "b2/movies/<slug>/..." routes to Backblaze on the Worker, but the token is
+  // scoped to movies/<slug> on BOTH backends — so sign without the b2/ prefix
+  // while keeping it in the URL.
+  const routed = p.startsWith("b2/");
+  const objPath = routed ? p.slice(3) : p;
+  const prefix = objPath.split("/").slice(0, 2).join("/"); // movies/<slug>
   const exp = Math.floor(Date.now() / 1000) + hours * 3600;
   const sig = crypto.createHmac("sha256", secret).update(`${prefix}:${exp}`).digest("hex");
   const url = `${base.startsWith("http") ? base : "https://" + base}/${p}?t=${exp}.${sig}`;
