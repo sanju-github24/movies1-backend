@@ -447,6 +447,73 @@ router.get('/tmdb-regional', async (req, res) => {
   }
 });
 
+// ── /tmdb-recommendations ─────────────────────────────────────────────────────
+// GET /api/tmdb-recommendations?tmdbId=123&contentType=tv[&genres=Drama,Comedy][&lang=kn]
+//   TMDB's own "recommendations", topped up with "similar" and — when we still
+//   have room — a genre discover pass, so a title always comes back with
+//   something to show. Results are normalised like every other list endpoint.
+
+router.get('/tmdb-recommendations', async (req, res) => {
+  const { tmdbId, genres, lang } = req.query;
+  const type = req.query.contentType === 'tv' ? 'tv' : 'movie';
+  const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 20, 1), 40);
+  const enrich = req.query.enrich !== '0';
+
+  try {
+    const seen = new Set();
+    const out  = [];
+    const push = (items) => {
+      (items || []).forEach(it => {
+        if (!it?.id || seen.has(it.id) || String(it.id) === String(tmdbId)) return;
+        seen.add(it.id);
+        out.push(_normalise_list_item(it, it.media_type === 'tv' ? 'tv' : it.media_type === 'movie' ? 'movie' : type));
+      });
+    };
+
+    if (tmdbId) {
+      const [recs, sim] = await Promise.all([
+        axiosWithRetry({ method:'get', url:`${BASE_URL}${type}/${tmdbId}/recommendations`, params:{ api_key:TMDB_API_KEY } }).catch(() => null),
+        axiosWithRetry({ method:'get', url:`${BASE_URL}${type}/${tmdbId}/similar`,         params:{ api_key:TMDB_API_KEY } }).catch(() => null),
+      ]);
+      push(recs?.data?.results);
+      push(sim?.data?.results);
+    }
+
+    // Genre fallback/top-up — the caller sends the genre NAMES it knows about
+    // (ours from Supabase, TMDB's from the detail call).
+    if (out.length < limit && genres) {
+      const wanted = String(genres).split(',').map(g => g.trim().toLowerCase()).filter(Boolean);
+      const map = type === 'tv' ? TV_GENRE_MAP : MOVIE_GENRE_MAP;
+      const ids = Object.entries(map)
+        .filter(([, name]) => wanted.includes(String(name).toLowerCase()))
+        .map(([id]) => id);
+      if (ids.length) {
+        const discover = (extra = {}) => axiosWithRetry({ method:'get', url:`${BASE_URL}discover/${type}`, params:{
+          api_key: TMDB_API_KEY,
+          with_genres: ids.join(','),
+          sort_by: 'popularity.desc',
+          include_adult: false,
+          'vote_count.gte': 25,
+          ...extra,
+        }}).catch(() => null);
+
+        // Language is a preference, not a filter: TMDB has very little regional
+        // TV, so a lang-scoped discover often comes back empty.
+        let d = lang ? await discover({ with_original_language: lang }) : null;
+        if (!d?.data?.results?.length) d = await discover();
+        push(d?.data?.results);
+      }
+    }
+
+    const sliced   = out.slice(0, limit);
+    const enriched = enrich ? await _enrich_batch(sliced, 6) : sliced;
+    res.json({ success:true, tmdb_id: tmdbId ? Number(tmdbId) : null, content_type:type, results:enriched });
+  } catch (e) {
+    console.error('TMDB Recommendations:', e.message);
+    res.status(500).json({ success:false, message:'Failed to fetch recommendations.', details:e.message });
+  }
+});
+
 // ── /tmdb-search ──────────────────────────────────────────────────────────────
 // GET /api/tmdb-search?query=...&type=movie|tv|multi&lang=ta&page=1
 //   Multi-result TMDB search. type narrows to movies or TV shows; lang filters

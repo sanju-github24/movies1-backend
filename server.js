@@ -2019,7 +2019,34 @@ const MX_FETCH_HEADERS = {
 // make it work in the cloud, route through a residential-Indian scraping proxy
 // when MX_SCRAPER_KEY is set (ScraperAPI-style: fetches the URL from an in-country
 // residential IP and returns the raw response). Falls back to a direct fetch.
+/* MX only serves stream details to Indian IPs, so requests go out through
+   something that has one. Two supported shapes, checked in this order:
+
+     MX_PROXY_URL   a real proxy — http://user:pass@host:port
+                    or socks5://user:pass@host:port   (cheapest per request)
+     MX_SCRAPER_KEY a scraping API that takes the URL as a parameter
+                    (ScraperAPI-style; billed per request)
+
+   Neither set → straight to MX, which works for search but returns empty
+   stream details from datacenter IPs. */
 async function mxFetch(url) {
+  const proxyUrl = process.env.MX_PROXY_URL;
+  if (proxyUrl) {
+    const socks = /^socks/i.test(proxyUrl);
+    const { SocksProxyAgent } = socks ? require('socks-proxy-agent') : {};
+    const { HttpsProxyAgent } = socks ? {} : require('https-proxy-agent');
+    const agent = socks ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl);
+    const r = await axios.get(url, {
+      httpAgent: agent, httpsAgent: agent, proxy: false,
+      headers: MX_FETCH_HEADERS,
+      timeout: 45000,
+      responseType: 'text',
+      transformResponse: [(d) => d],       // keep the raw body; mxApi parses it
+      validateStatus: () => true,
+    });
+    return { text: async () => r.data, status: r.status };
+  }
+
   const key = process.env.MX_SCRAPER_KEY;
   if (key) {
     // ScraperAPI-style: country_code=in + premium=true = RESIDENTIAL Indian IP
@@ -2031,9 +2058,28 @@ async function mxFetch(url) {
   }
   return fetch(url, { headers: MX_FETCH_HEADERS });
 }
+/* The scraper proxy answers in PLAIN TEXT when something is wrong with the
+   account — "You have exceeded your monthly request limit" and friends. That
+   used to hit JSON.parse and surface as a 502 with a cryptic parse error, so we
+   detect it, retry once straight to MX (works for some titles even though MX
+   thins out datacenter IPs), and otherwise throw a labelled error the route can
+   turn into a clean "MX unavailable" instead of a hard failure. */
+class MxUnavailable extends Error {
+  constructor(reason) { super(reason); this.name = 'MxUnavailable'; this.mxReason = reason; }
+}
 async function mxApi(path) {
-  const r = await mxFetch(`${MX_API_BASE}${path}${path.includes('?') ? '&' : '?'}device-density=2`);
-  return JSON.parse(await r.text());
+  const url = `${MX_API_BASE}${path}${path.includes('?') ? '&' : '?'}device-density=2`;
+  const parse = (txt) => { try { return JSON.parse(txt); } catch { return null; } };
+
+  const first = parse(await (await mxFetch(url)).text());
+  if (first) return first;
+
+  // Proxy returned something that isn't JSON → try MX directly, once.
+  if (process.env.MX_SCRAPER_KEY) {
+    const direct = parse(await (await fetch(url, { headers: MX_FETCH_HEADERS })).text());
+    if (direct) return direct;
+  }
+  throw new MxUnavailable('scraper proxy returned no JSON (quota exhausted or key invalid)');
 }
 function mxExtractBlob(html, key) {
   const i = html.indexOf(key); if (i < 0) return null;
@@ -2133,7 +2179,9 @@ async function mxResolveById(id, type) {
 // logo, trailer manifest). Residential fetch of the homepage SSR banner.
 async function mxHero() {
   const res = await mxFetch('https://www.mxplayer.in/');
-  const blob = mxExtractBlob(await res.text(), 'window.__mxs__');
+  const html = await res.text();
+  if (/^\s*You have /i.test(html)) throw new MxUnavailable(html.slice(0, 120));
+  const blob = mxExtractBlob(html, 'window.__mxs__');
   if (!blob) throw new Error('No SSR state (residential IP required)');
   const state = JSON.parse(blob);
   const banner = (((state.homepage || {}).home || {}).banner) || [];
@@ -2160,11 +2208,125 @@ async function mxHero() {
     .slice(0, 6);
   return { slides };
 }
+/* ── /api/netflix/trailer ─────────────────────────────────────────────────
+   Netflix's public title page carries a promotional MP4 (clear, no DRM, served
+   with Access-Control-Allow-Origin: *) plus JSON-LD naming the title. Given a
+   Netflix title id we hand back that MP4 so the site can play it in a bare
+   <video> — no player chrome, no proxy, nothing stored.
+
+   Caveats worth knowing: the URL carries an ~11h token, so resolve on demand,
+   and the asset is a single audio track (multi-audio lives behind Netflix's MSL
+   layer, which we deliberately don't touch).
+
+   Netflix search is login-gated, so the id can't be looked up from a name —
+   pass ?netflixId=, optionally with ?title= to verify the page matches.        */
+// TMDB lookups for this route (the rest of the TMDB surface lives in routes/tmdbRoutes.js).
+const BASE_URL_TMDB = 'https://api.themoviedb.org/3/';
+const TMDB_KEY = process.env.TMDB_API_KEY || '452111addfd12727f394865d09a805b4';
+
+/* TMDB doesn't carry Netflix ids and Netflix's own search is login-gated, but
+   Wikidata publishes them (P1874) against the IMDb id (P345). So:
+     tmdbId → imdb_id (TMDB) → Netflix id (Wikidata) → trailer (title page).
+   Coverage is partial — mostly Netflix originals — so callers fall back to the
+   YouTube trailer when this misses. Results are memoised for the process. */
+const nfIdCache = new Map();     // imdbId → netflix id | null
+const nfMissCache = new Set();  // tmdbIds with no Netflix id — don't look twice
+const nfHitCache = new Map();   // netflix id → { url, name, expiresAt } while the token lives
+
+/* Note: TMDB's watch/providers is NOT a usable pre-filter here. It carries no
+   data at all for brand-new releases (checked: "The Last House", 2 days old,
+   zero regions listed) — precisely the titles a trailer matters for. Wikidata
+   knew its Netflix id when TMDB knew nothing, so Wikidata is the authority and
+   a miss is cached instead. */
+async function netflixIdFromImdb(imdbId) {
+  if (!imdbId) return null;
+  if (nfIdCache.has(imdbId)) return nfIdCache.get(imdbId);
+  try {
+    const q = `SELECT ?nf WHERE { ?f wdt:P345 "${imdbId}" . ?f wdt:P1874 ?nf . }`;
+    const r = await fetch(`https://query.wikidata.org/sparql?query=${encodeURIComponent(q)}`, {
+      headers: { Accept: 'application/sparql-results+json', 'User-Agent': '1anchormovies/1.0 (trailer resolver)' },
+      signal: AbortSignal.timeout(6000),   // the caller is blocking a trailer — fail fast
+    });
+    const j = await r.json();
+    const hit = j?.results?.bindings?.[0]?.nf?.value || null;
+    nfIdCache.set(imdbId, hit);
+    return hit;
+  } catch { return null; }
+}
+
+app.get('/api/netflix/trailer', async (req, res) => {
+  let id = String(req.query.netflixId || '').replace(/\D/g, '');
+  const want = String(req.query.title || '').trim().toLowerCase();
+
+  /* No explicit id? Derive it. Most titles aren't on Netflix at all, so check
+     TMDB's providers first — that turns the common case into one cached call
+     instead of a TMDB + Wikidata round trip. Misses answer 200 with success:false
+     rather than 404, so the browser console stays clean: "not on Netflix" is a
+     normal outcome here, not an error. */
+  if (!id && req.query.tmdbId) {
+    const tmdbId = String(req.query.tmdbId);
+    const kind = req.query.contentType === 'tv' ? 'tv' : 'movie';
+    const cacheKey = `${kind}:${tmdbId}`;
+    if (nfMissCache.has(cacheKey)) {
+      return res.json({ success: false, reason: 'no-netflix-id', cached: true });
+    }
+    try {
+      const ext = await fetch(`${BASE_URL_TMDB}${kind}/${tmdbId}/external_ids?api_key=${TMDB_KEY}`,
+        { signal: AbortSignal.timeout(6000) }).then((r) => r.json());
+      id = (await netflixIdFromImdb(ext?.imdb_id)) || '';
+    } catch { /* handled below */ }
+    if (!id) {
+      nfMissCache.add(cacheKey);
+      return res.json({ success: false, reason: 'no-netflix-id' });
+    }
+  }
+  if (!id) return res.json({ success: false, reason: 'pass ?netflixId= or ?tmdbId=' });
+  // The asset URL is good until its own token expires (~12h) — reuse it rather
+  // than re-scraping the page on every view.
+  const cached = nfHitCache.get(id);
+  if (cached && cached.expiresAt - 60000 > Date.now()) {
+    return res.json({ success: true, ...cached, netflixId: id, cached: true });
+  }
+
+  try {
+    const r = await fetch(`https://www.netflix.com/in/title/${id}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/137.0 Safari/537.36',
+        'Accept-Language': 'en-IN,en;q=0.9',
+      },
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!r.ok) return res.status(502).json({ success: false, error: `netflix ${r.status}` });
+    const html = await r.text();
+
+    const urls = [...html.matchAll(/https:\/\/occ[^"\\ ]+?\.mp4[^"\\ ]*/g)]
+      .map((m) => m[0].replace(/&amp;/g, '&'));
+    const url = urls[0] || null;
+    const name = (html.match(/"name"\s*:\s*"([^"]{2,80})"/) || [])[1] || '';
+
+    if (!url) return res.status(404).json({ success: false, error: 'no trailer asset on that page' });
+    // Guard against a wrong id quietly serving the wrong film.
+    if (want && name && !name.toLowerCase().includes(want) && !want.includes(name.toLowerCase())) {
+      return res.status(409).json({ success: false, error: `id ${id} is "${name}", expected "${req.query.title}"` });
+    }
+    const exp = Number((url.match(/[?&]e=(\d+)/) || [])[1] || 0);
+    const payload = { url, name, expiresAt: exp ? exp * 1000 : null };
+    if (payload.expiresAt) nfHitCache.set(id, payload);
+    res.json({ success: true, ...payload, netflixId: id });
+  } catch (e) {
+    res.status(502).json({ success: false, error: e.message });
+  }
+});
+
 app.get('/api/mx/hero', async (req, res) => {
   console.log('🎬 MX hero requested');
   try {
     res.json({ success: true, ...(await mxHero()) });
   } catch (e) {
+    if (e.name === 'MxUnavailable' || /No SSR state/.test(e.message)) {
+      console.warn(`⚠️ MX hero unavailable: ${e.message}`);
+      return res.status(503).json({ success: false, unavailable: true, reason: e.message, slides: [] });
+    }
     console.error(`❌ MX hero failed: ${e.message}`);
     res.status(502).json({ success: false, error: e.message });
   }
@@ -2182,6 +2344,12 @@ app.get('/api/mx/episodes', async (req, res) => {
       : await mxResolveById(id, type === 'tvshow' || type === 'show' ? 'episode' : type);
     res.json({ success: true, ...data });
   } catch (e) {
+    // A dead scraper quota is an availability problem, not a server fault —
+    // answer 503 with a reason the frontend can use to just hide MX.
+    if (e.name === 'MxUnavailable') {
+      console.warn(`⚠️ MX unavailable: ${e.mxReason}`);
+      return res.status(503).json({ success: false, unavailable: true, reason: e.mxReason });
+    }
     console.error(`❌ MX episodes failed: ${e.message}`);
     res.status(502).json({ success: false, error: e.message });
   }
