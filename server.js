@@ -2346,10 +2346,15 @@ const IMDB_VIDEO_QUERY = `query($id:ID!){
   }
 }`;
 
-// Prefer 720p: 1080p trailers run 100 MB+ and this only ever plays muted in a
-// hero tile. SD/480p are the last resort; HLS is skipped so the <video> needs
-// no player library.
+/* Prefer 720p: 1080p trailers run 100 MB+ and this only ever plays muted in a
+   hero tile. HLS is skipped so the <video> needs no player library.
+
+   ?def=480 asks for the light ladder instead. These are progressive MP4s with
+   no adaptive switching, so on a phone a 720p file can run the buffer dry and
+   leave the trailer sitting there paused — at that size 480p is no visible
+   loss and it keeps playing. */
 const IMDB_DEF_RANK = { DEF_720p: 0, DEF_1080p: 1, DEF_480p: 2, DEF_SD: 3 };
+const IMDB_DEF_RANK_LIGHT = { DEF_480p: 0, DEF_SD: 1, DEF_720p: 2, DEF_1080p: 3 };
 
 async function tmdbImdbId(tmdbId, kind) {
   const key = `${kind}:${tmdbId}`;
@@ -2367,6 +2372,8 @@ async function tmdbImdbId(tmdbId, kind) {
 app.get('/api/imdb/trailer', async (req, res) => {
   let imdbId = String(req.query.imdbId || '').trim();
   const want = String(req.query.title || '').trim().toLowerCase();
+  const light = String(req.query.def || '') === '480';
+  const rank = light ? IMDB_DEF_RANK_LIGHT : IMDB_DEF_RANK;
 
   if (!imdbId && req.query.tmdbId) {
     const kind = req.query.contentType === 'tv' ? 'tv' : 'movie';
@@ -2380,6 +2387,7 @@ app.get('/api/imdb/trailer', async (req, res) => {
   if (imdbMissCache.has(imdbId)) {
     return res.json({ success: false, reason: 'no-imdb-trailer', cached: true });
   }
+  const cacheKey = light ? `${imdbId}:480` : imdbId;
   /* Guard against a wrong id quietly serving the wrong film — on the cached
      answer too, since the id, not the title, is what we keyed on. Compared
      loosely: IMDb writes "Spider-Man: No Way Home" where our rows may hold
@@ -2391,7 +2399,7 @@ app.get('/api/imdb/trailer', async (req, res) => {
     return !a.includes(b) && !b.includes(a);
   };
 
-  const cached = imdbGqlCache.get(imdbId);
+  const cached = imdbGqlCache.get(cacheKey);
   if (cached && cached.expiresAt - 60000 > Date.now()) {
     if (mismatched(cached.name)) {
       return res.status(409).json({ success: false, error: `${imdbId} is "${cached.name}", expected "${req.query.title}"` });
@@ -2430,7 +2438,7 @@ app.get('/api/imdb/trailer', async (req, res) => {
 
     const pick = (node?.playbackURLs || [])
       .filter((p) => p.videoMimeType === 'MP4' && p.url)
-      .sort((a, b) => (IMDB_DEF_RANK[a.videoDefinition] ?? 9) - (IMDB_DEF_RANK[b.videoDefinition] ?? 9))[0];
+      .sort((a, b) => (rank[a.videoDefinition] ?? 9) - (rank[b.videoDefinition] ?? 9))[0];
 
     if (!pick) {
       imdbMissCache.add(imdbId);
@@ -2449,7 +2457,7 @@ app.get('/api/imdb/trailer', async (req, res) => {
       runtime: node.runtime?.value || null,
       expiresAt: exp ? exp * 1000 : null,
     };
-    if (payload.expiresAt) imdbGqlCache.set(imdbId, payload);
+    if (payload.expiresAt) imdbGqlCache.set(cacheKey, payload);
     res.json({ success: true, ...payload, imdbId });
   } catch (e) {
     res.status(502).json({ success: false, error: e.message });
