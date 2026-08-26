@@ -2318,6 +2318,144 @@ app.get('/api/netflix/trailer', async (req, res) => {
   }
 });
 
+/* ── /api/imdb/trailer ────────────────────────────────────────────────────
+   IMDb hosts a clean MP4 of the official trailer for nearly every title, and
+   its public GraphQL endpoint hands the playback URLs over without a key. That
+   makes it a far wider net than Netflix (which only covers its own originals),
+   so it's tried first and Netflix stays as the fallback.
+
+   Same caveats as the Netflix route: the CloudFront URL carries an ~expiry
+   token (?Expires=), so resolve on demand and cache only while it lives. The
+   asset has no CORS header, which is fine for a bare <video src> — just don't
+   set crossOrigin on the element or try to canvas it.                        */
+const imdbGqlCache = new Map();   // imdbId → { url, name, videoId, expiresAt }
+const imdbMissCache = new Set();  // imdbId with no trailer — don't ask twice
+const imdbIdCache = new Map();    // `${kind}:${tmdbId}` → imdb id | null
+
+const IMDB_VIDEO_QUERY = `query($id:ID!){
+  title(id:$id){
+    titleText{ text }
+    primaryVideos(first:10){ edges{ node{
+      id
+      name{ value }
+      contentType{ displayName{ value } }
+      thumbnail{ url }
+      runtime{ value }
+      playbackURLs{ url videoMimeType videoDefinition }
+    } } }
+  }
+}`;
+
+// Prefer 720p: 1080p trailers run 100 MB+ and this only ever plays muted in a
+// hero tile. SD/480p are the last resort; HLS is skipped so the <video> needs
+// no player library.
+const IMDB_DEF_RANK = { DEF_720p: 0, DEF_1080p: 1, DEF_480p: 2, DEF_SD: 3 };
+
+async function tmdbImdbId(tmdbId, kind) {
+  const key = `${kind}:${tmdbId}`;
+  if (imdbIdCache.has(key)) return imdbIdCache.get(key);
+  let id = null;
+  try {
+    const ext = await fetch(`${BASE_URL_TMDB}${kind}/${tmdbId}/external_ids?api_key=${TMDB_KEY}`,
+      { signal: AbortSignal.timeout(6000) }).then((r) => r.json());
+    id = ext?.imdb_id || null;
+  } catch { /* leave null — the caller answers success:false */ }
+  imdbIdCache.set(key, id);
+  return id;
+}
+
+app.get('/api/imdb/trailer', async (req, res) => {
+  let imdbId = String(req.query.imdbId || '').trim();
+  const want = String(req.query.title || '').trim().toLowerCase();
+
+  if (!imdbId && req.query.tmdbId) {
+    const kind = req.query.contentType === 'tv' ? 'tv' : 'movie';
+    imdbId = (await tmdbImdbId(String(req.query.tmdbId), kind)) || '';
+  }
+  if (!/^tt\d+$/.test(imdbId)) {
+    return res.json({ success: false, reason: 'pass ?imdbId=tt… or ?tmdbId=' });
+  }
+  // "No trailer on IMDb" is a normal outcome, not an error — answer 200 with
+  // success:false so the browser console stays clean and the caller falls back.
+  if (imdbMissCache.has(imdbId)) {
+    return res.json({ success: false, reason: 'no-imdb-trailer', cached: true });
+  }
+  /* Guard against a wrong id quietly serving the wrong film — on the cached
+     answer too, since the id, not the title, is what we keyed on. Compared
+     loosely: IMDb writes "Spider-Man: No Way Home" where our rows may hold
+     "Spider Man No Way Home", and that's the same film. */
+  const loose = (t) => t.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const mismatched = (name) => {
+    if (!want || !name) return false;
+    const [a, b] = [loose(name), loose(want)];
+    return !a.includes(b) && !b.includes(a);
+  };
+
+  const cached = imdbGqlCache.get(imdbId);
+  if (cached && cached.expiresAt - 60000 > Date.now()) {
+    if (mismatched(cached.name)) {
+      return res.status(409).json({ success: false, error: `${imdbId} is "${cached.name}", expected "${req.query.title}"` });
+    }
+    return res.json({ success: true, ...cached, imdbId, cached: true });
+  }
+
+  try {
+    const r = await fetch('https://api.graphql.imdb.com/', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        // IMDb's gateway rejects the request outright without a client name.
+        'x-imdb-client-name': 'imdb-web-next',
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/137.0 Safari/537.36',
+      },
+      body: JSON.stringify({ query: IMDB_VIDEO_QUERY, variables: { id: imdbId } }),
+      signal: AbortSignal.timeout(10000),   // a trailer is blocking on this — fail fast
+    });
+    if (!r.ok) return res.status(502).json({ success: false, error: `imdb ${r.status}` });
+    const j = await r.json();
+    const title = j?.data?.title;
+    if (!title) return res.json({ success: false, reason: 'unknown-imdb-id' });
+
+    const name = title.titleText?.text || '';
+    if (mismatched(name)) {
+      return res.status(409).json({ success: false, error: `${imdbId} is "${name}", expected "${req.query.title}"` });
+    }
+
+    // primaryVideos mixes trailers with interviews and clips — keep trailers
+    // (and teasers), and prefer one that actually says "official".
+    const vids = (title.primaryVideos?.edges || []).map((e) => e.node).filter(Boolean);
+    const trailers = vids.filter((v) => /trailer|teaser/i.test(v.contentType?.displayName?.value || ''));
+    const pool = trailers.length ? trailers : [];
+    const node = pool.find((v) => /official/i.test(v.name?.value || '')) || pool[0];
+
+    const pick = (node?.playbackURLs || [])
+      .filter((p) => p.videoMimeType === 'MP4' && p.url)
+      .sort((a, b) => (IMDB_DEF_RANK[a.videoDefinition] ?? 9) - (IMDB_DEF_RANK[b.videoDefinition] ?? 9))[0];
+
+    if (!pick) {
+      imdbMissCache.add(imdbId);
+      return res.json({ success: false, reason: 'no-imdb-trailer' });
+    }
+
+    console.log(`🎬 IMDb trailer ${imdbId} → "${name}" (${node.name?.value || 'trailer'}, ${pick.videoDefinition})`);
+    const exp = Number((pick.url.match(/[?&]Expires=(\d+)/) || [])[1] || 0);
+    const payload = {
+      url: pick.url,
+      name,
+      videoName: node.name?.value || '',
+      videoId: node.id,
+      definition: pick.videoDefinition,
+      thumbnail: node.thumbnail?.url || null,
+      runtime: node.runtime?.value || null,
+      expiresAt: exp ? exp * 1000 : null,
+    };
+    if (payload.expiresAt) imdbGqlCache.set(imdbId, payload);
+    res.json({ success: true, ...payload, imdbId });
+  } catch (e) {
+    res.status(502).json({ success: false, error: e.message });
+  }
+});
+
 app.get('/api/mx/hero', async (req, res) => {
   console.log('🎬 MX hero requested');
   try {
