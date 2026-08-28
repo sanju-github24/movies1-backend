@@ -1394,6 +1394,37 @@ app.get("/api/movie-stream", (req, res) => {
   res.json({ success: true, url, expiresAt: exp * 1000 });
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// ⬇️  DOWNLOAD LINK — a fresh Cloudflare-signed URL for a stored file.
+//   GET /api/download-link?path=downloads/<slug>/<file.mkv>[&hours=24]
+//
+// Same token the worker already validates for streaming — HMAC over the first
+// two path segments plus an expiry — but for a whole file rather than a
+// playlist. Minted per request so the page always hands out a live link, and
+// the bytes come off Cloudflare rather than through us.
+// ─────────────────────────────────────────────────────────────────────
+app.get("/api/download-link", (req, res) => {
+  let p = String(req.query.path || "").trim().replace(/^\/+/, "");
+  const hours = Math.min(Math.max(parseInt(req.query.hours) || 24, 1), 168);
+  const base = (process.env.R2_WORKER_BASE || "").replace(/\/$/, "");
+  const secret = process.env.SIGNING_SECRET || "";
+  if (!base || !secret) return res.status(500).json({ success: false, error: "downloads not configured" });
+
+  // A full URL is accepted too, so a stored link can be re-signed as it stands.
+  if (/^https?:\/\//i.test(p)) { try { p = new URL(p).pathname.replace(/^\/+/, ""); } catch {} }
+  if (!p || p.includes("..") || !p.includes("/")) {
+    return res.status(400).json({ success: false, error: "path must look like <prefix>/<slug>/<file>" });
+  }
+
+  const routed = p.startsWith("b2/");
+  const objPath = routed ? p.slice(3) : p;
+  const prefix = objPath.split("/").slice(0, 2).join("/");
+  const exp = Math.floor(Date.now() / 1000) + hours * 3600;
+  const sig = crypto.createHmac("sha256", secret).update(`${prefix}:${exp}`).digest("hex");
+  const url = `${base.startsWith("http") ? base : "https://" + base}/${p.split("/").map(encodeURIComponent).join("/")}?t=${exp}.${sig}`;
+  res.json({ success: true, url, expiresAt: exp * 1000 });
+});
+
 const BCCI_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
   "Accept":     "application/json, text/plain, */*",
