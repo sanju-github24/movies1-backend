@@ -5,12 +5,19 @@ expiring token. This is the source of what runs at `stream.1anchormovies.buzz`;
 it lived only in the Cloudflare dashboard until now, which meant no history and
 no way to review a change before it went live.
 
-## Two contracts, one gate
+## Three contracts, one gate
 
-| | path | origin gate | token | edge cache |
+| | path | origin gate | token | served from |
 |---|---|---|---|---|
-| **Playback** | `movies/<slug>/…` | **enforced** — `ALLOWED_HOSTS` | 24h, scoped to `movies/<slug>` | segments, 1 year |
-| **Download** | `downloads/<slug>/…` | **exempt** | 24h, scoped to `downloads/<slug>` | under 500MB only |
+| **Playback** | `movies/<slug>/…` | **enforced** — `ALLOWED_HOSTS` | 24h | R2 (or B2 behind `b2/`) |
+| **Download** | `downloads/<slug>/…` | exempt | 24h | R2 |
+| **Download** | `drive/<fileId>/<name>` | exempt | 24h | **Google Drive** |
+
+`drive/` is the one that costs nothing. The file stays on the 5TB Drive that is
+already paid for, and Cloudflare fetches it per request — so it is never stored
+twice, and no download bandwidth comes off our own server. It goes through the
+Drive **API** rather than the web endpoint deliberately: the web endpoint
+interrupts anything over ~100MB with a virus-scan page, and the API does not.
 
 The origin gate exists to stop another site embedding our player. A download
 link has no player to embed, and it has to survive being pasted into a new tab,
@@ -27,6 +34,27 @@ The signature is the authorization there, and it still expires in 24h.
 | `ALLOWED_HOSTS` | comma list, playback only. Blank allows any |
 | `DOWNLOAD_PREFIX` | optional, default `downloads/` |
 | `B2_KEY_ID` `B2_APP_KEY` `B2_BUCKET` `B2_ENDPOINT` | only if serving from Backblaze |
+| `GDRIVE_CLIENT_ID` `GDRIVE_CLIENT_SECRET` `GDRIVE_REFRESH_TOKEN` | secrets; only for `drive/` delivery |
+
+### Drive secrets
+
+They are the same OAuth credentials rclone already holds, so there is no second
+authorisation to do. Print them with:
+
+```bash
+python3 - <<'EOF'
+import json, re, os
+conf = os.path.expanduser("~/.config/rclone/rclone.conf")
+body = re.search(r"\[gdrive\](.*?)(?=\n\[|\Z)", open(conf).read(), re.S).group(1)
+tok  = json.loads(re.search(r"token\s*=\s*(\{.*?\})\s*\n", body, re.S).group(1))
+for k in ("client_id", "client_secret"):
+    print(k.upper(), "=", re.search(rf"^\s*{k}\s*=\s*(.+)$", body, re.M).group(1).strip())
+print("GDRIVE_REFRESH_TOKEN =", tok["refresh_token"])
+EOF
+```
+
+Add each as a **secret** (Settings → Variables → Encrypt), not a plain variable.
+The refresh token does not expire while the OAuth app stays published.
 
 ## Links
 

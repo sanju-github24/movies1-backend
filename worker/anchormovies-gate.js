@@ -117,6 +117,46 @@ async function b2Fetch(env, objKey, req) {
   return fetch(`https://${host}${canonicalUri}`, { method: "GET", headers });
 }
 
+/* ── Google Drive delivery ────────────────────────────────────────────────
+   Files live on Drive (5TB already paid for) and Cloudflare serves them, so
+   nothing is stored twice and no bandwidth comes off our own box. The Drive web
+   endpoint interrupts anything over ~100MB with a virus-scan page; the API does
+   not, which is why this goes through the API with a Bearer token.
+
+   Secrets: GDRIVE_CLIENT_ID, GDRIVE_CLIENT_SECRET, GDRIVE_REFRESH_TOKEN. */
+let driveToken = { value: null, expires: 0 };
+
+async function driveAccessToken(env) {
+  if (driveToken.value && Date.now() < driveToken.expires - 60_000) return driveToken.value;
+  const body = new URLSearchParams({
+    client_id: env.GDRIVE_CLIENT_ID,
+    client_secret: env.GDRIVE_CLIENT_SECRET,
+    refresh_token: env.GDRIVE_REFRESH_TOKEN,
+    grant_type: "refresh_token",
+  });
+  const r = await fetch("https://oauth2.googleapis.com/token", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body,
+  });
+  if (!r.ok) throw new Error(`drive token ${r.status}`);
+  const j = await r.json();
+  // Cached on the isolate: a cold one spends a single extra round trip.
+  driveToken = { value: j.access_token, expires: Date.now() + (j.expires_in || 3600) * 1000 };
+  return driveToken.value;
+}
+
+async function driveFetch(env, fileId, req) {
+  const token = await driveAccessToken(env);
+  const headers = { Authorization: `Bearer ${token}` };
+  const range = req.headers.get("Range");
+  if (range) headers.Range = range;              // resume passes straight through
+  return fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?alt=media&supportsAllDrives=true`,
+    { headers }
+  );
+}
+
 function cors(resp, origin) {
   const h = new Headers(resp.headers);
   h.set("Access-Control-Allow-Origin", origin || "*");
@@ -142,7 +182,8 @@ export default {
        download manager, or opened by a browser that sends no referrer. The
        signature is the authorization there, and it still expires in 24h. */
     const dlPrefix = (env.DOWNLOAD_PREFIX || "downloads/").replace(/^\/+/, "");
-    const isDownload = key.startsWith(dlPrefix) || key.startsWith(`b2/${dlPrefix}`);
+    const isDownload = key.startsWith(dlPrefix) || key.startsWith(`b2/${dlPrefix}`)
+      || key.startsWith("drive/");
 
     // 1) only your player(s) — Referer/Origin gate (playback only)
     const allow = (env.ALLOWED_HOSTS || "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -163,6 +204,40 @@ export default {
     const prefix = objKey.split("/").slice(0, 2).join("/"); // movies/<slug>
     if (!(await verifyToken(env.SIGNING_SECRET, prefix, token))) {
       return cors(new Response("Link expired or invalid", { status: 403 }), origin);
+    }
+
+    /* 2b) drive/<fileId>/<filename> — served from Drive, not from a bucket.
+           The token is scoped to drive/<fileId> by the same rule as everything
+           else, so the signer needs no special case. */
+    if (objKey.startsWith("drive/")) {
+      if (!env.GDRIVE_REFRESH_TOKEN) {
+        return cors(new Response("Drive delivery is not configured", { status: 500 }), origin);
+      }
+      const [, fileId, ...rest] = objKey.split("/");
+      if (!fileId) return cors(new Response("Not found", { status: 404 }), origin);
+      let up;
+      try {
+        up = await driveFetch(env, fileId, req);
+      } catch (e) {
+        return cors(new Response(`Drive: ${e.message}`, { status: 502 }), origin);
+      }
+      if (up.status === 404) return cors(new Response("Not found", { status: 404 }), origin);
+      if (!up.ok && up.status !== 206) {
+        return cors(new Response(`Upstream ${up.status}`, { status: 502 }), origin);
+      }
+      const h = new Headers();
+      for (const k of ["content-type", "content-length", "content-range", "etag", "last-modified"]) {
+        const v = up.headers.get(k);
+        if (v) h.set(k, v);
+      }
+      h.set("accept-ranges", "bytes");
+      const filename = decodeURIComponent(rest.join("/") || fileId).replace(/["\\]/g, "");
+      h.set("content-disposition", `attachment; filename="${filename}"`);
+      // Per-viewer token in the URL and a body far past the Cache API ceiling:
+      // there is nothing here worth storing at the edge.
+      h.set("cache-control", "no-store");
+      h.set("x-source", "drive");
+      return cors(new Response(up.body, { status: up.status, headers: h }), origin);
     }
 
     // 3) edge cache — segments only, and only for whole-object GETs.
