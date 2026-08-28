@@ -43,8 +43,31 @@ link inside its window rather than storing one that goes stale.
 
 ## Deploying
 
+Live at `anchormovies-gate.sanjusanjay0444.workers.dev`, fronted by
+`stream.1anchormovies.buzz`.
+
+**Dashboard (recommended).** Workers & Pages → `anchormovies-gate` → Edit code →
+paste `anchormovies-gate.js` → Deploy. Bindings, vars and secrets are attached
+to the worker, so nothing is disturbed.
+
+**CLI.** `npx wrangler deploy` — but read the warning at the top of
+`wrangler.toml` first: a deploy replaces bindings and vars with whatever the
+file declares, so an incomplete file silently unbinds `BUCKET` and every stream
+starts failing. Secrets are unaffected.
+
+Either way, commit what you deployed.
+
+### Did it take?
+
+The origin gate is the tell. With no `Referer`:
+
 ```bash
-npx wrangler deploy anchormovies-gate.js --name <worker-name>
+# before: "Forbidden origin"   after: "Link expired or invalid"
+curl -s "https://stream.1anchormovies.buzz/downloads/x/y.mkv?t=1.bad"
+
+# unchanged either way: playback still refuses a stranger
+curl -s "https://stream.1anchormovies.buzz/movies/x/master.m3u8?t=1.bad"
 ```
 
-Or paste it into the dashboard editor. Either way, commit what you deployed.
+The download path reaching the token check — and failing it, because that token
+is nonsense — is exactly the new behaviour.

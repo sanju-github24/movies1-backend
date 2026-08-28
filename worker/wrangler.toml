@@ -1,0 +1,21 @@
+# Only needed if you deploy from the CLI. The dashboard editor needs none of this.
+#
+# ⚠️  wrangler deploy REPLACES the worker's bindings and vars with what is
+#     declared here. Anything configured in the dashboard and missing below is
+#     removed — a deploy without the r2_buckets block would unbind BUCKET and
+#     every stream would 500. Check these against the dashboard before using it.
+#     Secrets are NOT affected: SIGNING_SECRET and the B2_* secrets survive, and
+#     are set with `wrangler secret put <NAME>`.
+
+name = "anchormovies-gate"
+main = "anchormovies-gate.js"
+compatibility_date = "2026-01-01"
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "anchormovies"      # ← confirm against the dashboard
+
+[vars]
+# Playback only — downloads are exempt by design.
+ALLOWED_HOSTS = "1anchormovies.live,1anchormovies.buzz,localhost"
+DOWNLOAD_PREFIX = "downloads/"
