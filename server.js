@@ -4166,6 +4166,44 @@ async function announceOnTelegram({ name, url, poster, facets }) {
   }
 }
 
+/* What address does MX actually see us coming from?
+
+   "Set a proxy and it still says region-blocked" has two very different causes
+   — the proxy is not in the path at all, or it is and MX blocks it anyway —
+   and they need opposite fixes. This asks an echo service the same way mxFetch
+   asks MX, so the answer is the egress the MX calls really use.
+
+   Signed, because the egress address of a server is not something to hand to
+   anyone who finds the URL. */
+app.get('/api/mx/egress', async (req, res) => {
+  const given = String(req.get('x-publish-sig') || '');
+  const secret = process.env.SIGNING_SECRET || '';
+  const want = secret ? crypto.createHmac('sha256', secret).update('egress').digest('hex') : '';
+  const a = Buffer.from(given), b = Buffer.from(want);
+  if (!want || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return res.status(401).json({ success: false, error: 'bad signature' });
+  }
+  const started = Date.now();
+  try {
+    const r = await mxFetch('https://api.ipify.org?format=json');
+    const body = (await r.text()).slice(0, 200);
+    res.json({
+      success: true,
+      proxyConfigured: !!process.env.MX_PROXY_URL,
+      scraperConfigured: !!process.env.MX_SCRAPER_KEY,
+      ms: Date.now() - started,
+      egress: body,
+    });
+  } catch (e) {
+    res.json({
+      success: false,
+      proxyConfigured: !!process.env.MX_PROXY_URL,
+      ms: Date.now() - started,
+      error: e.message.slice(0, 200),
+    });
+  }
+});
+
 /* Where to send a visitor who wants the channel.
    Served rather than hardcoded in the frontend: the link then always matches
    whatever TELEGRAM_CHANNEL is actually set to, and changing channels needs no
