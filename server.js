@@ -2061,8 +2061,12 @@ const MX_FETCH_HEADERS = {
 
    Neither set → straight to MX, which works for search but returns empty
    stream details from datacenter IPs. */
-async function mxFetch(url) {
-  const proxyUrl = process.env.MX_PROXY_URL;
+/* `route` picks a path deliberately: 'auto' takes whichever is configured,
+   'scraper' and 'direct' name one. mxApi uses that to try the next route when
+   one answers with something that is not MX — without it, a broken proxy is
+   indistinguishable from MX saying no. */
+async function mxFetch(url, route = 'auto') {
+  const proxyUrl = route === 'auto' ? process.env.MX_PROXY_URL : '';
   if (proxyUrl) {
     /* This file is an ES module, where require() does not exist — so the whole
        proxy branch threw "require is not defined" the first time anyone set
@@ -2084,7 +2088,7 @@ async function mxFetch(url) {
     return { text: async () => r.data, status: r.status };
   }
 
-  const key = process.env.MX_SCRAPER_KEY;
+  const key = route === 'direct' ? '' : process.env.MX_SCRAPER_KEY;
   if (key) {
     // ScraperAPI-style: country_code=in + premium=true = RESIDENTIAL Indian IP
     // (MX blocks datacenter Indian IPs too). No render — __mxs__ is in the HTML.
@@ -2108,15 +2112,32 @@ async function mxApi(path) {
   const url = `${MX_API_BASE}${path}${path.includes('?') ? '&' : '?'}device-density=2`;
   const parse = (txt) => { try { return JSON.parse(txt); } catch { return null; } };
 
-  const first = parse(await (await mxFetch(url)).text());
-  if (first) return first;
-
-  // Proxy returned something that isn't JSON → try MX directly, once.
-  if (process.env.MX_SCRAPER_KEY) {
-    const direct = parse(await (await fetch(url, { headers: MX_FETCH_HEADERS })).text());
-    if (direct) return direct;
+  /* Try each configured route in turn, best first, and say which ones failed.
+     This used to be one attempt plus a bare direct fetch, and the direct fetch
+     is the one route that CANNOT see region-locked titles — so a misbehaving
+     proxy quietly became "not available in your region", which is a true
+     sentence about the wrong request and sent us looking in the wrong place
+     for an hour. */
+  const routes = [
+    ['configured', 'auto'],
+    ...(process.env.MX_PROXY_URL && process.env.MX_SCRAPER_KEY ? [['scraper', 'scraper']] : []),
+    ['direct', 'direct'],
+  ];
+  const tried = [];
+  for (const [name, route] of routes) {
+    try {
+      const body = await (await mxFetch(url, route)).text();
+      const json = parse(body);
+      if (json) {
+        if (name !== 'configured') console.warn(`   MX: fell back to the ${name} route`);
+        return json;
+      }
+      tried.push(`${name}: not JSON (${body.trim().slice(0, 40).replace(/\s+/g, ' ')}…)`);
+    } catch (e) {
+      tried.push(`${name}: ${e.message.slice(0, 60)}`);
+    }
   }
-  throw new MxUnavailable('scraper proxy returned no JSON (quota exhausted or key invalid)');
+  throw new MxUnavailable(`no route to MX returned JSON — ${tried.join('; ')}`);
 }
 function mxExtractBlob(html, key) {
   const i = html.indexOf(key); if (i < 0) return null;
