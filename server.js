@@ -3962,17 +3962,28 @@ app.post('/api/push/broadcast', async (req, res) => {
 
   try {
     const { data } = await supabase
-      .from('watch_html').select('title, poster').eq('slug', slug).single();
+      .from('watch_html').select('title, poster, download_links').eq('slug', slug).single();
     const name = cleanReleaseName(data?.title || slug);
+    const url = `${SITE_ORIGIN}/watch/${encodeURIComponent(slug)}`;
+    const dryRun = req.body?.dryRun === true;
+
     const out = await pushToAll({
-      title: 'New on AnchorMovies',
-      body: name,
-      url: `${SITE_ORIGIN}/watch/${encodeURIComponent(slug)}`,
-      image: data?.poster || undefined,
-      dryRun: req.body?.dryRun === true,
+      title: 'New on AnchorMovies', body: name, url, image: data?.poster || undefined, dryRun,
     });
     console.log(`🔔 push "${name}":`, JSON.stringify(out));
-    res.json({ success: true, ...out });
+
+    /* One hook, two channels: the people who subscribed in a browser and the
+       ones who follow the channel. Telegram is skipped on a dry run — a dry
+       run must never be the thing that posts publicly. */
+    let telegram = { skipped: 'dry run' };
+    if (!dryRun) {
+      telegram = await announceOnTelegram({
+        name, url, poster: data?.poster || '',
+        facets: releaseFacets(data?.download_links, data?.title || ''),
+      });
+      console.log(`📣 telegram "${name}":`, JSON.stringify(telegram));
+    }
+    res.json({ success: true, ...out, telegram });
   } catch (e) {
     console.error('❌ push broadcast:', e.message);
     res.status(500).json({ success: false, error: e.message });
@@ -4008,6 +4019,103 @@ app.post('/api/push/prune-host', async (req, res) => {
     res.status(500).json({ success: false, error: e.message });
   }
 });
+
+/* ─────────────────────────────────────────────────────────────────────
+   Telegram channel announcements.
+
+   This is where this audience already is. A channel post reaches every
+   subscriber the moment it is made, it is forwardable, and no ranking
+   algorithm sits between us and them — which makes it worth more than the
+   search work, honestly, and it costs one API call per upload.
+
+   Uses the bot that already exists (@anchormovies_bot). Set TELEGRAM_CHANNEL
+   to the channel (@name, or the -100… id for a private one) and add the bot
+   as an administrator with "post messages". Unset, this does nothing.
+   ───────────────────────────────────────────────────────────────────── */
+const TELEGRAM_TOKEN   = process.env.BOT_TOKEN || '';
+const TELEGRAM_CHANNEL = process.env.TELEGRAM_CHANNEL || '';
+const telegramReady = !!(TELEGRAM_TOKEN && TELEGRAM_CHANNEL);
+if (!telegramReady) {
+  console.warn('⚠️  Telegram announcements are off — set TELEGRAM_CHANNEL'
+    + `${TELEGRAM_TOKEN ? '' : ' and BOT_TOKEN'}`);
+}
+
+const tgEscape = (t = '') => String(t)
+  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+async function tg(method, body) {
+  const res = await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/${method}`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ chat_id: TELEGRAM_CHANNEL, ...body }),
+    signal: AbortSignal.timeout(20000),
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!out.ok) throw new Error(out.description || `telegram ${res.status}`);
+  return out.result;
+}
+
+/* Resolution, source and audio languages, read out of the download blocks —
+   the same facts the page's own title and description are built from, so a
+   channel post and a search result never describe the same upload differently. */
+function releaseFacets(blocks = [], fallbackName = '') {
+  const labels = [fallbackName];
+  for (const b of blocks || []) {
+    labels.push(b?.quality || '');
+    for (const l of b?.links || []) labels.push(l?.name || l?.path || '');
+  }
+  const text = labels.filter(Boolean).join(' · ');
+  const pick = (order, re) => {
+    const hits = new Set((text.match(re) || []).map((x) => x.replace(/[\s-]/g, '').toLowerCase()));
+    return order.filter((v) => hits.has(v.replace(/[\s-]/g, '').toLowerCase()));
+  };
+  const res = pick(['2160p', '4K', '1080p', '720p', '480p'], /\b(2160p|4K|1080p|720p|480p)\b/gi);
+  const src = pick(['WEB-DL', 'WEBRip', 'BluRay', 'HDRip', 'HDTV', 'PreDVD'],
+                   /\b(WEB[\s-]?DL|WEB[\s-]?Rip|BluRay|HDRip|HDTV|PreDVD)\b/gi);
+  const LANGS = [['Tamil', /\b(Tamil|Tam)\b/i], ['Telugu', /\b(Telugu|Tel)\b/i],
+                 ['Hindi', /\b(Hindi|Hin)\b/i], ['Malayalam', /\b(Malayalam|Mal)\b/i],
+                 ['Kannada', /\b(Kannada|Kan)\b/i], ['English', /\b(English|Eng)\b/i],
+                 ['Korean', /\b(Korean|Kor)\b/i]];
+  const episodes = Math.max(0, ...(blocks || []).map((b) => ((b?.links || []).length > 1 ? b.links.length : 0)));
+  return {
+    quality: [res.join(', '), src[0] || ''].filter(Boolean).join(' '),
+    langs: LANGS.filter(([, re]) => re.test(text)).map(([n]) => n),
+    episodes,
+  };
+}
+
+async function announceOnTelegram({ name, url, poster, facets }) {
+  if (!telegramReady) return { skipped: 'telegram is not configured' };
+
+  const lines = [`🎬 <b>${tgEscape(name)}</b>`, ''];
+  if (facets.quality) lines.push(`📺 ${tgEscape(facets.quality)}`);
+  if (facets.langs.length) lines.push(`🔊 ${tgEscape(facets.langs.join(', '))}`);
+  if (facets.episodes > 1) lines.push(`📁 ${facets.episodes} episodes`);
+  lines.push('', `▶️ ${tgEscape(url)}`);
+  const caption = lines.join('\n').slice(0, 1000);   // sendPhoto caption cap is 1024
+
+  const keyboard = { inline_keyboard: [[{ text: '▶ Watch / Download', url }]] };
+  try {
+    /* The poster is most of why anyone taps. A photo post that fails — an
+       unreachable image, a format Telegram will not take — must still get the
+       title out, so it falls back to text rather than being lost. */
+    if (poster) {
+      try {
+        await tg('sendPhoto', { photo: poster, caption, parse_mode: 'HTML', reply_markup: keyboard });
+        return { posted: 'photo' };
+      } catch (e) {
+        console.warn('   telegram photo failed, falling back to text:', e.message);
+      }
+    }
+    await tg('sendMessage', {
+      text: caption, parse_mode: 'HTML', reply_markup: keyboard,
+      link_preview_options: { url, prefer_large_media: true },
+    });
+    return { posted: 'text' };
+  } catch (e) {
+    return { failed: e.message };
+  }
+}
 
 /* A release name is not a notification. "Kantara (2022) TRUE WEB-DL - [4K...]"
    on a lock screen is unreadable; the title alone is what someone recognises.
