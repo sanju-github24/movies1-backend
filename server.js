@@ -1,4 +1,5 @@
 import express from 'express';
+import webpush from 'web-push';
 import cors from 'cors';
 import 'dotenv/config';
 import cookieParser from 'cookie-parser';
@@ -3827,6 +3828,155 @@ app.get('/sitemap.xml', async (req, res) => {
   res.set('Cache-Control', 'public, max-age=0, s-maxage=900, stale-while-revalidate=3600');
   return res.send(body);
 });
+
+/* ─────────────────────────────────────────────────────────────────────
+   New-upload notifications.
+
+   Search is a slow and, for this catalogue, unreliable way to be found. A
+   visitor who agrees to be told when something lands comes back on every
+   upload without anyone's ranking algorithm in the way — which is the only
+   audience that is really ours.
+
+   Note this deliberately does NOT use public/service-worker.js: that file is
+   an ad network's push script, and registering it would hand our visitors'
+   push subscriptions to them. Ours lives at /push-sw.js.
+   ───────────────────────────────────────────────────────────────────── */
+const VAPID_PUBLIC  = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || '';
+
+/* A subscription is a credential: endpoint plus keys is everything needed to
+   push to that device. The rest of this server runs on the anon key, which is
+   the key the browser holds too — so storing subscriptions under it would mean
+   anyone could list them, or delete every one. This table is therefore reached
+   only with the service role, and RLS is left on with no policies so the anon
+   key cannot touch it at all. No service key, no push: refusing to start the
+   feature is better than running it wide open. */
+const SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const supabaseAdmin = SERVICE_KEY
+  ? createClient(process.env.SUPABASE_URL, SERVICE_KEY, { auth: { persistSession: false } })
+  : null;
+
+const pushReady = !!(VAPID_PUBLIC && VAPID_PRIVATE && supabaseAdmin);
+if (pushReady) {
+  webpush.setVapidDetails(process.env.VAPID_SUBJECT || SITE_ORIGIN, VAPID_PUBLIC, VAPID_PRIVATE);
+} else {
+  console.warn('⚠️  push notifications are off — need VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY'
+    + ' and SUPABASE_SERVICE_ROLE_KEY'
+    + ` (have: ${[VAPID_PUBLIC && 'vapid-public', VAPID_PRIVATE && 'vapid-private',
+        supabaseAdmin && 'service-key'].filter(Boolean).join(', ') || 'none'})`);
+}
+
+/* The browser needs the public key to subscribe. Served rather than baked into
+   the bundle, so rotating the pair does not need a frontend deploy. */
+app.get('/api/push/key', (req, res) =>
+  res.json({ enabled: pushReady, key: VAPID_PUBLIC }));
+
+app.post('/api/push/subscribe', async (req, res) => {
+  if (!pushReady) return res.status(503).json({ success: false, error: 'notifications are not configured' });
+  const sub = req.body?.subscription;
+  if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) {
+    return res.status(400).json({ success: false, error: 'not a push subscription' });
+  }
+  try {
+    /* Keyed on the endpoint, which is what the browser hands out and what
+       identifies the device — re-subscribing must update, never duplicate. */
+    const { error } = await supabaseAdmin.from('push_subscriptions').upsert({
+      endpoint: sub.endpoint,
+      p256dh: sub.keys.p256dh,
+      auth: sub.keys.auth,
+      user_agent: String(req.get('user-agent') || '').slice(0, 300),
+      created_at: new Date().toISOString(),
+    }, { onConflict: 'endpoint' });
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e) {
+    console.error('❌ push subscribe:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+app.post('/api/push/unsubscribe', async (req, res) => {
+  if (!pushReady) return res.status(503).json({ success: false, error: 'notifications are not configured' });
+  const endpoint = String(req.body?.endpoint || '');
+  if (!endpoint) return res.status(400).json({ success: false, error: 'endpoint required' });
+  try {
+    await supabaseAdmin.from('push_subscriptions').delete().eq('endpoint', endpoint);
+    res.json({ success: true });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+/* Send to everyone, dropping the subscriptions the browser vendor tells us are
+   dead. 404/410 means the user uninstalled or revoked; keeping those forever
+   turns a broadcast into thousands of pointless requests. */
+async function pushToAll({ title, body, url, image }) {
+  if (!pushReady) return { skipped: 'push is not configured' };
+  const { data, error } = await supabaseAdmin
+    .from('push_subscriptions').select('endpoint, p256dh, auth').limit(20000);
+  if (error) throw error;
+
+  const payload = JSON.stringify({ title, body, url, image });
+  let sent = 0; const dead = [];
+  await Promise.all((data || []).map(async (row) => {
+    try {
+      await webpush.sendNotification(
+        { endpoint: row.endpoint, keys: { p256dh: row.p256dh, auth: row.auth } }, payload);
+      sent += 1;
+    } catch (e) {
+      if (e.statusCode === 404 || e.statusCode === 410) dead.push(row.endpoint);
+    }
+  }));
+  if (dead.length) await supabaseAdmin.from('push_subscriptions').delete().in('endpoint', dead);
+  return { sent, pruned: dead.length, total: (data || []).length };
+}
+
+/* Fired by the ingest box the moment a title is published. Authenticated with
+   an HMAC of the slug under the secret the box and this server already share
+   for signing links — an unauthenticated broadcast endpoint would let anyone
+   push a notification to every subscriber we have. */
+app.post('/api/push/broadcast', async (req, res) => {
+  const slug = String(req.body?.slug || '').trim();
+  const given = String(req.get('x-publish-sig') || '');
+  const secret = process.env.SIGNING_SECRET || '';
+  if (!slug || !secret) return res.status(400).json({ success: false, error: 'slug required' });
+
+  const want = crypto.createHmac('sha256', secret).update(slug).digest('hex');
+  const a = Buffer.from(given), b = Buffer.from(want);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return res.status(401).json({ success: false, error: 'bad signature' });
+  }
+
+  try {
+    const { data } = await supabase
+      .from('watch_html').select('title, poster').eq('slug', slug).single();
+    const name = cleanReleaseName(data?.title || slug);
+    const out = await pushToAll({
+      title: 'New on AnchorMovies',
+      body: name,
+      url: `${SITE_ORIGIN}/watch/${encodeURIComponent(slug)}`,
+      image: data?.poster || undefined,
+    });
+    console.log(`🔔 push "${name}":`, JSON.stringify(out));
+    res.json({ success: true, ...out });
+  } catch (e) {
+    console.error('❌ push broadcast:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+/* A release name is not a notification. "Kantara (2022) TRUE WEB-DL - [4K...]"
+   on a lock screen is unreadable; the title alone is what someone recognises.
+   Same rule the pages use: cut at the year, keep the name whole. */
+function cleanReleaseName(raw = '') {
+  const s = String(raw).trim();
+  const yr = /\((19|20)\d{2}\)/.exec(s);
+  const tech = /\b(TRUE\s+)?(WEB[\s-]?DL|WEB[\s-]?RIP|HDRip|BluRay|BDRip|HDTC|PreDVD|HDTV|2160p|1080p|720p|480p|4K|HEVC|AVC)\b/i.exec(s);
+  let name = yr ? s.slice(0, yr.index) : (tech ? s.slice(0, tech.index) : s);
+  const season = yr ? (/^\s*[-\s]*S(?:eason)?\s*(\d{1,3})\b/i.exec(s.slice(yr.index + yr[0].length))?.[1] || '') : '';
+  name = name.replace(/[[(][^\])]*$/, '').replace(/\s*[-–—:,]\s*$/, '').replace(/\s{2,}/g, ' ').trim();
+  return `${name || s}${season ? ` Season ${Number(season)}` : ''}${yr ? ` (${yr[0].replace(/[()]/g, '')})` : ''}`;
+}
 
 /* ─────────────────────────────────────────────────────────────────────
    IndexNow — tell search engines about a page the moment it exists.

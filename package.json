@@ -41,6 +41,7 @@
     "puppeteer-extra-plugin-stealth": "^2.11.2",
     "slugify": "^1.6.6",
     "socks-proxy-agent": "^8.0.5",
-    "uuid": "^13.0.0"
+    "uuid": "^13.0.0",
+    "web-push": "^3.6.7"
   }
 }
