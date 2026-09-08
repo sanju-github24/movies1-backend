@@ -241,18 +241,9 @@ export default {
       const wantsDownload = url.searchParams.get("dl") === "1";
       h.set("content-disposition",
         `${wantsDownload ? "attachment" : "inline"}; filename="${filename}"`);
-
-      /* A video is fetched as dozens of separate range requests, and the browser
-         will only stitch those into one media stream if it can prove they came
-         from the same object AND it is allowed to hold them. Drive sends no
-         ETag of its own, and no-store forbids the media cache outright, so
-         playback sat at readyState 0 with no progress event ever firing — the
-         bytes arrived, nothing consumed them. A stable validator derived from
-         the file id and its length gives the browser both. Access is still
-         governed entirely by the signed token; "private" keeps this out of any
-         shared cache. */
-      if (!h.get("etag")) h.set("etag", `"drive-${fileId}-${up.headers.get("content-range")?.split("/")[1] || up.headers.get("content-length") || "0"}"`);
-      h.set("cache-control", wantsDownload ? "no-store" : "private, max-age=3600");
+      // Per-viewer token in the URL and a body far past the Cache API ceiling:
+      // there is nothing here worth storing at the edge.
+      h.set("cache-control", "no-store");
       h.set("x-source", "drive");
       return cors(new Response(up.body, { status: up.status, headers: h }), origin);
     }
