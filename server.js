@@ -3723,6 +3723,35 @@ app.get('/sitemap.xml', async (req, res) => {
     console.error('❌ sitemap blogs:', e.message);
   }
 
+  // ── Title pages (every watch page in the library) ──
+  // These were never listed, so nothing in the catalogue was discoverable from
+  // search at all: a title existed only for someone who already knew the slug.
+  // Newest first, because that is what a crawl budget should reach soonest.
+  try {
+    const { data, error } = await supabase
+      .from('watch_html')
+      // No updated_at on this table — asking for one 400s and drops the whole
+      // section, which is how a sitemap silently loses every title page.
+      .select('slug, created_at')
+      .order('created_at', { ascending: false })
+      .limit(5000);
+    if (error) throw error;
+    for (const w of data || []) {
+      if (!w.slug) continue;
+      const changed = w.created_at;
+      urls.push({
+        loc: `${SITE_ORIGIN}/watch/${encodeURIComponent(w.slug)}`,
+        lastmod: changed ? new Date(changed).toISOString().slice(0, 10) : undefined,
+        // A series gains episodes; a film is finished. Weekly is the honest
+        // middle without claiming a freshness we cannot back up.
+        changefreq: 'weekly',
+        priority: '0.7',
+      });
+    }
+  } catch (e) {
+    console.error('❌ sitemap watch pages:', e.message);
+  }
+
   // ── Matches (IPL + India/international) ──
   // The point of generating this per request: a fixture is listed the moment the
   // feed knows about it, so a live match is discoverable while it's still on.
