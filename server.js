@@ -2163,7 +2163,7 @@ async function mxShowEpisodes(webUrl) {
   const ent = (JSON.parse(blob).entities) || {};
   const idm = /-([0-9a-f]{24,})(?:$|[/?])/i.exec(path);
   const item = (idm && ent[idm[1]]) || Object.values(ent).find((v) => v && v.title && v.type);
-  if (!item) throw new Error('No entity in SSR state');
+  if (!item) throw new MxUnavailable('not available from this server\u2019s region');
   const base = {
     title: item.title,
     poster: mxImg(item, ['portrait_large', 'portrait', 'landscape', 'bigpic']),
@@ -2228,7 +2228,18 @@ async function mxShowEpisodes(webUrl) {
 async function mxResolveById(id, type) {
   const d = await mxApi(`/detail/video?type=${encodeURIComponent(type)}&id=${encodeURIComponent(id)}`);
   const hls = mxHls(d);
-  if (!hls) throw new Error('No stream for ' + id);
+  if (!hls) {
+    /* MX answers a request from outside India for a region-licensed title with
+       no title and no stream at all — the same shape as a title that does not
+       exist. This server is in the US and the audience is in India, so this is
+       the common case, not an error in our code: verified by asking MX for the
+       same id from an Indian and a US address and getting a stream only from
+       the first. Reported as unavailable so the page can say so plainly rather
+       than showing a failure the viewer cannot act on.
+       Set MX_PROXY_URL or MX_SCRAPER_KEY (country_code=in) to resolve these. */
+    if (!d || !d.title) throw new MxUnavailable('not available from this server\u2019s region');
+    throw new Error('No stream for ' + id);
+  }
   return {
     type: 'movie',
     title: d.title,
