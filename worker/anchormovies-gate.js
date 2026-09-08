@@ -232,15 +232,7 @@ export default {
       }
       h.set("accept-ranges", "bytes");
       const filename = decodeURIComponent(rest.join("/") || fileId).replace(/["\\]/g, "");
-      /* A Drive file is now BOTH the download and what the player streams, so
-         the disposition cannot be fixed at "attachment": that tells the browser
-         to save rather than render, which is why opening one in a tab produced
-         a download instead of a video. Download buttons ask for it explicitly
-         with ?dl=1; everything else is served inline, still with the right
-         filename should the viewer save it. */
-      const wantsDownload = url.searchParams.get("dl") === "1";
-      h.set("content-disposition",
-        `${wantsDownload ? "attachment" : "inline"}; filename="${filename}"`);
+      h.set("content-disposition", `attachment; filename="${filename}"`);
       // Per-viewer token in the URL and a body far past the Cache API ceiling:
       // there is nothing here worth storing at the edge.
       h.set("cache-control", "no-store");
