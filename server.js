@@ -2064,10 +2064,15 @@ const MX_FETCH_HEADERS = {
 async function mxFetch(url) {
   const proxyUrl = process.env.MX_PROXY_URL;
   if (proxyUrl) {
+    /* This file is an ES module, where require() does not exist — so the whole
+       proxy branch threw "require is not defined" the first time anyone set
+       MX_PROXY_URL, which is to say the first time it was ever used. Loaded
+       dynamically instead, and only when a proxy is actually configured, so a
+       deployment without one never pays for the import. */
     const socks = /^socks/i.test(proxyUrl);
-    const { SocksProxyAgent } = socks ? require('socks-proxy-agent') : {};
-    const { HttpsProxyAgent } = socks ? {} : require('https-proxy-agent');
-    const agent = socks ? new SocksProxyAgent(proxyUrl) : new HttpsProxyAgent(proxyUrl);
+    const agent = socks
+      ? new (await import('socks-proxy-agent')).SocksProxyAgent(proxyUrl)
+      : new (await import('https-proxy-agent')).HttpsProxyAgent(proxyUrl);
     const r = await axios.get(url, {
       httpAgent: agent, httpsAgent: agent, proxy: false,
       headers: MX_FETCH_HEADERS,
