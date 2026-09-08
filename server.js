@@ -3426,6 +3426,11 @@ app.get('/api/render', async (req, res) => {
     await page.waitForFunction(
       () => {
         if (!document.querySelector('link[rel="canonical"]')) return false;
+        /* A page that fetches a list sets this while it is still fetching. Both
+           tests below pass on its first paint — canonical present, root has the
+           word "Loading" in it — so without this the crawler was handed an empty
+           collection page. Pages that never set the flag are unaffected. */
+        if (document.documentElement.dataset.prerender === 'loading') return false;
         const root = document.querySelector('#root, #app');
         return !!root && root.innerText.trim().length > 0;
       },
