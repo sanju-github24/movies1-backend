@@ -3681,13 +3681,18 @@ function xmlEscape(s) {
   ));
 }
 
-function urlEntry({ loc, lastmod, changefreq, priority }) {
+function urlEntry({ loc, lastmod, changefreq, priority, image }) {
   return [
     '  <url>',
     `    <loc>${xmlEscape(loc)}</loc>`,
     lastmod    ? `    <lastmod>${lastmod}</lastmod>` : '',
     changefreq ? `    <changefreq>${changefreq}</changefreq>` : '',
     priority   ? `    <priority>${priority}</priority>` : '',
+    /* The poster, so a result can carry the artwork instead of being a line of
+       blue text. Only an absolute URL is valid here; a relative one is dropped
+       rather than emitted as something a crawler cannot resolve. */
+    image && /^https?:\/\//i.test(image)
+      ? `    <image:image><image:loc>${xmlEscape(image)}</image:loc></image:image>` : '',
     '  </url>',
   ].filter(Boolean).join('\n');
 }
@@ -3732,7 +3737,7 @@ app.get('/sitemap.xml', async (req, res) => {
       .from('watch_html')
       // No updated_at on this table — asking for one 400s and drops the whole
       // section, which is how a sitemap silently loses every title page.
-      .select('slug, created_at')
+      .select('slug, poster, created_at')
       .order('created_at', { ascending: false })
       .limit(5000);
     if (error) throw error;
@@ -3746,6 +3751,7 @@ app.get('/sitemap.xml', async (req, res) => {
         // middle without claiming a freshness we cannot back up.
         changefreq: 'weekly',
         priority: '0.7',
+        image: w.poster || undefined,
       });
     }
   } catch (e) {
@@ -3772,7 +3778,8 @@ app.get('/sitemap.xml', async (req, res) => {
 
   const body = [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
+      + ' xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">',
     ...urls.map(urlEntry),
     '</urlset>',
   ].join('\n');
@@ -3780,6 +3787,69 @@ app.get('/sitemap.xml', async (req, res) => {
   res.set('Content-Type', 'application/xml; charset=utf-8');
   res.set('Cache-Control', 'public, max-age=0, s-maxage=900, stale-while-revalidate=3600');
   return res.send(body);
+});
+
+/* ─────────────────────────────────────────────────────────────────────
+   IndexNow — tell search engines about a page the moment it exists.
+
+   The sitemap is generated per request, so a new upload is listed the instant
+   its row is written; what it does not do is make anyone come and look. This
+   pushes the URL instead of waiting to be crawled.
+
+   Honest about the reach: IndexNow is Bing, Yandex, Seznam and Naver. Google
+   does not take part — it dropped its own sitemap ping in 2023 — so for Google
+   the sitemap's <lastmod> and Search Console remain the route. That is worth
+   having anyway rather than nothing.
+
+   The key is public by design: it is proved by serving it at the site root, so
+   there is nothing here to keep secret.
+   ───────────────────────────────────────────────────────────────────── */
+const INDEXNOW_KEY = process.env.INDEXNOW_KEY || '090e2fa0c278580e7080d0e8f0210344';
+const SLUG_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,119}$/;
+
+async function submitIndexNow(slugs = []) {
+  const clean = [...new Set(slugs.map(String).filter((x) => SLUG_RE.test(x)))].slice(0, 1000);
+  if (!clean.length) return { ok: false, skipped: 'no valid slugs' };
+
+  /* URLs are BUILT here from a slug, never accepted whole from the caller —
+     an endpoint that forwards arbitrary URLs is an open relay for someone
+     else's spam, submitted under our host's key. */
+  const host = new URL(SITE_ORIGIN).host;
+  const urlList = clean.map((slug) => `${SITE_ORIGIN}/watch/${encodeURIComponent(slug)}`);
+
+  const res = await fetch('https://api.indexnow.org/indexnow', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json; charset=utf-8' },
+    body: JSON.stringify({ host, key: INDEXNOW_KEY, keyLocation: `${SITE_ORIGIN}/${INDEXNOW_KEY}.txt`, urlList }),
+    signal: AbortSignal.timeout(15000),
+  });
+  // 200 accepted, 202 accepted but the key is still being verified.
+  return { ok: res.status === 200 || res.status === 202, status: res.status, submitted: urlList.length };
+}
+
+/* Called by the ingest box after it publishes, and by the studio editor after
+   a save. Unauthenticated on purpose: the worst anyone can do with it is ask
+   Bing to re-crawl a page of ours that is already public. */
+app.post('/api/index-now', async (req, res) => {
+  const raw = req.body?.slugs || req.body?.slug || [];
+  const slugs = Array.isArray(raw) ? raw : [raw];
+  try {
+    const out = await submitIndexNow(slugs);
+    if (out.skipped) return res.status(400).json({ success: false, error: out.skipped });
+    console.log(`🔔 IndexNow: ${out.submitted} url(s) → ${out.status}`);
+    return res.json({ success: out.ok, ...out });
+  } catch (e) {
+    // Never fail an upload because a search engine was unreachable.
+    console.error('❌ IndexNow:', e.message);
+    return res.status(502).json({ success: false, error: e.message });
+  }
+});
+
+/* The key file, proving to IndexNow that this host is ours to submit. Served
+   from here so it cannot drift out of sync with the key the code sends. */
+app.get(`/${INDEXNOW_KEY}.txt`, (req, res) => {
+  res.set('Content-Type', 'text/plain; charset=utf-8');
+  res.send(INDEXNOW_KEY);
 });
 
 app.get('/robots.txt', (req, res) => {
