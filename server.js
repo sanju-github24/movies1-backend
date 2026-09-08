@@ -2130,6 +2130,27 @@ function mxImg(item, prefs) {
   for (const t of prefs) { const m = infos.find((i) => i && i.type === t && i.url); if (m) return 'https://qqcdnpictest.mxplay.com/' + m.url; }
   const any = infos.find((i) => i && i.url); return any ? 'https://qqcdnpictest.mxplay.com/' + any.url : null;
 }
+/* MX returns a playable stream in one of two shapes, and we only ever read one
+   of them — so every title served by an outside provider looked to us like a
+   title with no stream at all, and came back "No stream" / "No episodes found".
+   Sita Ramam is one: not DRM-protected, freely playable, just described
+   differently.
+
+     own catalogue   → stream.hls.high
+     outside provider→ stream.thirdParty.hlsUrl   (provider: "thirdParty")
+
+   Quality keys are tried in order because a title occasionally carries only a
+   lower one. Anything genuinely protected has no HLS in either shape and is
+   still reported as having no stream, which is correct. */
+function mxHls(node) {
+  const st = node && node.stream;
+  if (!st) return '';
+  const own = st.hls && (st.hls.high || st.hls.medium || st.hls.low);
+  if (own) return own;
+  const tp = st.thirdParty || {};
+  return tp.webHlsUrl || tp.hlsUrl || '';
+}
+
 function mxPlayUrl(hlsPath) {
   const manifest = hlsPath.startsWith('http') ? hlsPath : MX_CDN + hlsPath;
   return `${MX_STREAM_WORKER}/hls/index.m3u8?url=${encodeURIComponent(manifest)}`;
@@ -2151,7 +2172,7 @@ async function mxShowEpisodes(webUrl) {
     description: item.description || '', genres: item.genres || [],
     year: item.releaseDate ? new Date(item.releaseDate).getFullYear() : null,
   };
-  const inline = item.stream && item.stream.hls && item.stream.hls.high;
+  const inline = mxHls(item);
   if (inline) return { type: 'movie', ...base, playUrl: mxPlayUrl(inline) };
 
   // Seasons: the show page SSR lists them under the EPISODES tab's `containers`.
@@ -2160,7 +2181,19 @@ async function mxShowEpisodes(webUrl) {
   if (!seasonConts.length) {
     // Single-season fallback: resolve the season via firstVideo → detail/video.
     const fv = item.firstVideo && item.firstVideo.id;
-    if (!fv) throw new Error('No episodes found');
+    if (!fv) {
+      /* No seasons and no first video: this is a film whose SSR entry carries
+         no stream. Ask the detail API for it by id rather than reporting it as
+         a series with no episodes, which is what it used to do — a wrong and
+         very confusing answer for a movie. */
+      const mid = (idm && idm[1]) || item.id;
+      if (mid && /movie/i.test(item.type || 'movie')) {
+        const dv = await mxApi(`/detail/video?type=movie&id=${encodeURIComponent(mid)}`);
+        const direct = mxHls(dv);
+        if (direct) return { type: 'movie', ...base, playUrl: mxPlayUrl(direct) };
+      }
+      throw new Error('No playable stream for this title');
+    }
     const dv = await mxApi(`/detail/video?type=episode&id=${fv}`);
     const tab = (dv.tabs || []).find((t) => /episode/i.test(t.type || '') && (t.aroundApi || t.api));
     const ref = tab && (tab.aroundApi || tab.api);
@@ -2177,7 +2210,7 @@ async function mxShowEpisodes(webUrl) {
     do {
       const d = await mxApi(`/detail/tab/tvshowepisodes?type=season&id=${sc.id}${next ? '&' + next : ''}`);
       (d.items || []).forEach((it) => {
-        const h = it.stream && it.stream.hls && it.stream.hls.high;
+        const h = mxHls(it);
         if (h) eps.push({
           epId: it.id, season: sc.sequence || 1, number: it.sequence || 1,
           title: it.title || `Episode ${it.sequence || ''}`,
@@ -2194,7 +2227,7 @@ async function mxShowEpisodes(webUrl) {
 // Resolve a movie/episode directly by MX content id (for items that lack a webUrl).
 async function mxResolveById(id, type) {
   const d = await mxApi(`/detail/video?type=${encodeURIComponent(type)}&id=${encodeURIComponent(id)}`);
-  const hls = d.stream && d.stream.hls && d.stream.hls.high;
+  const hls = mxHls(d);
   if (!hls) throw new Error('No stream for ' + id);
   return {
     type: 'movie',
