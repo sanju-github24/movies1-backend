@@ -3910,11 +3910,24 @@ app.post('/api/push/unsubscribe', async (req, res) => {
 /* Send to everyone, dropping the subscriptions the browser vendor tells us are
    dead. 404/410 means the user uninstalled or revoked; keeping those forever
    turns a broadcast into thousands of pointless requests. */
-async function pushToAll({ title, body, url, image }) {
+async function pushToAll({ title, body, url, image, dryRun }) {
   if (!pushReady) return { skipped: 'push is not configured' };
   const { data, error } = await supabaseAdmin
-    .from('push_subscriptions').select('endpoint, p256dh, auth').limit(20000);
+    .from('push_subscriptions').select('endpoint, p256dh, auth, created_at').limit(20000);
   if (error) throw error;
+
+  /* A dry run answers "who would this reach, and are they real?" without
+     waking anyone up. Hosts only — an endpoint plus its keys is a credential,
+     and this response should never be the thing that leaks one. */
+  if (dryRun) {
+    const hosts = {};
+    for (const r of data || []) {
+      let h = 'unparseable';
+      try { h = new URL(r.endpoint).hostname; } catch { /* keep the placeholder */ }
+      hosts[h] = (hosts[h] || 0) + 1;
+    }
+    return { dryRun: true, total: (data || []).length, hosts };
+  }
 
   const payload = JSON.stringify({ title, body, url, image });
   let sent = 0; const dead = [];
@@ -3956,11 +3969,42 @@ app.post('/api/push/broadcast', async (req, res) => {
       body: name,
       url: `${SITE_ORIGIN}/watch/${encodeURIComponent(slug)}`,
       image: data?.poster || undefined,
+      dryRun: req.body?.dryRun === true,
     });
     console.log(`🔔 push "${name}":`, JSON.stringify(out));
     res.json({ success: true, ...out });
   } catch (e) {
     console.error('❌ push broadcast:', e.message);
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
+/* Drop subscriptions by endpoint host. A test row, or a push service that has
+   gone away for good, cannot be pruned by the 404/410 path — a host that does
+   not resolve raises a network error, which is exactly what a transient outage
+   looks like, and deleting real subscribers on one of those would be
+   unforgivable. So it is done deliberately, signed, and never automatically. */
+app.post('/api/push/prune-host', async (req, res) => {
+  const host = String(req.body?.host || '').trim().toLowerCase();
+  const given = String(req.get('x-publish-sig') || '');
+  const secret = process.env.SIGNING_SECRET || '';
+  if (!pushReady) return res.status(503).json({ success: false, error: 'notifications are not configured' });
+  if (!host || !secret) return res.status(400).json({ success: false, error: 'host required' });
+
+  const want = crypto.createHmac('sha256', secret).update(host).digest('hex');
+  const a = Buffer.from(given), b = Buffer.from(want);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return res.status(401).json({ success: false, error: 'bad signature' });
+  }
+  try {
+    const { data } = await supabaseAdmin.from('push_subscriptions').select('endpoint').limit(20000);
+    const doomed = (data || []).filter((r) => {
+      try { return new URL(r.endpoint).hostname.toLowerCase() === host; } catch { return false; }
+    }).map((r) => r.endpoint);
+    if (doomed.length) await supabaseAdmin.from('push_subscriptions').delete().in('endpoint', doomed);
+    console.log(`🧹 pruned ${doomed.length} subscription(s) on ${host}`);
+    res.json({ success: true, pruned: doomed.length });
+  } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
 });
