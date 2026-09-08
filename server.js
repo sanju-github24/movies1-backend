@@ -3728,6 +3728,40 @@ app.get('/sitemap.xml', async (req, res) => {
     console.error('❌ sitemap blogs:', e.message);
   }
 
+  /* ── Language collections ──
+     Six pages that gather the catalogue by language. They rank for the queries
+     a person actually types when they have no particular film in mind
+     ("kannada movies 2026"), and they give the crawler a path into the 1700
+     title pages below, which otherwise hang off nothing. */
+  for (const lang of ['Hindi', 'Telugu', 'Tamil', 'Kannada', 'Malayalam', 'English']) {
+    urls.push({
+      loc: `${SITE_ORIGIN}/category/${encodeURIComponent(lang)}`,
+      lastmod: today, changefreq: 'daily', priority: '0.8',
+    });
+  }
+
+  // ── Download pages (the movies table) ──
+  try {
+    const { data, error } = await supabase
+      .from('movies')
+      .select('slug, poster, created_at')
+      .order('created_at', { ascending: false })
+      .limit(5000);
+    if (error) throw error;
+    for (const m of data || []) {
+      if (!m.slug) continue;
+      urls.push({
+        loc: `${SITE_ORIGIN}/movie/${encodeURIComponent(m.slug)}`,
+        lastmod: m.created_at ? new Date(m.created_at).toISOString().slice(0, 10) : undefined,
+        changefreq: 'weekly',
+        priority: '0.6',
+        image: m.poster || undefined,
+      });
+    }
+  } catch (e) {
+    console.error('❌ sitemap movie pages:', e.message);
+  }
+
   // ── Title pages (every watch page in the library) ──
   // These were never listed, so nothing in the catalogue was discoverable from
   // search at all: a title existed only for someone who already knew the slug.
