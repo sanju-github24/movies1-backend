@@ -4117,6 +4117,31 @@ async function announceOnTelegram({ name, url, poster, facets }) {
   }
 }
 
+/* Where to send a visitor who wants the channel.
+   Served rather than hardcoded in the frontend: the link then always matches
+   whatever TELEGRAM_CHANNEL is actually set to, and changing channels needs no
+   site deploy. A private channel (-100…) has no public link, so the bot is
+   asked for its username once and the answer is kept. */
+let channelLink = null;      // null = not resolved yet, '' = none available
+app.get('/api/telegram/channel', async (req, res) => {
+  if (!telegramReady) return res.json({ enabled: false });
+  if (channelLink === null) {
+    if (TELEGRAM_CHANNEL.startsWith('@')) {
+      channelLink = `https://t.me/${TELEGRAM_CHANNEL.slice(1)}`;
+    } else {
+      try {
+        const chat = await tg('getChat', {});
+        channelLink = chat?.username ? `https://t.me/${chat.username}` : '';
+      } catch (e) {
+        console.warn('   telegram getChat failed:', e.message);
+        channelLink = '';
+      }
+    }
+  }
+  res.set('Cache-Control', 'public, max-age=300');
+  res.json({ enabled: !!channelLink, url: channelLink || undefined });
+});
+
 /* A release name is not a notification. "Kantara (2022) TRUE WEB-DL - [4K...]"
    on a lock screen is unreadable; the title alone is what someone recognises.
    Same rule the pages use: cut at the year, keep the name whole. */
