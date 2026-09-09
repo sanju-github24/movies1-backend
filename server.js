@@ -607,6 +607,7 @@ let _iccHarvesting = false;
    hours instead, in the background, so a request is never made to wait for it. */
 let _iccHarvestedAt = 0;
 let _iccHarvestError = null;
+let _iccPhase = 'idle';   // where the harvest has got to, for the status endpoint
 const ICC_HARVEST_TTL = 6 * 60 * 60 * 1000;
 async function iccHarvestHighlights() {
   if (_iccHarvesting) return;
@@ -648,6 +649,7 @@ async function iccHarvestHighlights() {
        timeout on every navigation. The scrolling below is what actually loads
        the cards. On a small instance this was the difference between a run
        measured in minutes and one measured in quarter-hours. */
+    _iccPhase = 'loading hub';
     await page.goto('https://www.icc-cricket.com/videos/category/highlights', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     await wait(2500);
     await scrollThrough(6);
@@ -656,7 +658,10 @@ async function iccHarvestHighlights() {
     )]).then(a => a.slice(0, 3));
 
     const links = [];
+    _iccPhase = `hubs: 0/${hubs.length}`;
+    let hubN = 0;
     for (const hub of hubs) {
+      _iccPhase = `hubs: ${++hubN}/${hubs.length}`;
       await page.goto(hub, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
       await wait(2500);
       await scrollThrough(4);
@@ -683,6 +688,7 @@ async function iccHarvestHighlights() {
     await iccUpsert(ICC_SEED.map((v, i) => ({ ...v, sort: 1000 + i })));
     for (const l of links) {                       // sequential = reliable; persist incrementally
       if (Date.now() > deadline) { console.warn('[icc] harvest hit its 4-minute deadline'); break; }
+      _iccPhase = `videos: ${links.indexOf(l) + 1}/${links.length}, stored ${stored}`;
       const found = new Map();
       const handler = async (r) => {
         const m = r.url().match(/video\/videodata\/v2\/([0-9a-f-]{36})/i);
@@ -694,6 +700,7 @@ async function iccHarvestHighlights() {
       page.off('response', handler);
       if (found.size) { await iccUpsert([...found.values()].map(v => ({ ...v, sort: sort++ }))); stored += found.size; }
     }
+    _iccPhase = `done, stored ${stored}`;
     return stored;
   } finally {
     if (browser) await browser.close().catch(() => {});
@@ -722,7 +729,15 @@ app.get('/api/icc/highlights', async (req, res) => {
            page serving a finished tournament's videos, with the timestamp
            already stamped so nothing retried for six hours. A failure now says
            what went wrong and comes back in ten minutes instead. */
-        iccHarvestHighlights()
+        /* A ceiling on the whole run, not just the video loop. The first
+           attempt sat "running" for a quarter of an hour with no error, which
+           on a small instance means a Chromium holding memory indefinitely —
+           a background job needs a stopping condition it cannot talk its way
+           out of. */
+        Promise.race([
+          iccHarvestHighlights(),
+          new Promise((_, rej) => setTimeout(() => rej(new Error(`timed out after 6 min at phase: ${_iccPhase}`)), 6 * 60 * 1000)),
+        ])
           .then((n) => { _iccHarvestError = null; console.log(`[icc] harvest stored ${n} video(s)`); })
           .catch((e) => {
             _iccHarvestError = e.message || String(e);
@@ -4461,6 +4476,7 @@ app.get('/api/icc/harvest-status', (req, res) => {
   res.json({
     lastRunAt: _iccHarvestedAt ? new Date(_iccHarvestedAt).toISOString() : null,
     running: _iccHarvesting,
+    phase: _iccPhase,
     lastError: _iccHarvestError,
   });
 });
