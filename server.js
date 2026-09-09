@@ -1544,6 +1544,79 @@ app.get("/api/bcci/highlights", async (req, res) => {
   return res.json({ success: true, videos: [], page, total: 0, totalPages: 1, hasMore: false });
 });
 
+/* ─────────────────────────────────────────────────────────────────────
+   BCCI moved. scores2.bcci.tv answers 503 for every request — its DNS entry
+   is dead at the CDN, not merely quiet — so the live/upcoming/recent feeds had
+   been returning empty lists for as long as that has been true. bcciProxy
+   degrades to an empty list rather than an error, which is good behaviour and
+   is exactly why this looked like "no matches today" instead of an outage.
+
+   The site now reads stats.bcci.tv:
+     /match/fixtures/?team_id=6   forthcoming (newest first)
+     /match/results/?team_id=6    completed, already newest first
+     /match/live_scores/          in progress; unparameterised, so it is small
+   team_id 6 is India men (2295 is India Women, 1597 India A).
+
+   The field names are entirely different, so responses are mapped back to the
+   old scores2 shape the frontend already reads. That keeps this fix on one
+   side of the wire — nothing on the page had to change.
+   ───────────────────────────────────────────────────────────────────── */
+const BCCI_STATS = 'https://stats.bcci.tv/match';
+const BCCI_INDIA_MEN = '6';
+
+function bcciStatsToLegacy(m) {
+  const utc = String(m.start_datetime_utc || '');
+  const order = m.match_round
+    || (m.tournament_match_number ? `Match ${m.tournament_match_number}` : '')
+    || (m.match_short_name || '').split(',')[1]?.trim() || '';
+  /* The live feed is not shaped like fixtures/results: it identifies a match by
+     `gid` and carries no match_id or start_date at all. Falling back keeps a
+     live match from being filtered out for want of an id — which is the one
+     time the sports page most needs it. */
+  const date = m.start_date || (utc ? utc.split(' ')[0] : '');
+  return {
+    MatchID: String(m.match_id ?? m.gid ?? ''),
+    MatchName: m.match_short_name || m.name || '',
+    CompetitionID: String(m.comp_id ?? ''),
+    CompetitionName: m.comp_name || m.alt_comp_name || '',
+    MatchOrder: order,
+    MatchDate: date,
+    MatchDateNew: date,
+    MatchTime: utc.includes(' ') ? utc.split(' ')[1].slice(0, 5) : '',
+    MatchType: (Array.isArray(m.class) && m.class[0]?.name) || m.comp_type || '',
+    GroundName: m.ground_name || m.ground_short_name || '',
+    HomeTeamName: m.team1_name || '',
+    AwayTeamName: m.team2_name || '',
+    FirstBattingTeamName: m.team1_name || '',
+    SecondBattingTeamName: m.team2_name || '',
+    FirstBattingTeamCode: m.team1_abbreviation || (m.team1_name || '').slice(0, 3).toUpperCase(),
+    SecondBattingTeamCode: m.team2_abbreviation || (m.team2_name || '').slice(0, 3).toUpperCase(),
+    FirstBattingTeamID: String(m.team1_id ?? ''),
+    SecondBattingTeamID: String(m.team2_id ?? ''),
+    MatchStatus: m.match_status || '',
+    MatchResult: m.result_string || '',
+    GroundCity: m.ground_city || '',
+    StartDateTimeUTC: utc,
+  };
+}
+
+/* One fetch, mapped, with the same "empty rather than error" contract the old
+   proxy had — a dead upstream must not turn the sports page into a stack of
+   console errors. */
+async function bcciStats(res, path, emptyKey, pick = (j) => j.match || []) {
+  try {
+    const r = await fetch(`${BCCI_STATS}/${path}`, {
+      headers: BCCI_HEADERS, signal: AbortSignal.timeout(20000),
+    });
+    if (!r.ok) return res.json({ [emptyKey]: [], upstreamUnavailable: true, upstreamStatus: r.status });
+    const j = await r.json();
+    const list = (pick(j) || []).map(bcciStatsToLegacy).filter((m) => m.MatchID && m.HomeTeamName);
+    res.json({ [emptyKey]: list });
+  } catch (e) {
+    res.json({ [emptyKey]: [], upstreamUnavailable: true, error: e.message });
+  }
+}
+
 // When BCCI's scores2 API is down (503, common in the off-season) or unreachable,
 // return 200 with an EMPTY list of the expected shape instead of 502/500. The
 // frontend reads `liveMatches`/`upcomingMatches`/`recentMatches` and degrades to
@@ -1559,16 +1632,18 @@ async function bcciProxy(res, url, emptyKey) {
   }
 }
 
+/* Live is deliberately NOT filtered by team: the feed is small, and the page
+   applies its own India filter — asking for team_id=6 would hide a live match
+   the moment BCCI files it under a different team id. */
 app.get("/api/bcci/live", (req, res) =>
-  bcciProxy(res, "https://scores2.bcci.tv/getLiveMatches?platform=international&previousMatchesCount=0&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false", "liveMatches"));
+  bcciStats(res, "live_scores/", "liveMatches", (j) => j.live_scores || []));
 
 app.get("/api/bcci/upcoming", (req, res) =>
-  bcciProxy(res, "https://scores2.bcci.tv/getUpcomingMatches?platform=international&previousMatchesCount=0&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false", "upcomingMatches"));
+  bcciStats(res, `fixtures/?team_id=${BCCI_INDIA_MEN}`, "upcomingMatches"));
 
-app.get("/api/bcci/recent", (req, res) => {
-  const count = parseInt(req.query.count) || 15;
-  bcciProxy(res, `https://scores2.bcci.tv/getRecentMatches?platform=international&previousMatchesCount=${count}&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false`, "recentMatches");
-});
+app.get("/api/bcci/recent", (req, res) =>
+  // results/ comes back newest first, so page one is what "recent" means.
+  bcciStats(res, `results/?team_id=${BCCI_INDIA_MEN}`, "recentMatches"));
 
 // ─── FanCode scorecard (public score DATA only — NOT the video stream) ─────────
 // FanCode renders the full cricket scorecard into `window.__INIT_STATE__` on the
@@ -3658,14 +3733,22 @@ const MATCH_ENTRIES_TTL = 10 * 60 * 1000;
 
 async function bcciEntries() {
   const out = [];
-  const feeds = [['live', 'liveMatches'], ['upcoming', 'upcomingMatches'], ['recent', 'recentMatches']];
+  /* Same move as the routes above: scores2 is gone, stats.bcci.tv replaces it.
+     This is why the sitemap listed no matches at all — every fixture URL we
+     publish for search comes through here. */
+  const feeds = [
+    ['live_scores/', 'live_scores'],
+    [`fixtures/?team_id=${BCCI_INDIA_MEN}`, 'match'],
+    [`results/?team_id=${BCCI_INDIA_MEN}`, 'match'],
+  ];
   await Promise.all(feeds.map(async ([path, key]) => {
     try {
-      const url = `https://scores2.bcci.tv/get${path[0].toUpperCase()}${path.slice(1)}Matches?platform=international&previousMatchesCount=0&filterType=All&filters%5Bformat%5D%5B%5D=AllFormat&loadMore=false`;
-      const r = await fetch(url, { headers: BCCI_HEADERS, signal: AbortSignal.timeout(15000) });
+      const url = `${BCCI_STATS}/${path}`;
+      const r = await fetch(url, { headers: BCCI_HEADERS, signal: AbortSignal.timeout(20000) });
       if (!r.ok) return;
       const j = await r.json();
-      for (const row of (j?.[key] || [])) {
+      for (const raw of (j?.[key] || [])) {
+        const row = bcciStatsToLegacy(raw);
         const e = bcciMatchEntry(row);
         if (e) out.push(e);
       }
