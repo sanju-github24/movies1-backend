@@ -643,16 +643,23 @@ async function iccHarvestHighlights() {
     const scrollThrough = async (n) => {
       for (let y = 0; y < n; y++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await wait(700); }
     };
-    await page.goto('https://www.icc-cricket.com/videos/category/highlights', { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
-    await scrollThrough(8);
+    /* domcontentloaded, not networkidle2: these pages carry ad and analytics
+       traffic that never falls quiet, so networkidle2 waits out its full 60s
+       timeout on every navigation. The scrolling below is what actually loads
+       the cards. On a small instance this was the difference between a run
+       measured in minutes and one measured in quarter-hours. */
+    await page.goto('https://www.icc-cricket.com/videos/category/highlights', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await wait(2500);
+    await scrollThrough(6);
     const hubs = await page.evaluate(() => [...new Set(
       Array.from(document.querySelectorAll('a[href*="/videos/categories/"]')).map(a => a.href)
-    )]).then(a => a.slice(0, 4));
+    )]).then(a => a.slice(0, 3));
 
     const links = [];
     for (const hub of hubs) {
-      await page.goto(hub, { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
-      await scrollThrough(5);
+      await page.goto(hub, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await wait(2500);
+      await scrollThrough(4);
       /* Note "categor(y|ies)": the old filter excluded /category/ only, so the
          hub links themselves passed as videos and were opened for a payload
          they could never have. */
@@ -660,16 +667,22 @@ async function iccHarvestHighlights() {
         Array.from(document.querySelectorAll('a[href*="/videos/"]')).map(a => a.href)
           .filter(h => h && /\/videos\//.test(h) && !/\/categor(y|ies)\//.test(h))
       )]);
-      for (const f of found.slice(0, 10)) if (!links.includes(f)) links.push(f);
-      if (links.length >= 32) break;
+      for (const f of found.slice(0, 8)) if (!links.includes(f)) links.push(f);
+      if (links.length >= 18) break;
     }
 
     /* ICC lists newest first, so a fresh harvest takes the low sort values and
        shows at the top. The seed is pushed behind it — it is a fallback for an
        empty table, not something that should outrank live content. */
     let sort = 0, stored = 0;
+    /* A background browser job with no deadline will happily hold memory on a
+       small instance for as long as the network lets it. Whatever is collected
+       by the cutoff is kept — each video is upserted as it is found, so a run
+       that stops early still leaves the page better than it was. */
+    const deadline = Date.now() + 4 * 60 * 1000;
     await iccUpsert(ICC_SEED.map((v, i) => ({ ...v, sort: 1000 + i })));
     for (const l of links) {                       // sequential = reliable; persist incrementally
+      if (Date.now() > deadline) { console.warn('[icc] harvest hit its 4-minute deadline'); break; }
       const found = new Map();
       const handler = async (r) => {
         const m = r.url().match(/video\/videodata\/v2\/([0-9a-f-]{36})/i);
