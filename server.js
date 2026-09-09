@@ -613,16 +613,22 @@ async function iccHarvestHighlights() {
   _iccHarvesting = true;
   const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36';
   const wait = (ms) => new Promise(r => setTimeout(r, ms));
-  const browser = await puppeteer.launch({
+  /* launch() used to sit outside the try, so when it threw — which it did on
+     every run, for want of a Chrome — the finally never ran and _iccHarvesting
+     stayed true for the life of the process. The guard at the top then turned
+     every later attempt into a silent no-op, so even fixing the browser path
+     would not have helped until the next restart. */
+  let browser = null;
+  try {
+    browser = await puppeteer.launch({
     /* findChromeExecutable, not getChromiumPath: on Render, Puppeteer's own
        downloaded Chrome is not there at runtime, and getChromiumPath returns
        null so launch() fails with "Could not find Chrome". Playwright's copy
        does survive, and the prerenderer has been using it all along — this is
        why the harvest failed on every run while prerendering worked fine. */
-    headless: true, executablePath: findChromeExecutable() || undefined,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process'],
-  });
-  try {
+      headless: true, executablePath: findChromeExecutable() || undefined,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process'],
+    });
     const page = await browser.newPage();
     await page.setUserAgent(UA);
     /* Harvest from the evergreen highlights hub, not from one tournament.
@@ -677,7 +683,7 @@ async function iccHarvestHighlights() {
     }
     return stored;
   } finally {
-    await browser.close().catch(() => {});
+    if (browser) await browser.close().catch(() => {});
     _iccHarvesting = false;
   }
 }
