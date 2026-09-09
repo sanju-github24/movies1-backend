@@ -1636,6 +1636,8 @@ function bcciStatsToLegacy(m) {
     MatchResult: m.result_string || '',
     GroundCity: m.ground_city || '',
     StartDateTimeUTC: utc,
+    /* The scorecard endpoint is keyed on the uuid, not the numeric id. */
+    GID: String(m.gid ?? ''),
   };
 }
 
@@ -1791,7 +1793,11 @@ function trimScorecard(inn) {
     BowlingCard: inn.BowlingCard || [],
     FallOfWickets: inn.FallOfWickets || [],
     PartnershipScores: inn.PartnershipScores || [],
-    ballCount: (inn.OverHistory || []).length,
+    /* The innings totals, when the source has them. Without these the page can
+       list every batter and still not be able to say "India 287/6 (50 ov)". */
+    Total: inn.Total, Wickets: inn.Wickets, Overs: inn.Overs, RunRate: inn.RunRate,
+    BattingTeamID: inn.BattingTeamID, BowlingTeamID: inn.BowlingTeamID,
+    ballCount: inn.ballCount ?? (inn.OverHistory || []).length,
   };
 }
 
@@ -3495,21 +3501,87 @@ function withTimeout(promise, ms) {
   ]).finally(() => clearTimeout(timer));
 }
 
+/* One request returns the whole match — every innings, both squads — where the
+   old endpoint took one innings at a time. Cached briefly so asking for four
+   innings does not fetch the same document four times. */
+const _scorecardCache = new Map();
+async function bcciScorecard(gid) {
+  const hit = _scorecardCache.get(gid);
+  if (hit && Date.now() - hit.ts < 15000) return hit.data;
+  const r = await withTimeout(fetch(`${BCCI_STATS}/${encodeURIComponent(gid)}/scorecard`,
+    { headers: BCCI_HEADERS }), 12000);
+  if (!r.ok) return null;
+  const data = await r.json();
+  _scorecardCache.set(gid, { data, ts: Date.now() });
+  if (_scorecardCache.size > 200) _scorecardCache.delete(_scorecardCache.keys().next().value);
+  return data;
+}
+
+/* stats.bcci.tv gives ids where the page wants names, and snake_case where the
+   page reads PascalCase — so an innings is translated into the card shape the
+   match centre already renders, rather than rewriting the match centre. */
+function bcciInningsToCard(inn, playersById) {
+  const nameOf = (id) => {
+    const p = playersById.get(String(id));
+    return p ? (p.known_as || p.name || p.short_name || '') : '';
+  };
+  return {
+    Extras: [{
+      Byes: inn.byes ?? 0, LegByes: inn.legbyes ?? 0, Wides: inn.wides ?? 0,
+      NoBalls: inn.noballs ?? 0, Penalty: inn.penalties ?? 0, Total: inn.extras ?? 0,
+    }],
+    Total: inn.runs ?? 0,
+    Wickets: inn.wickets ?? 0,
+    Overs: inn.overs ?? '',
+    RunRate: inn.run_rate ?? '',
+    BattingTeamID: String(inn.batting_team_id ?? ''),
+    BowlingTeamID: String(inn.bowling_team_id ?? ''),
+    BattingCard: (inn.batting || []).map((b) => ({
+      PlayerName: nameOf(b.player_id),
+      BatsmanName: nameOf(b.player_id),
+      PlayerID: String(b.player_id ?? ''),
+      Runs: b.runs ?? '0', Balls: b.balls_faced ?? '0',
+      Fours: b.fours ?? '0', Sixes: b.sixes ?? '0',
+      StrikeRate: b.strike_rate ?? '',
+      // "b Fernando", "c Mendis b Asitha" — already formatted upstream.
+      OutDesc: b.dismissal_str || (b.is_out === '1' ? b.dismissal_name || 'out' : 'not out'),
+      HowOut: b.dismissal_str || (b.is_out === '1' ? b.dismissal_name || 'out' : 'not out'),
+      IsOut: b.is_out === '1',
+      BattingOrder: b.batting_position ?? '',
+      Batted: b.batted === 'yes',
+    })),
+    BowlingCard: (inn.bowling || []).map((b) => ({
+      PlayerName: nameOf(b.player_id),
+      BowlerName: nameOf(b.player_id),
+      PlayerID: String(b.player_id ?? ''),
+      Overs: b.overs ?? '', Maidens: b.maidens ?? '0',
+      Runs: b.conceded ?? '0', Wickets: b.wickets ?? '0',
+      Economy: b.bowling_economy_rate ?? '',
+      Wides: b.wides ?? '0', NoBalls: b.noballs ?? '0',
+    })),
+    FallOfWickets: (inn.fow || []).map((f) => ({
+      Runs: f.fow_runs ?? '', Wickets: f.fow_wickets ?? '',
+      Overs: f.fow_overs ?? '', PlayerName: nameOf(f.out_player_id),
+    })),
+    PartnershipScores: [],
+    ballCount: Number(inn.balls_bowled ?? 0),
+  };
+}
+
 async function fetchInnings(type, id, n) {
   try {
     if (type === 'ipl') {
       const data = await withTimeout(fetchIPL(`${id}-Innings${n}.js`), 8000);
       return data?.[`Innings${n}`]?.BattingCard ? data[`Innings${n}`] : null;
     }
-    const url = 'https://www.bcci.tv/fetch-inning'
-      + `?inning=Innings${n}&competitionId=${encodeURIComponent(id)}`
-      + '&feedSource=https://scores.bcci.tv/feeds-international/scoringfeeds'
-      + '&section=scorecard&refresh=false';
-    const r = await withTimeout(fetch(url, { headers: BCCI_HEADERS }), 8000);
-    if (!r.ok) return null;
-    const data = await r.json();
-    // An innings that hasn't been played yet comes back as [], not as an object.
-    return (data && !Array.isArray(data) && data.BattingCard) ? data : null;
+    /* bcci.tv/fetch-inning now 404s — the scorecard moved to stats.bcci.tv with
+       the rest of the feeds, so the match centre had no data at all. */
+    const doc = await bcciScorecard(id);
+    const inn = (doc?.innings || []).find((x) => Number(x.innings_number) === Number(n));
+    if (!inn || !(inn.batting || []).length) return null;
+    const playersById = new Map();
+    for (const t of doc.team || []) for (const pl of t.player || []) playersById.set(String(pl.player_id), pl);
+    return bcciInningsToCard(inn, playersById);
   } catch (_) {
     return null;
   }
