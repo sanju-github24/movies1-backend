@@ -602,7 +602,11 @@ async function iccUpsert(list) {
 iccUpsert(ICC_SEED.map((v, i) => ({ ...v, sort: i })));
 
 let _iccHarvesting = false;
-let _iccHarvestedOnce = false;
+/* Once per process was once per deploy: a long-running instance kept serving
+   whatever it harvested at boot, however old. Re-harvested on demand after six
+   hours instead, in the background, so a request is never made to wait for it. */
+let _iccHarvestedAt = 0;
+const ICC_HARVEST_TTL = 6 * 60 * 60 * 1000;
 async function iccHarvestHighlights() {
   if (_iccHarvesting) return;
   _iccHarvesting = true;
@@ -615,12 +619,44 @@ async function iccHarvestHighlights() {
   try {
     const page = await browser.newPage();
     await page.setUserAgent(UA);
-    await page.goto('https://www.icc-cricket.com/tournaments/mens-t20-world-cup-2026/videos/category/highlights-icc-men-s-t20-world-cup-2026', { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
-    for (let y = 0; y < 12; y++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await wait(700); }
-    const links = await page.evaluate(() => [...new Set(
-      Array.from(document.querySelectorAll('a[href*="/videos/"]')).map(a => a.href).filter(h => h && !/\/category\//.test(h) && /\/videos\//.test(h))
-    )]).then(a => a.slice(0, 40));
-    let sort = ICC_SEED.length;
+    /* Harvest from the evergreen highlights hub, not from one tournament.
+       This was pinned to the men's T20 World Cup 2026 highlights page, which
+       still answers 200 — so nothing looked broken — but that tournament is
+       over, so every harvest returned the same finished-event videos and the
+       page has been showing them ever since.
+
+       /videos/category/highlights lists tournament hubs rather than videos, so
+       it takes two hops: hub → tournament → videos. The hub reflects whatever
+       ICC is currently publishing, which is the point. */
+    const scrollThrough = async (n) => {
+      for (let y = 0; y < n; y++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await wait(700); }
+    };
+    await page.goto('https://www.icc-cricket.com/videos/category/highlights', { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+    await scrollThrough(8);
+    const hubs = await page.evaluate(() => [...new Set(
+      Array.from(document.querySelectorAll('a[href*="/videos/categories/"]')).map(a => a.href)
+    )]).then(a => a.slice(0, 4));
+
+    const links = [];
+    for (const hub of hubs) {
+      await page.goto(hub, { waitUntil: 'networkidle2', timeout: 60000 }).catch(() => {});
+      await scrollThrough(5);
+      /* Note "categor(y|ies)": the old filter excluded /category/ only, so the
+         hub links themselves passed as videos and were opened for a payload
+         they could never have. */
+      const found = await page.evaluate(() => [...new Set(
+        Array.from(document.querySelectorAll('a[href*="/videos/"]')).map(a => a.href)
+          .filter(h => h && /\/videos\//.test(h) && !/\/categor(y|ies)\//.test(h))
+      )]);
+      for (const f of found.slice(0, 10)) if (!links.includes(f)) links.push(f);
+      if (links.length >= 32) break;
+    }
+
+    /* ICC lists newest first, so a fresh harvest takes the low sort values and
+       shows at the top. The seed is pushed behind it — it is a fallback for an
+       empty table, not something that should outrank live content. */
+    let sort = 0;
+    await iccUpsert(ICC_SEED.map((v, i) => ({ ...v, sort: 1000 + i })));
     for (const l of links) {                       // sequential = reliable; persist incrementally
       const found = new Map();
       const handler = async (r) => {
@@ -654,7 +690,10 @@ app.get('/api/icc/highlights', async (req, res) => {
     if (!error && data && data.length) {
       const total = count ?? data.length;
       res.json({ success: true, videos: data, total, hasMore: offset + data.length < total });
-      if (!_iccHarvestedOnce) { _iccHarvestedOnce = true; iccHarvestHighlights().catch(() => {}); }
+      if (Date.now() - _iccHarvestedAt > ICC_HARVEST_TTL) {
+        _iccHarvestedAt = Date.now();
+        iccHarvestHighlights().catch(() => {});
+      }
       return;
     }
   } catch {}
