@@ -609,101 +609,115 @@ let _iccHarvestedAt = 0;
 let _iccHarvestError = null;
 let _iccPhase = 'idle';   // where the harvest has got to, for the status endpoint
 const ICC_HARVEST_TTL = 6 * 60 * 60 * 1000;
-async function iccHarvestHighlights() {
-  if (_iccHarvesting) return;
+/* Harvest ICC highlights over plain HTTP — no browser.
+ *
+ * The Puppeteer version never worked in production. It failed to launch at all
+ * for want of a Chrome, and once that was fixed it captured nothing: on a small
+ * shared instance the player never got far enough to request its video data
+ * inside the wait, so 24 pages yielded 0. It is not an IP block — ICC answers
+ * a datacenter perfectly well, which is the whole basis for this rewrite.
+ *
+ * ICC publishes sitemap-video.xml: 100 newest videos with titles, thumbnails
+ * and publication dates, updated daily. That is the listing. Each video page
+ * then carries a handful of candidate ids in its HTML — its own plus whatever
+ * is being promoted alongside it — and the right one is identified by asking
+ * the video API for each candidate's title and keeping the best match against
+ * the title the sitemap already gave us.
+ *
+ * Matching is best-of rather than exact: ICC calls the same fixture "Czechia v
+ * Bulgaria" in the sitemap and "Czech Republic v Bulgaria" in the video title,
+ * so equality throws away good rows. Verified across the eight newest videos:
+ * all eight resolved, all distinct.
+ */
+const ICC_SITEMAP = 'https://www.icc-cricket.com/sitemap-video.xml';
+const ICC_VIDEODATA = 'https://feedpublisher-icc.akamaized.net/divauni/ICC/fe/video/videodata/v2';
+const ICC_FETCH_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36',
+  'Referer': 'https://www.icc-cricket.com/',
+  'Accept-Language': 'en',
+};
+
+const iccUnescape = (s = '') => String(s)
+  .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+  .replace(/&quot;/g, '"').replace(/&#0?39;|&apos;|&rsquo;|&#8217;/g, "'");
+
+function iccNorm(s = '') {
+  return iccUnescape(s).toLowerCase()
+    .replace(/czech republic/g, 'czechia')            // ICC uses both spellings
+    .replace(/[^a-z0-9]+/g, ' ').trim();
+}
+const iccHead = (s = '') => iccNorm(s).split(' match highlights')[0].split(' | ')[0];
+
+/** Similarity of two titles, on the whole string and on the fixture alone. */
+function iccScore(a, b) {
+  const ratio = (x, y) => {
+    if (!x || !y) return 0;
+    if (x === y) return 1;
+    const [long, short] = x.length >= y.length ? [x, y] : [y, x];
+    let hits = 0;
+    for (const w of new Set(short.split(' '))) if (w.length > 2 && long.includes(w)) hits += w.length;
+    return hits / long.length;
+  };
+  return Math.max(ratio(iccNorm(a), iccNorm(b)), ratio(iccHead(a), iccHead(b)));
+}
+
+async function iccGet(url, timeout = 20000) {
+  const r = await fetch(url, { headers: ICC_FETCH_HEADERS, signal: AbortSignal.timeout(timeout) });
+  return r.ok ? r.text() : '';
+}
+
+async function iccHarvestHighlights(limit = 14) {
+  if (_iccHarvesting) return 0;
   _iccHarvesting = true;
-  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137.0 Safari/537.36';
-  const wait = (ms) => new Promise(r => setTimeout(r, ms));
-  /* launch() used to sit outside the try, so when it threw — which it did on
-     every run, for want of a Chrome — the finally never ran and _iccHarvesting
-     stayed true for the life of the process. The guard at the top then turned
-     every later attempt into a silent no-op, so even fixing the browser path
-     would not have helped until the next restart. */
-  let browser = null;
   try {
-    browser = await puppeteer.launch({
-    /* findChromeExecutable, not getChromiumPath: on Render, Puppeteer's own
-       downloaded Chrome is not there at runtime, and getChromiumPath returns
-       null so launch() fails with "Could not find Chrome". Playwright's copy
-       does survive, and the prerenderer has been using it all along — this is
-       why the harvest failed on every run while prerendering worked fine. */
-      headless: true, executablePath: findChromeExecutable() || undefined,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process'],
-    });
-    const page = await browser.newPage();
-    await page.setUserAgent(UA);
-    /* Harvest from the evergreen highlights hub, not from one tournament.
-       This was pinned to the men's T20 World Cup 2026 highlights page, which
-       still answers 200 — so nothing looked broken — but that tournament is
-       over, so every harvest returned the same finished-event videos and the
-       page has been showing them ever since.
+    _iccPhase = 'sitemap';
+    const xml = await iccGet(ICC_SITEMAP, 25000);
+    const blocks = xml.match(/<url>[\s\S]*?<\/url>/g) || [];
+    if (!blocks.length) throw new Error('video sitemap returned nothing');
 
-       /videos/category/highlights lists tournament hubs rather than videos, so
-       it takes two hops: hub → tournament → videos. The hub reflects whatever
-       ICC is currently publishing, which is the point. */
-    const scrollThrough = async (n) => {
-      for (let y = 0; y < n; y++) { await page.evaluate(() => window.scrollBy(0, window.innerHeight)); await wait(700); }
-    };
-    /* domcontentloaded, not networkidle2: these pages carry ad and analytics
-       traffic that never falls quiet, so networkidle2 waits out its full 60s
-       timeout on every navigation. The scrolling below is what actually loads
-       the cards. On a small instance this was the difference between a run
-       measured in minutes and one measured in quarter-hours. */
-    _iccPhase = 'loading hub';
-    await page.goto('https://www.icc-cricket.com/videos/category/highlights', { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-    await wait(2500);
-    await scrollThrough(6);
-    const hubs = await page.evaluate(() => [...new Set(
-      Array.from(document.querySelectorAll('a[href*="/videos/categories/"]')).map(a => a.href)
-    )]).then(a => a.slice(0, 3));
-
-    const links = [];
-    _iccPhase = `hubs: 0/${hubs.length}`;
-    let hubN = 0;
-    for (const hub of hubs) {
-      _iccPhase = `hubs: ${++hubN}/${hubs.length}`;
-      await page.goto(hub, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-      await wait(2500);
-      await scrollThrough(4);
-      /* Note "categor(y|ies)": the old filter excluded /category/ only, so the
-         hub links themselves passed as videos and were opened for a payload
-         they could never have. */
-      const found = await page.evaluate(() => [...new Set(
-        Array.from(document.querySelectorAll('a[href*="/videos/"]')).map(a => a.href)
-          .filter(h => h && /\/videos\//.test(h) && !/\/categor(y|ies)\//.test(h))
-      )]);
-      for (const f of found.slice(0, 8)) if (!links.includes(f)) links.push(f);
-      if (links.length >= 18) break;
-    }
-
-    /* ICC lists newest first, so a fresh harvest takes the low sort values and
-       shows at the top. The seed is pushed behind it — it is a fallback for an
-       empty table, not something that should outrank live content. */
-    let sort = 0, stored = 0;
-    /* A background browser job with no deadline will happily hold memory on a
-       small instance for as long as the network lets it. Whatever is collected
-       by the cutoff is kept — each video is upserted as it is found, so a run
-       that stops early still leaves the page better than it was. */
-    const deadline = Date.now() + 4 * 60 * 1000;
+    /* The seed is a fallback for an empty table, not something that should
+       outrank live content, so it goes behind whatever we harvest. */
     await iccUpsert(ICC_SEED.map((v, i) => ({ ...v, sort: 1000 + i })));
-    for (const l of links) {                       // sequential = reliable; persist incrementally
-      if (Date.now() > deadline) { console.warn('[icc] harvest hit its 4-minute deadline'); break; }
-      _iccPhase = `videos: ${links.indexOf(l) + 1}/${links.length}, stored ${stored}`;
-      const found = new Map();
-      const handler = async (r) => {
-        const m = r.url().match(/video\/videodata\/v2\/([0-9a-f-]{36})/i);
-        if (!m) return;
-        try { const j = await r.json(); if (j && j.videoId && j.sources && j.sources.length) found.set(j.videoId, { uuid: j.videoId, title: j.title || 'ICC Highlights', image: j.image || ICC_HL_IMG(j.videoId) }); } catch {}
-      };
-      page.on('response', handler);
-      try { await Promise.race([ page.goto(l, { waitUntil: 'domcontentloaded', timeout: 30000 }).then(() => wait(3000)), wait(9000) ]); } catch {}
-      page.off('response', handler);
-      if (found.size) { await iccUpsert([...found.values()].map(v => ({ ...v, sort: sort++ }))); stored += found.size; }
+
+    const titleCache = new Map();
+    let sort = 0, stored = 0, n = 0;
+    for (const b of blocks.slice(0, limit)) {
+      n += 1;
+      _iccPhase = `videos: ${n}/${Math.min(limit, blocks.length)}, stored ${stored}`;
+      const loc = /<loc>([^<]+)<\/loc>/.exec(b);
+      const ttl = /<video:title>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/video:title>/.exec(b);
+      const thumb = /<video:thumbnail_loc>(?:<!\[CDATA\[)?([\s\S]*?)(?:\]\]>)?<\/video:thumbnail_loc>/.exec(b);
+      if (!loc || !ttl) continue;
+      const title = iccUnescape(ttl[1].trim());
+
+      const page = await iccGet(iccUnescape(loc[1].trim()), 20000).catch(() => '');
+      if (!page) continue;
+      const cands = [...new Set([...page.matchAll(/videoId\\?":\\?"([0-9a-f-]{36})/g)].map((m) => m[1]))].slice(0, 10);
+
+      let best = null, score = 0;
+      for (const uid of cands) {
+        if (!titleCache.has(uid)) {
+          let meta = null;
+          try { meta = JSON.parse(await iccGet(`${ICC_VIDEODATA}/${uid}`, 15000) || 'null'); } catch { /* not json */ }
+          titleCache.set(uid, meta);
+        }
+        const meta = titleCache.get(uid);
+        if (!meta || !(meta.sources || []).length) continue;
+        const sc = iccScore(meta.title, title);
+        if (sc > score) { best = uid; score = sc; }
+      }
+      if (!best || score < 0.6) continue;
+
+      await iccUpsert([{
+        uuid: best, title,
+        image: (thumb && iccUnescape(thumb[1].trim())) || ICC_HL_IMG(best),
+        sort: sort++,
+      }]);
+      stored += 1;
     }
     _iccPhase = `done, stored ${stored}`;
     return stored;
   } finally {
-    if (browser) await browser.close().catch(() => {});
     _iccHarvesting = false;
   }
 }
