@@ -606,6 +606,7 @@ let _iccHarvesting = false;
    whatever it harvested at boot, however old. Re-harvested on demand after six
    hours instead, in the background, so a request is never made to wait for it. */
 let _iccHarvestedAt = 0;
+let _iccHarvestError = null;
 const ICC_HARVEST_TTL = 6 * 60 * 60 * 1000;
 async function iccHarvestHighlights() {
   if (_iccHarvesting) return;
@@ -655,7 +656,7 @@ async function iccHarvestHighlights() {
     /* ICC lists newest first, so a fresh harvest takes the low sort values and
        shows at the top. The seed is pushed behind it — it is a fallback for an
        empty table, not something that should outrank live content. */
-    let sort = 0;
+    let sort = 0, stored = 0;
     await iccUpsert(ICC_SEED.map((v, i) => ({ ...v, sort: 1000 + i })));
     for (const l of links) {                       // sequential = reliable; persist incrementally
       const found = new Map();
@@ -667,8 +668,9 @@ async function iccHarvestHighlights() {
       page.on('response', handler);
       try { await Promise.race([ page.goto(l, { waitUntil: 'domcontentloaded', timeout: 30000 }).then(() => wait(3000)), wait(9000) ]); } catch {}
       page.off('response', handler);
-      if (found.size) await iccUpsert([...found.values()].map(v => ({ ...v, sort: sort++ })));
+      if (found.size) { await iccUpsert([...found.values()].map(v => ({ ...v, sort: sort++ }))); stored += found.size; }
     }
+    return stored;
   } finally {
     await browser.close().catch(() => {});
     _iccHarvesting = false;
@@ -692,7 +694,17 @@ app.get('/api/icc/highlights', async (req, res) => {
       res.json({ success: true, videos: data, total, hasMore: offset + data.length < total });
       if (Date.now() - _iccHarvestedAt > ICC_HARVEST_TTL) {
         _iccHarvestedAt = Date.now();
-        iccHarvestHighlights().catch(() => {});
+        /* Do not swallow the reason. This ran, failed silently and left the
+           page serving a finished tournament's videos, with the timestamp
+           already stamped so nothing retried for six hours. A failure now says
+           what went wrong and comes back in ten minutes instead. */
+        iccHarvestHighlights()
+          .then((n) => { _iccHarvestError = null; console.log(`[icc] harvest stored ${n} video(s)`); })
+          .catch((e) => {
+            _iccHarvestError = e.message || String(e);
+            _iccHarvestedAt = Date.now() - ICC_HARVEST_TTL + 10 * 60 * 1000;
+            console.error('[icc] harvest failed:', _iccHarvestError);
+          });
       }
       return;
     }
@@ -4417,6 +4429,16 @@ app.get('/api/mx/egress', async (req, res) => {
       error: e.message.slice(0, 200),
     });
   }
+});
+
+/* What the ICC harvester last did. It runs in the background behind a
+   catch, so without this a failure is invisible from outside the box. */
+app.get('/api/icc/harvest-status', (req, res) => {
+  res.json({
+    lastRunAt: _iccHarvestedAt ? new Date(_iccHarvestedAt).toISOString() : null,
+    running: _iccHarvesting,
+    lastError: _iccHarvestError,
+  });
 });
 
 /* Where to send a visitor who wants the channel.
