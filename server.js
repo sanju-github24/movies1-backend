@@ -250,6 +250,51 @@ app.get('/api/cleaned-movies', (req, res) => {
 //      can see EXACTLY what Akamai returned the moment Shaka fails again.
 // =====================================
 
+/* Headers taken from the target itself.
+
+   ICC's are fine for ICC, but the Jio Hotstar streams — Star Sports Digital,
+   the Bigg Boss 24/7 feeds, TATA IPL — answer 403 to anything that does not
+   present Hotstar's own User-Agent, Referer, Origin and an hdntl cookie. Those
+   four are exactly the headers a browser refuses to let a page set on a
+   cross-origin request, which is why those channels cannot play without a
+   proxy doing it server-side.
+
+   The playlists put them in the URL's own query string
+   (?user-agent=&referer=&origin=&cookie=), so the right identity can be read
+   off the target rather than guessed per host, and anything that says nothing
+   keeps the ICC defaults this was written with. */
+function proxyHeadersFor(target) {
+  const base = { ...ICC_PROXY_HEADERS };
+  let u;
+  try { u = new URL(target); } catch { return base; }
+
+  const q = u.searchParams;
+  const ua = q.get('user-agent');
+  const rf = q.get('referer');
+  const og = q.get('origin');
+  const ck = q.get('cookie');
+  if (!ua && !rf && !og && !ck) {
+    // Segment URLs inherit the manifest's identity even when they carry no
+    // params of their own.
+    if (/hotstar\.com$/i.test(u.hostname) || /\.hotstar\.com$/i.test(u.hostname)) {
+      return {
+        ...base,
+        'User-Agent': 'Virat Kohli',
+        'Referer': 'https://www.hotstar.com/',
+        'Origin': 'https://www.hotstar.com',
+      };
+    }
+    return base;
+  }
+
+  const h = { Accept: '*/*' };
+  if (ua) h['User-Agent'] = ua;
+  if (rf) h['Referer'] = rf;
+  if (og) h['Origin'] = og;
+  if (ck) h['Cookie'] = ck;
+  return h;
+}
+
 const ICC_PROXY_HEADERS = {
   'Referer':         'https://www.icc-cricket.com/',
   'Origin':          'https://www.icc-cricket.com',
@@ -301,7 +346,7 @@ app.get('/api/live-stream-proxy', async (req, res) => {
       // interact badly with certain axios versions / interceptors and has
       // been observed to alter XML payloads. Force pass-through instead.
       transformResponse: isText ? [(data) => data] : undefined,
-      headers:      ICC_PROXY_HEADERS,
+      headers:      proxyHeadersFor(targetUrl),
       timeout:      30000,
       maxRedirects: 5,
       validateStatus: () => true, // never throw — we want to log+inspect ALL statuses
