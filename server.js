@@ -170,7 +170,31 @@ if (process.env.PRERENDER_TOKEN) {
   app.use(prerender.set('prerenderToken', process.env.PRERENDER_TOKEN));
 }
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
+/* Writes here (the ICC and BCCI highlight caches) are the server acting as
+   itself, not on behalf of a visitor, so they need the service-role key to get
+   past row-level security. Falls back to the anon key so nothing changes until
+   SUPABASE_SERVICE_ROLE_KEY is set — but once RLS is switched on, these writes
+   fail silently without it. */
+/* A last line of defence. Node makes an unhandled promise rejection fatal, so
+   a single third-party API answering with an HTML error page could — and did —
+   take the whole site down. Every route is guarded individually; this catches
+   whatever is added later and forgotten. Logged loudly rather than swallowed
+   silently, so it still gets fixed at the source. */
+process.on("unhandledRejection", (reason) => {
+  console.error("🔴 Unhandled promise rejection (server kept alive):", reason);
+});
+process.on("uncaughtException", (err) => {
+  console.error("🔴 Uncaught exception (server kept alive):", err);
+});
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY,
+  { auth: { persistSession: false } }
+);
+if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+  console.warn("⚠️  SUPABASE_SERVICE_ROLE_KEY is not set — server-side Supabase writes use the anon key and will be refused once RLS is enabled.");
+}
 
 // =====================================
 // 🎬 FILMIBEAT RSS PROXY
@@ -1552,47 +1576,102 @@ const BCCI_HEADERS = {
 //   date text, duration text, views text, sort int,
 //   created_at timestamptz default now()
 // ─────────────────────────────────────────────────────────────────────
-const BCCI_HL_URL = (page) =>
-  `https://www.bcci.tv/videoslist?slug=highlights&page=${page}&platform=international&type=men`;
+/* BCCI rebuilt bcci.tv. The old feed this parser was written for —
+   /videoslist?slug=highlights&page=N, which answered JSON with a blob of card
+   HTML — now 404s, and the per-match endpoint (api.bcci.tv
+   /pages/getcontentbymatchid) answers 503 with an HTML error page. Both had
+   been dead long enough that no highlight had rendered on the site in a while;
+   the 503's "<HTML>" body was also what crashed this process on an unguarded
+   r.json().
 
-// Parse the <a class="playerpopup" data-*> cards out of the videoData HTML blob.
+   The new site is Next.js over Contentful, with video hosted by StayLive. It
+   server-renders its video cards, so they can still be read without a browser:
+
+     <a href="/videos/{slug}" data-analytics-element-text="{title}" ...>
+       <img src="https://video-images-cdn.staylive.tv/{id}/thumbnail.jpg?...">
+
+   ?page=N is ignored by the new site — it loads more over the wire as you
+   scroll — so one request returns the whole server-rendered set and this
+   paginates over that locally, keeping the route's existing contract. */
+const BCCI_HL_URL = "https://www.bcci.tv/videos?tags=men";
+const BCCI_HL_UA  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+
 function bcciParseHighlightCards(html) {
   const out = [];
   if (!html) return out;
-  const attr = (tag, name) => {
-    const m = tag.match(new RegExp(`data-${name}="([^"]*)"`, "i"));
-    return m ? m[1] : "";
-  };
-  const tags = html.match(/<a[^>]*class="playerpopup"[^>]*>/gi) || [];
-  for (const tag of tags) {
-    const video_url = attr(tag, "video-url");
-    if (!video_url) continue;                       // skip non-video tiles
+  const seen = new Set();
+
+  /* Anchored on the href and scanning forward, rather than matching the whole
+     <a>...</a>: the closing tag sits about 3,000 characters past the opening
+     one in this markup, so a tidier "match the element" regex silently found
+     nothing at all. */
+  const re = /href="(\/videos\/[a-z0-9][a-z0-9-]{8,})"/gi;
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const href = m[1];
+    if (seen.has(href)) continue;
+
+    const win = html.slice(m.index, m.index + 4000);
+    const img = win.match(/src="(https:\/\/video-images-cdn\.staylive\.tv\/([a-z0-9]+)\/thumbnail\.jpg[^"]*)"/i);
+    if (!img) continue;                      // a text link in a nav, not a card
+
+    const t = win.match(/data-analytics-element-text="([^"]*)"/i) || win.match(/alt="([^"]*)"/i);
+    const title = decodeEntities(t?.[1] || "").trim();
+    if (!title) continue;
+
+    seen.add(href);
     out.push({
-      id:        attr(tag, "videoId") || attr(tag, "mediaId"),
-      title:     attr(tag, "videoTitle") || attr(tag, "title"),
-      image:     attr(tag, "thumbnile"),            // BCCI's own attr spelling
-      video_url,
-      share:     attr(tag, "share"),
-      slug:      attr(tag, "videoslug"),
-      date:      attr(tag, "videoDate"),
-      duration: (attr(tag, "duration") || "").trim(),
-      views:     attr(tag, "videoView"),
+      id:        img[2],                                    // StayLive asset id
+      title,
+      image:     img[1].split("?")[0],       // drop the resize query
+      // The page, not a media file: playback is resolved on click through the
+      // stream extractor, the same way the hero opens a highlight.
+      video_url: `https://www.bcci.tv${href}`,
+      share:     `https://www.bcci.tv${href}`,
+      slug:      href.replace("/videos/", ""),
+      date:      "",
+      duration:  "",
+      views:     "",
     });
   }
   return out;
 }
 
-async function bcciFetchHighlightPage(page) {
-  const r = await fetch(BCCI_HL_URL(page), {
-    headers: { ...BCCI_HEADERS, "X-Requested-With": "XMLHttpRequest" },
-  });
-  const j = await r.json().catch(() => null);
-  if (!j || j.status !== true) return { items: [], total: 0, perPage: 20 };
-  return {
-    items:   bcciParseHighlightCards(j.videoData),
-    total:   Number(j.total_results) || 0,
-    perPage: Number(j.entries_per_page) || 20,
-  };
+function decodeEntities(str) {
+  return String(str)
+    .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"').replace(/&#(\d+);/g, (_, d) => String.fromCharCode(d))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/&apos;|&#39;/g, "'").replace(/&nbsp;/g, " ");
+}
+
+/* Match highlights only.
+
+   bcci.tv offers ?category=highlights, but the filter is applied in the
+   browser: the server renders the same "latest videos" set whatever the query
+   says, and the RSC payload for the filtered route carries the identical 16
+   ids. So the category cannot be asked for over HTTP — it has to be recognised
+   from what comes back.
+
+   Their highlight clips are titled to a house style that says so outright:
+   "IND vs AFG 2026, 3rd ODI: Match Highlights". Interviews, press conferences
+   and dressing-room clips never are. Matching on that keeps the row to actual
+   match highlights and drops the rest. */
+const looksLikeHighlight = (title) => /\bhighlights?\b/i.test(String(title || ""));
+
+let _bcciHlCache = { ts: 0, items: [] };
+async function bcciFetchAllHighlights() {
+  if (Date.now() - _bcciHlCache.ts < 5 * 60 * 1000 && _bcciHlCache.items.length) {
+    return _bcciHlCache.items;
+  }
+  const r = await withTimeout(fetch(BCCI_HL_URL, {
+    headers: { "User-Agent": BCCI_HL_UA, Accept: "text/html" },
+    redirect: "follow",
+  }), 15000);
+  if (!r.ok) return _bcciHlCache.items;          // keep whatever we last had
+  const items = bcciParseHighlightCards(await r.text()).filter(v => looksLikeHighlight(v.title));
+  _bcciHlCache = { ts: Date.now(), items };
+  return items;
 }
 
 async function bcciUpsertHighlights(items, baseSort) {
@@ -1609,28 +1688,30 @@ async function bcciUpsertHighlights(items, baseSort) {
   } catch (e) { console.warn("[bcci] highlights upsert failed (create table?):", e.message); }
 }
 
-// One Load More click = one page. Fetches live from BCCI (so new matches always
-// appear on page 1), persists to Supabase, and returns that page. If the live
-// fetch fails, falls back to whatever we already saved in the DB for that range.
+/* One Load More click = one page. bcci.tv now returns its whole server-rendered
+   list in a single response, so this fetches that once (cached) and slices it,
+   rather than asking upstream per page. Supabase keeps a copy so the row still
+   fills if bcci.tv is unreachable — which, on this integration's history, is
+   worth assuming will happen again. */
 app.get("/api/bcci/highlights", async (req, res) => {
   const page = Math.max(parseInt(req.query.page) || 1, 1);
-  const PER = 20;
-  try {
-    const { items, total, perPage } = await bcciFetchHighlightPage(page);
-    if (items.length) {
-      const totalPages = Math.max(1, Math.ceil(total / (perPage || PER)));
-      bcciUpsertHighlights(items, (page - 1) * (perPage || PER)).catch(() => {});
-      return res.json({
-        success: true, videos: items, page, total, totalPages,
-        hasMore: page < totalPages,
-      });
+  const PER  = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 50);
+  const from = (page - 1) * PER;
+
+  /* Top up the stored catalogue with anything new BCCI has published, then
+     serve the catalogue. Failing to reach bcci.tv is not an error here — it
+     only means no new clips this time. */
+  if (page === 1) {
+    try {
+      const fresh = await bcciFetchAllHighlights();
+      // Negative sort puts new clips ahead of the existing rows, which run 0..n.
+      if (fresh.length) await bcciUpsertHighlights(fresh, -1000);
+    } catch (e) {
+      console.warn("[bcci] highlights refresh skipped:", e.message);
     }
-  } catch (e) {
-    console.error("[bcci] highlights live fetch failed:", e.message);
   }
-  // Fallback: serve saved rows for this page from Supabase.
+
   try {
-    const from = (page - 1) * PER;
     const { data, count } = await supabase
       .from("bcci_highlights")
       .select("id,title,image,video_url,share,date,duration,views", { count: "exact" })
@@ -1644,7 +1725,9 @@ app.get("/api/bcci/highlights", async (req, res) => {
         hasMore: from + data.length < total,
       });
     }
-  } catch {}
+  } catch (e) {
+    console.error("[bcci] highlights read failed:", e.message);
+  }
   return res.json({ success: true, videos: [], page, total: 0, totalPages: 1, hasMore: false });
 });
 
@@ -2188,10 +2271,22 @@ app.get('/api/cricket/photo', async (req, res) => {
 // International only. IPL video comes from apiipl.iplt20.com instead, via
 // /api/ipl/highlight-videos above — this API has no IPL library.
 app.get("/api/bcci/highlight", async (req, res) => {
-  const { smMatchId } = req.query;
-  const r = await fetch(`https://api.bcci.tv/api/v1/pages/getcontentbymatchid?smMatchId=${smMatchId}&type=video&tournament_type=international`);
-  const json = await r.json();
-  res.json(json);
+  /* Guarded, unlike before. BCCI answers with an HTML error page when it is
+     unhappy, r.json() throws on the "<HTML>", and an unhandled rejection in an
+     async Express handler takes the whole process down in Node 18+ — one
+     upstream hiccup was killing the server. */
+  try {
+    const { smMatchId } = req.query;
+    const r = await fetch(`https://api.bcci.tv/api/v1/pages/getcontentbymatchid?smMatchId=${smMatchId}&type=video&tournament_type=international`);
+    if (!r.ok) return res.json({ ok: false, upstreamUnavailable: true, status: r.status });
+    const text = await r.text();
+    let json;
+    try { json = JSON.parse(text); }
+    catch { return res.json({ ok: false, upstreamUnavailable: true, error: "upstream returned non-JSON" }); }
+    res.json(json);
+  } catch (e) {
+    res.json({ ok: false, upstreamUnavailable: true, error: e.message });
+  }
 });
 
 

@@ -30,9 +30,13 @@ export function startTelegramBot() {
   // Save instance globally to track it
   global.telegramBotInstance = bot;
 
+  /* The bot writes telegram_files on its own behalf, so it needs the
+     service-role key once row-level security is on. Anon remains the fallback
+     until that key is configured. */
   const supabase = createClient(
     process.env.SUPABASE_URL,
-    process.env.SUPABASE_ANON_KEY
+    process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY,
+    { auth: { persistSession: false } }
   );
 
   const ADMIN_ID = 1829896755;

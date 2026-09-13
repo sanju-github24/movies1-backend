@@ -5,3 +5,5 @@ __pycache__/
 
 # Playwright browsers are installed at build time (PLAYWRIGHT_BROWSERS_PATH)
 .playwright/
+
+.DS_Store
