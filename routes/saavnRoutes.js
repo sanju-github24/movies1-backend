@@ -74,11 +74,22 @@ function upscaleImage(url) {
 
 // ── Core lookups ────────────────────────────────────────────────────────
 
-export async function getLyrics(songId) {
+/** The whole lyrics payload — the words, and who they belong to. */
+async function getLyricsPayload(songId) {
     const data = await saavnGet({
         __call: 'lyrics.getLyrics', ctx: 'web6dot0', api_version: '4', lyrics_id: songId,
     });
-    return data?.lyrics || null;
+    if (!data?.lyrics) return null;
+    return {
+        // Lines are separated by <br>, and the text carries the same escaped
+        // entities the rest of the catalogue does.
+        lyrics: formatString(data.lyrics),
+        copyright: formatString(data.lyrics_copyright || '').replace(/&copy;/g, '©'),
+    };
+}
+
+export async function getLyrics(songId) {
+    return (await getLyricsPayload(songId))?.lyrics || null;
 }
 
 /** Decrypt the media URL and tidy the text fields, in place. */
@@ -345,7 +356,10 @@ router.get('/lyrics/', async (req, res) => {
     if (!query) return res.status(400).json({ detail: 'Query containing song link or id is required to fetch lyrics!' });
     try {
         const songId = isSaavnUrl(query) ? await getSongId(query) : query;
-        res.json({ status: true, lyrics: await getLyrics(songId) });
+        const payload = await getLyricsPayload(songId);
+        // `copyright` is additive to upstream's { status, lyrics } — the page
+        // shows the words, so it should show whose they are.
+        res.json({ status: Boolean(payload), lyrics: payload?.lyrics || null, copyright: payload?.copyright || '' });
     } catch (e) {
         console.error(`❌ Saavn lyrics lookup failed for ${query}: ${e.message}`);
         res.status(500).json({ detail: `Error fetching lyrics: ${e.message}` });
