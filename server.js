@@ -27,6 +27,7 @@ import bmsRouter from "./routes/bms.js";
 import tmdbRouter from './routes/tmdbRoutes.js';
 import geminiRoutes from './routes/geminiRoutes.js';
 import autofillRouter from './routes/autofill.js';
+import saavnRouter, { searchSongs } from './routes/saavnRoutes.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
 import crypto from "crypto";
@@ -843,6 +844,8 @@ app.use('/api/user',   userRouter);
 app.use('/api/movies', movieRouter);
 app.use('/api',        popadsRoute);
 app.use('/api',        tmdbRouter);
+// The music pages' only data source — a port of github.com/anxkhn/jiosaavn-api.
+app.use('/api/saavn',  saavnRouter);
 
 async function fetchBCCI(url) {
     const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
@@ -2928,89 +2931,6 @@ app.get('/api/mx/episodes', async (req, res) => {
   }
 });
 
-app.get('/api/songs/homepage', (req, res) => {
-    console.log(`🎵 Songs homepage requested`);
-    const pythonProcess = spawn('python3', ['./scrapers/index.py', '--homepage']);
-
-    let output = '';
-    let errorOutput = '';
-
-    pythonProcess.stdout.on('data', (data) => { output += data.toString(); });
-    pythonProcess.stderr.on('data', (data) => { errorOutput += data.toString(); });
-
-    pythonProcess.on('close', (code) => {
-        if (code !== 0 || !output.trim()) {
-            console.error(`❌ Songs homepage scraper failed with code ${code}. Stderr: ${errorOutput}`);
-            return res.status(502).json({ success: false, error: 'Failed to scrape songs homepage data.', details: errorOutput });
-        }
-        try {
-            const data = JSON.parse(output.trim());
-            return res.json(data);
-        } catch (e) {
-            console.error(`❌ JSON parse error for songs homepage:`, e);
-            return res.status(502).json({ success: false, error: 'Invalid JSON response from scraper.', details: output });
-        }
-    });
-});
-
-app.get('/api/songs/search', (req, res) => {
-    const query = req.query.q || '';
-    if (!query.trim()) {
-        return res.status(400).json({ success: false, error: 'Missing q parameter' });
-    }
-    console.log(`🎵 Songs search requested for: ${query}`);
-    const pythonProcess = spawn('python3', ['./scrapers/index.py', '--search', query]);
-
-    let output = '';
-    let errorOutput = '';
-
-    pythonProcess.stdout.on('data', (data) => { output += data.toString(); });
-    pythonProcess.stderr.on('data', (data) => { errorOutput += data.toString(); });
-
-    pythonProcess.on('close', (code) => {
-        if (code !== 0 || !output.trim()) {
-            console.error(`❌ Songs search scraper failed with code ${code}. Stderr: ${errorOutput}`);
-            return res.status(502).json({ success: false, error: 'Failed to search songs.', details: errorOutput });
-        }
-        try {
-            const data = JSON.parse(output.trim());
-            return res.json(data);
-        } catch (e) {
-            console.error(`❌ JSON parse error for songs search:`, e);
-            return res.status(502).json({ success: false, error: 'Invalid JSON response from search scraper.', details: output });
-        }
-    });
-});
-
-app.get('/api/songs/track', (req, res) => {
-    const id = req.query.id || '';
-    if (!id.trim()) {
-        return res.status(400).json({ success: false, error: 'Missing id parameter' });
-    }
-    console.log(`🎵 Songs track details requested for: ${id}`);
-    const pythonProcess = spawn('python3', ['./scrapers/index.py', '--track', id]);
-
-    let output = '';
-    let errorOutput = '';
-
-    pythonProcess.stdout.on('data', (data) => { output += data.toString(); });
-    pythonProcess.stderr.on('data', (data) => { errorOutput += data.toString(); });
-
-    pythonProcess.on('close', (code) => {
-        if (code !== 0 || !output.trim()) {
-            console.error(`❌ Songs track scraper failed with code ${code}. Stderr: ${errorOutput}`);
-            return res.status(502).json({ success: false, error: 'Failed to fetch track info.', details: errorOutput });
-        }
-        try {
-            const data = JSON.parse(output.trim());
-            return res.json(data);
-        } catch (e) {
-            console.error(`❌ JSON parse error for songs track:`, e);
-            return res.status(502).json({ success: false, error: 'Invalid JSON response from track scraper.', details: output });
-        }
-    });
-});
-
 
 // =====================================
 // 🗃️  YOUTUBE RESULT CACHE — conserve the daily Search-API quota
@@ -3130,93 +3050,61 @@ app.get('/api/songs/youtube-preview', async (req, res) => {
 
 
 // =====================================
-// 🎵 ARTIST RECOMMENDATIONS — returns songs by a singer for the "More by X" section
-// Uses YouTube Data API to avoid Pendujatt reCAPTCHA blocking on repeated searches.
-// Returns { songs: [{ id, title, poster, label }] } matching Pendujatt card shape.
+// 🎤 ARTIST RECOMMENDATIONS — more songs by the same singer
+// Sourced from the JioSaavn API port, so every card carries a real song id that
+// the track page can resolve and play. (This used to slugify YouTube titles into
+// Pendujatt-style ids, which only resolved while that scraper existed.)
 // =====================================
 app.get('/api/songs/singer', async (req, res) => {
     const singerName = (req.query.name || '').trim();
     if (!singerName) return res.status(400).json({ songs: [], error: 'Missing name parameter' });
 
-    const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
-    if (!YOUTUBE_API_KEY) {
-        console.error('❌ YOUTUBE_API_KEY not set — cannot fetch singer recommendations');
-        return res.status(503).json({ songs: [], error: 'YouTube API not configured' });
-    }
-
-    // Serve from cache when possible — no quota spent.
+    // The artist→songs mapping is stable, so reuse the existing result cache.
     const cacheKey = `singer:${singerName.toLowerCase()}`;
     const cached = ytCacheGet(cacheKey);
     if (cached !== undefined) return res.json(cached);
 
     try {
-        // Search YouTube for songs by this artist (music category = 10)
-        const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoCategoryId=10&maxResults=20&q=${encodeURIComponent(singerName + ' songs')}&key=${YOUTUBE_API_KEY}`;
-        const ytRes = await fetch(searchUrl);
-
-        if (!ytRes.ok) {
-            const err = await ytRes.text();
-            console.error(`❌ YouTube singer API error ${ytRes.status}: ${err}`);
-            // Degrade gracefully (no recs) without caching a quota error, so it
-            // recovers automatically once the daily quota resets.
-            return res.json({ songs: [] });
-        }
-
-        const data = await ytRes.json();
-        const items = (data.items || []).filter(i => i.id?.videoId && i.snippet?.title);
-
-        // Convert YouTube results into the same card shape TrackDetailPage expects.
-        // id is a pendujatt-style slug derived from the song title so clicking opens
-        // a Pendujatt search for that song.
-        const slugify = str =>
-            str.toLowerCase()
-               .replace(/[^\w\s-]/g, '')
-               .replace(/[\s_]+/g, '-')
-               .replace(/-+/g, '-')
-               .replace(/^-|-$/g, '');
-
-        const songs = items.map(item => {
-            const rawTitle  = item.snippet.title || '';
-            // Strip " - Official Video", "| Full Song" etc. for cleaner titles
-            const cleanTitle = rawTitle
-                .replace(/\s*[\|–\-—]\s*(official\s*(video|audio|lyric|music\s*video)|full\s*song|hd|4k|lyrical|lyric\s*video|video\s*song).*/gi, '')
-                .replace(/\s*\(official\s*(video|audio|lyric|music\s*video|song)\)/gi, '')
-                .trim();
-
-            const thumbnail = item.snippet.thumbnails?.high?.url
-                           || item.snippet.thumbnails?.medium?.url
-                           || item.snippet.thumbnails?.default?.url
-                           || 'https://images.unsplash.com/photo-1614613535308-eb5fbd3d2c17?w=150&q=80';
-
-            return {
-                id:      slugify(cleanTitle) || item.id.videoId,
-                title:   cleanTitle || rawTitle,
-                poster:  thumbnail,
-                label:   'Mp3 Song',
-            };
-        });
+        // songdata=false: the autocomplete rows carry title, artwork and artists,
+        // which is everything a card shows — no per-song lookup needed.
+        const results = await searchSongs(singerName, { fullData: false });
+        // The same recording comes back once per pressing (the single, the
+        // album, a compilation), each with its own id, so deduping on id alone
+        // still leaves the card repeated three times. Key on the title instead.
+        const seen = new Set();
+        const songs = results.filter(s => {
+            const key = (s.song || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+            if (!key || seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        }).map(s => ({
+            id:     s.id,
+            title:  s.song,
+            poster: s.image,
+            // A single's album is its own title; repeating it on the card says
+            // nothing, so fall back to the artists.
+            label:  s.album && s.album !== s.song ? s.album : (s.primary_artists || singerName),
+            artist: s.primary_artists || s.singers || singerName,
+        }));
 
         console.log(`🎵 Singer recs for "${singerName}": ${songs.length} results`);
         const result = { songs };
-        // Cache real results for a week, empty results briefly.
         ytCacheSet(cacheKey, result, songs.length ? YT_TTL_HIT : YT_TTL_EMPTY);
         return res.json(result);
-
     } catch (err) {
-        console.error('❌ Singer recommendations fetch error:', err);
+        console.error(`❌ Singer recommendations failed for "${singerName}": ${err.message}`);
         return res.status(500).json({ songs: [], error: 'Internal error fetching recommendations' });
     }
 });
 
 
 // =====================================
-// 🎧 GAANA HLS PROXY — makes tokenized Akamai streams play cleanly
-// Gaana serves audio as HLS from *.akamaized.net with a path-embedded token.
-// The browser can't set the Referer/Origin the CDN checks, and the CDN may omit
-// CORS headers, so a segment fetch hls.js makes can be rejected mid-stream and
-// kill playback (plays a bit, then stops, never recovers). We proxy the
-// manifest + segments server-side with the right headers and re-serve them
-// same-origin with CORS, so the stream plays through like a normal file.
+// 🎧 MUSIC STREAM PROXY — makes JioSaavn audio play in the browser
+// saavncdn answers 403 to a request without a jiosaavn.com Referer, and a
+// browser can't set one. So the audio is fetched server-side with the right
+// headers and re-served same-origin with CORS. A JioSaavn track is a plain
+// .mp4 audio file, passed through byte-for-byte with Range support so seeking
+// works; the HLS branch remains for any manifest that comes through.
 // =====================================
 // Pipe a fetch response body to the client, whichever kind of stream it is.
 // node-fetch hands back a Node stream while undici/global fetch hands back a
@@ -3228,33 +3116,17 @@ function pipeBody(body, res) {
     return Readable.fromWeb(body).pipe(res);
 }
 
-const GAANA_PROXY_HEADERS = {
+// saavncdn only serves a request that looks like it came from the JioSaavn site.
+const MUSIC_PROXY_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Referer': 'https://gaana.com/',
-    'Origin':  'https://gaana.com',
+    'Referer': 'https://www.jiosaavn.com/',
+    'Origin':  'https://www.jiosaavn.com',
     'Accept':  '*/*',
 };
 
-// Each CDN only serves its own site's Referer — saavncdn answers 403 without a
-// jiosaavn.com one — so pick headers per host rather than sending Gaana's to
-// everything.
-function musicProxyHeaders(u) {
-    let host = '';
-    try { host = new URL(u).hostname.toLowerCase(); } catch (_) {}
-    if (/(^|\.)(jiosaavn|saavn|saavncdn)\.com$/.test(host)) {
-        return {
-            'User-Agent': GAANA_PROXY_HEADERS['User-Agent'],
-            'Referer': 'https://www.jiosaavn.com/',
-            'Origin':  'https://www.jiosaavn.com',
-            'Accept':  '*/*',
-        };
-    }
-    return GAANA_PROXY_HEADERS;
-}
-
 // Range-aware byte passthrough — used for segments and for whole audio files.
 async function proxyPassthrough(url, req, res) {
-    const headers = { ...musicProxyHeaders(url) };
+    const headers = { ...MUSIC_PROXY_HEADERS };
     if (req.headers.range) headers['Range'] = req.headers.range;
     const r = await fetch(url, { headers });
 
@@ -3278,14 +3150,11 @@ async function proxyPassthrough(url, req, res) {
     return pipeBody(r.body, res);
 }
 
-// Only allow proxying Gaana / Akamai hosts — never an open relay.
-// Exact host or subdomain only. The old /gaana/ substring test also matched
-// attacker-controlled hosts like gaana.evil.com, which made this an open relay.
-const MUSIC_PROXY_HOSTS = [
-    'gaana.com', 'gaanacdn.com', 'akamaized.net', 'akamai.net',
-    'jiosaavn.com', 'saavn.com', 'saavncdn.com',
-];
-function gaanaProxyAllowed(u) {
+// Only allow proxying JioSaavn's own hosts — never an open relay. Exact host or
+// subdomain only; a substring test would also match an attacker-controlled host
+// like saavncdn.evil.com.
+const MUSIC_PROXY_HOSTS = ['jiosaavn.com', 'saavn.com', 'saavncdn.com'];
+function musicProxyAllowed(u) {
     try {
         const host = new URL(u).hostname.toLowerCase();
         return MUSIC_PROXY_HOSTS.some(d => host === d || host.endsWith('.' + d));
@@ -3295,9 +3164,11 @@ function gaanaProxyAllowed(u) {
 }
 
 // Rewrite every child URI in an HLS manifest to route back through this proxy.
-app.get('/api/gaana/hls', async (req, res) => {
+// /api/gaana/* is the path this lived at while Gaana was a source; it stays as
+// an alias so stream URLs already cached in a browser keep playing.
+app.get(['/api/music/stream', '/api/gaana/hls'], async (req, res) => {
     const url = req.query.url;
-    if (!url || !gaanaProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
+    if (!url || !musicProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
     try {
         // The frontend routes every music stream through here, but a JioSaavn
         // track is a plain audio file, not a manifest. Rewriting its bytes as
@@ -3305,9 +3176,9 @@ app.get('/api/gaana/hls', async (req, res) => {
         // Range support (seeking needs it).
         if (!/\.m3u8(\?|$)/i.test(url)) return await proxyPassthrough(url, req, res);
 
-        const r = await fetch(url, { headers: musicProxyHeaders(url) });
+        const r = await fetch(url, { headers: MUSIC_PROXY_HEADERS });
         if (!r.ok) {
-            console.error(`❌ Gaana HLS proxy upstream ${r.status} for ${url}`);
+            console.error(`❌ Music stream proxy upstream ${r.status} for ${url}`);
             return res.status(r.status).send(`Upstream ${r.status}`);
         }
         const text = await r.text();
@@ -3320,13 +3191,13 @@ app.get('/api/gaana/hls', async (req, res) => {
                 // Rewrite URI="..." inside tags like EXT-X-KEY / EXT-X-MAP.
                 return line.replace(/URI="([^"]+)"/g, (_m, uri) => {
                     const abs = new URL(uri, base).href;
-                    return `URI="/api/gaana/seg?url=${encodeURIComponent(abs)}"`;
+                    return `URI="/api/music/seg?url=${encodeURIComponent(abs)}"`;
                 });
             }
             // A media segment or a child playlist line.
             const abs = new URL(t, base).href;
             const isChildManifest = /\.m3u8(\?|$)/i.test(abs);
-            const proxyPath = isChildManifest ? '/api/gaana/hls' : '/api/gaana/seg';
+            const proxyPath = isChildManifest ? '/api/music/stream' : '/api/music/seg';
             return `${proxyPath}?url=${encodeURIComponent(abs)}`;
         }).join('\n');
 
@@ -3335,19 +3206,19 @@ app.get('/api/gaana/hls', async (req, res) => {
         res.set('Cache-Control', 'no-store');
         return res.send(rewritten);
     } catch (e) {
-        console.error('❌ Gaana HLS proxy error:', e.message);
+        console.error('❌ Music stream proxy error:', e.message);
         return res.status(502).send('Proxy error');
     }
 });
 
 // Stream a single segment (or key / init) through, forwarding Range for byte-range requests.
-app.get('/api/gaana/seg', async (req, res) => {
+app.get(['/api/music/seg', '/api/gaana/seg'], async (req, res) => {
     const url = req.query.url;
-    if (!url || !gaanaProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
+    if (!url || !musicProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
     try {
         await proxyPassthrough(url, req, res);
     } catch (e) {
-        console.error('❌ Gaana segment proxy error:', e.message);
+        console.error('❌ Music segment proxy error:', e.message);
         if (!res.headersSent) return res.status(502).send('Proxy error');
         return res.end();
     }
