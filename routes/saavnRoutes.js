@@ -92,8 +92,17 @@ export async function getLyrics(songId) {
     return (await getLyricsPayload(songId))?.lyrics || null;
 }
 
-/** Decrypt the media URL and tidy the text fields, in place. */
-export async function formatSongData(data, includeLyrics = false) {
+/**
+ * Decrypt the media URL and tidy the text fields, in place.
+ *
+ * `trustHasLyrics` decides whether the song's own has_lyrics flag may be used
+ * to skip the lyrics request. JioSaavn sets that flag per request — from some
+ * IPs it is "false" for every track, including ones lyrics.getLyrics then
+ * answers in full — so a single-song lookup ignores it and just asks. An album
+ * or playlist keeps trusting it: ignoring it there means one lyrics request per
+ * track, fifty of them for a chart.
+ */
+export async function formatSongData(data, includeLyrics = false, trustHasLyrics = true) {
     if (data.encrypted_media_url) {
         try {
             let mediaUrl = decryptUrl(data.encrypted_media_url);
@@ -114,7 +123,7 @@ export async function formatSongData(data, includeLyrics = false) {
     data.image = upscaleImage(data.image);
     data.copyright_text = String(data.copyright_text || '').replace(/&copy;/g, '©');
 
-    if (includeLyrics && data.has_lyrics === 'true') {
+    if (includeLyrics && (!trustHasLyrics || data.has_lyrics === 'true')) {
         try { data.lyrics = await getLyrics(data.id); } catch { data.lyrics = null; }
     } else {
         data.lyrics = null;
@@ -128,7 +137,8 @@ export async function getSong(songId, includeLyrics = false) {
     // {songs:[…]} envelope in the past — accept either.
     const raw = data?.[songId] || (Array.isArray(data?.songs) ? data.songs[0] : null);
     if (!raw) return null;
-    return formatSongData(raw, includeLyrics);
+    // One song, so ask for the lyrics rather than believing the flag.
+    return formatSongData(raw, includeLyrics, false);
 }
 
 async function autocomplete(query) {
