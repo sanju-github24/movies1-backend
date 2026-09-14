@@ -3124,6 +3124,22 @@ const MUSIC_PROXY_HEADERS = {
     'Accept':  '*/*',
 };
 
+// ?download=<name> turns a stream request into a save. The page normally
+// downloads by fetching the bytes and handing the browser a blob, which names
+// the file itself; this is for the fallback that just opens the URL, and it is
+// what makes that open save the track instead of playing it in a new tab.
+// The name is rebuilt from scratch rather than trimmed — a header this ends up
+// in must not carry CR/LF or a quote from the query string.
+function attachmentName(raw) {
+    const cleaned = String(raw || '')
+        .normalize('NFKD')
+        .replace(/[^\w\s.()-]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120);
+    return cleaned || 'track.m4a';
+}
+
 // Range-aware byte passthrough — used for segments and for whole audio files.
 async function proxyPassthrough(url, req, res) {
     const headers = { ...MUSIC_PROXY_HEADERS };
@@ -3132,6 +3148,9 @@ async function proxyPassthrough(url, req, res) {
 
     res.status(r.status);
     res.set('Access-Control-Allow-Origin', '*');
+    if (req.query.download) {
+        res.set('Content-Disposition', `attachment; filename="${attachmentName(req.query.download)}"`);
+    }
     for (const h of ['content-type', 'content-range', 'accept-ranges']) {
         const v = r.headers.get(h);
         if (v) res.set(h, v);
