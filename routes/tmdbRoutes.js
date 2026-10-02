@@ -298,8 +298,70 @@ router.get('/tmdb-details', async (req, res) => {
       trailer_key,
       certification:    _get_certification(details, media_type),
       episodes:         episodes_list,
+      /* A film that is part of a series of films — TMDB's own grouping, not
+         ours. Only films have one; a TV detail leaves it null. The page uses
+         it to offer the rest of the set. */
+      collection:       details.belongs_to_collection ? {
+        id:       details.belongs_to_collection.id,
+        name:     details.belongs_to_collection.name,
+        poster:   details.belongs_to_collection.poster_path
+          ? `${IMAGE_BASE_URL}${details.belongs_to_collection.poster_path}` : null,
+        backdrop: details.belongs_to_collection.backdrop_path
+          ? `${BACKDROP_BASE_URL}${details.belongs_to_collection.backdrop_path}` : null,
+      } : null,
     }
   });
+});
+
+// ── /tmdb-collection ──────────────────────────────────────────────────────────
+// GET /api/tmdb-collection?id=86311
+// Every film in one of TMDB's collections, in release order, with the art a
+// page needs to list them. Nothing here is specific to what we hold — the page
+// matches these against our own rows and offers the ones we have.
+router.get('/tmdb-collection', async (req, res) => {
+  const { id } = req.query;
+  if (!id) return res.status(400).json({ success: false, message: "Must provide id." });
+
+  try {
+    const r = await axiosWithRetry({
+      method: "get",
+      url: `${BASE_URL}collection/${encodeURIComponent(id)}`,
+      params: { api_key: TMDB_API_KEY, language: "en-US" },
+    });
+    const c = r?.data;
+    if (!c) return res.status(404).json({ success: false, message: "Collection not found." });
+
+    /* Released first, oldest first — a collection page that opens on the
+       sequel reads as an accident. Unreleased parts keep their place at the
+       end rather than being dropped, because "coming soon" is information. */
+    const parts = (c.parts || [])
+      .map((m) => ({
+        tmdb_id:  m.id,
+        title:    m.title || m.name,
+        year:     (m.release_date || "").slice(0, 4) || null,
+        date:     m.release_date || "",
+        overview: m.overview || "",
+        rating:   m.vote_average ? Number(m.vote_average).toFixed(1) : null,
+        poster:   m.poster_path ? `${IMAGE_BASE_URL}${m.poster_path}` : null,
+        backdrop: m.backdrop_path ? `${BACKDROP_BASE_URL}${m.backdrop_path}` : null,
+      }))
+      .sort((a, b) => (a.date ? 0 : 1) - (b.date ? 0 : 1) || a.date.localeCompare(b.date));
+
+    res.json({
+      success: true,
+      data: {
+        id: c.id,
+        name: c.name,
+        overview: c.overview || "",
+        poster: c.poster_path ? `${IMAGE_BASE_URL}${c.poster_path}` : null,
+        backdrop: c.backdrop_path ? `${BACKDROP_BASE_URL}${c.backdrop_path}` : null,
+        parts,
+      },
+    });
+  } catch (e) {
+    console.error("tmdb-collection:", e.message);
+    res.status(500).json({ success: false, message: "Failed to fetch collection." });
+  }
 });
 
 // ── /tmdb-episodes ────────────────────────────────────────────────────────────
