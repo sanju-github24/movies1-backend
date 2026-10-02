@@ -4633,6 +4633,181 @@ app.get('/robots.txt', (req, res) => {
 
 app.get('/', (req, res) => res.send('✅ API is live'));
 
+/* ── Live match alerts ────────────────────────────────────────────────────────
+   An upload notifies the people who asked to hear about uploads. A match going
+   live is the other thing they came here for, and until now nothing said so:
+   you had to already be on the site to find out a game had started.
+
+   Every live match is announced, whoever is playing.
+
+   Not repeating ourselves matters more here than anywhere else, because this
+   fires on a timer rather than on something a person did. Two guards:
+
+   1. A match is announced once, on the first poll that sees it live. BCCI's
+      feed lists a match for its whole duration, not just at the toss.
+   2. Whatever is ALREADY live when this process starts is recorded as
+      announced without sending anything. Render restarts this server on its
+      own, and without that a cold start at tea would re-announce a match that
+      has been running two hours. Missing an alert is recoverable; sending the
+      same one four times is what makes people turn notifications off. */
+const LIVE_ALERT_MS = 3 * 60 * 1000;
+const announcedMatches = new Set();
+let liveAlertsPrimed = false;
+
+/* The three publisher feeds the player already reads, normalised by the same
+   worker into { live, upcoming } — so nothing here needs to know how SonyLIV,
+   FanCode or Prime's Willow describe a fixture. */
+const LIVE_FEEDS = [
+  { name: 'SonyLIV', url: 'https://jtv-proxy.sanjusanjay0444.workers.dev/?feed=sonyliv' },
+  { name: 'FanCode', url: 'https://jtv-proxy.sanjusanjay0444.workers.dev/?feed=fancode' },
+  { name: 'Prime',   url: 'https://jtv-proxy.sanjusanjay0444.workers.dev/?feed=willow'  },
+];
+
+/* One fixture, however many rows carry it.
+
+   SonyLIV lists a match once per commentary language — 1090541371_ENG, _HIN,
+   _TAM are the same game — and a match on both Sony and FanCode is still one
+   match. Keying on the fixture name rather than the id is what stops three
+   notifications for one toss. */
+function fixtureKey(title = '') {
+  let t = String(title).toLowerCase();
+  /* Publishers tack the round and date onto the name — "… - Quarter-Final -
+     18 Sep 2026" — and one of them lists the sides the other way round. Cut
+     the trailing detail, then sort the two sides, so "India Women vs Japan
+     Women - Quarter-Final" and "Japan Women vs India Women" are one fixture
+     and one notification. */
+  t = t.split(/\s+-\s+/)[0];
+  t = t.replace(/[^a-z0-9]+/g, ' ').trim();
+  const sides = t.split(/\s+\bvs?\b\s+/).map((x) => x.trim()).filter(Boolean);
+  return sides.length === 2 ? sides.sort().join(' v ') : t;
+}
+
+async function feedLive({ name, url }) {
+  try {
+    const r = await fetch(url, { signal: AbortSignal.timeout(20000) });
+    if (!r.ok) return [];
+    const j = await r.json();
+    return (j.live || []).map((it) => ({
+      source: name,
+      title: it.name || '',
+      sub: it.event || it.category || '',
+      poster: it.poster || undefined,
+    })).filter((x) => x.title);
+  } catch (e) {
+    console.warn(`🏏 ${name} feed failed:`, e.message);
+    return [];
+  }
+}
+
+async function bcciLive() {
+  try {
+    const r = await fetch(`${BCCI_STATS}/live_scores/`, {
+      headers: BCCI_HEADERS, signal: AbortSignal.timeout(20000),
+    });
+    if (!r.ok) return [];
+    const j = await r.json();
+    return (j.live_scores || [])
+      .map(bcciStatsToLegacy)
+      .filter((m) => m.MatchID && m.HomeTeamName)
+      .map((m) => {
+        const home = m.HomeTeamName || m.FirstBattingTeamCode || '';
+        const away = m.AwayTeamName || m.SecondBattingTeamCode || '';
+        return {
+          source: 'BCCI',
+          title: away ? `${home} vs ${away}` : home,
+          sub: m.CompetitionName || '',
+        };
+      })
+      .filter((x) => x.title);
+  } catch (e) {
+    console.warn('🏏 BCCI live failed:', e.message);
+    return [];
+  }
+}
+
+/* Everything on air right now, across every source, one row per fixture. */
+async function liveMatchesNow() {
+  const lists = await Promise.all([bcciLive(), ...LIVE_FEEDS.map(feedLive)]);
+  const byFixture = new Map();
+  for (const item of lists.flat()) {
+    const key = fixtureKey(item.title);
+    if (!key) continue;
+    const seen = byFixture.get(key);
+    if (!seen) { byFixture.set(key, { ...item, sources: [item.source] }); continue; }
+    // A fixture carried by several publishers keeps the first row, and records
+    // the rest — useful in the status endpoint, invisible in the notification.
+    if (!seen.sources.includes(item.source)) seen.sources.push(item.source);
+    if (!seen.poster && item.poster) seen.poster = item.poster;
+    if (!seen.sub && item.sub) seen.sub = item.sub;
+  }
+  return [...byFixture.values()].map((m) => ({ ...m, key: fixtureKey(m.title) }));
+}
+
+async function checkLiveMatches() {
+  const matches = await liveMatchesNow();
+
+  if (!liveAlertsPrimed) {
+    matches.forEach((m) => announcedMatches.add(m.key));
+    liveAlertsPrimed = true;
+    if (matches.length) console.log(`🏏 ${matches.length} fixture(s) already live at boot — not announcing`);
+    return;
+  }
+
+  for (const m of matches) {
+    if (announcedMatches.has(m.key)) continue;
+    announcedMatches.add(m.key);
+
+    const url = `${SITE_ORIGIN}/sports`;
+    const body = [m.title, m.sub].filter(Boolean).join(' · ').slice(0, 120);
+
+    try {
+      const out = await pushToAll({ title: '🔴 Live now', body, url, image: m.poster });
+      console.log(`🔔 live "${m.title}" [${m.sources.join(', ')}]:`, JSON.stringify(out));
+    } catch (e) {
+      console.error('❌ live push:', e.message);
+    }
+
+    if (telegramReady) {
+      try {
+        await tg('sendMessage', {
+          text: [`🔴 <b>${tgEscape(m.title)}</b> is live now`,
+                 m.sub ? tgEscape(m.sub) : '',
+                 '', `📺 ${tgEscape(url)}`].filter(Boolean).join('\n'),
+          parse_mode: 'HTML',
+          reply_markup: { inline_keyboard: [[{ text: '▶ Watch now', url }]] },
+        });
+      } catch (e) { console.warn('   telegram live post failed:', e.message); }
+    }
+  }
+}
+
+/* Only where push is actually configured, so a local run stays quiet. */
+if (pushReady || telegramReady) {
+  setTimeout(checkLiveMatches, 15_000).unref?.();
+  setInterval(checkLiveMatches, LIVE_ALERT_MS).unref?.();
+}
+
+/* Same check, on demand — for testing without waiting for the poll, and for
+   seeing what an alert would cover before one fires. */
+app.get('/api/sports/live-check', async (req, res) => {
+  try {
+    const matches = await liveMatchesNow();
+    res.json({
+      success: true,
+      primed: liveAlertsPrimed,
+      announcedCount: announcedMatches.size,
+      live: matches.map((m) => ({
+        fixture: m.title,
+        event: m.sub || null,
+        sources: m.sources,
+        alreadyAnnounced: announcedMatches.has(m.key),
+      })),
+    });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+});
+
 // -------------------- Start server --------------------
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
