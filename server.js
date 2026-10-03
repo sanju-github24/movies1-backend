@@ -106,7 +106,18 @@ const allowedOrigins = [
   'https://www.1anchormovies.buzz',
   'https://www.1anchormovies.live',
   'https://stream.1anchormovies.live',
+  /* The player asks us whether a title is ours before it asks anyone else.
+     Without its origin here that request is refused and the answer is always
+     "not ours" — silently, because a blocked fetch looks exactly like a
+     provider having nothing. */
+  'https://m3u8-player-orcin.vercel.app',
 ];
+
+/* The two CORS layers below disagreed: this one refused any localhost origin
+   while the header pass further down allowed them, so a dev build got a
+   rejection from the first and permissive headers from the second. */
+const isLocalOrigin = (o) =>
+  /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/.test(String(o || ""));
 
 const corsOptions = {
   origin: function (origin, callback) {
@@ -119,7 +130,7 @@ const corsOptions = {
     ) {
       return callback(null, true);
     }
-    if (allowedOrigins.includes(origin)) {
+    if (allowedOrigins.includes(origin) || isLocalOrigin(origin)) {
       callback(null, true);
     } else {
       console.error(`CORS Block: Origin ${origin} not allowed.`);
@@ -1569,6 +1580,98 @@ app.get("/api/movie-stream", (req, res) => {
   const sig = crypto.createHmac("sha256", secret).update(`${prefix}:${exp}`).digest("hex");
   const url = `${base.startsWith("http") ? base : "https://" + base}/${p}?t=${exp}.${sig}`;
   res.json({ success: true, url, expiresAt: exp * 1000 });
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// 🏠 OWN STREAM — "do we host this TMDB title ourselves?"
+//
+// The player's TMDB tab goes out to a third party for a manifest. For the 133
+// titles we host there is no reason to: our own copy is on our own CDN, it is
+// the quality we uploaded, and it does not stop working when somebody else
+// changes their mind. This answers by TMDB id so the player can ask before it
+// asks anyone else, and falls silent (success:false) when we have nothing —
+// the caller then carries on exactly as it did.
+//
+//   GET /api/own-stream?tmdbId=550[&type=tv&season=1&episode=3]
+// ─────────────────────────────────────────────────────────────────────
+function signOwnPath(p, hours = 24) {
+  const base = (process.env.R2_WORKER_BASE || "").replace(/\/$/, "");
+  const secret = process.env.SIGNING_SECRET || "";
+  if (!base || !secret) return null;
+  let path = String(p || "").trim().replace(/^\/+/, "");
+  if (!path) return null;
+
+  /* Ours, or nothing. Plenty of uploaded rows carry a direct_url pointing at
+     somebody else's host — net51.cc and the like — and handing one of those
+     back here would be the opposite of the point: the caller asked whether WE
+     have the stream. A foreign URL is not an answer, it is the fallback the
+     caller already has. */
+  if (/^https?:\/\//i.test(path)) {
+    let host = "";
+    try { host = new URL(path).hostname.toLowerCase(); } catch { return null; }
+    const base = (process.env.R2_WORKER_BASE || "").replace(/^https?:\/\//, "").replace(/\/.*$/, "").toLowerCase();
+    const ours = host === base || /(^|\.)1anchormovies\.(buzz|live)$/.test(host) || /\.r2\.dev$/.test(host);
+    return ours ? path : null;
+  }
+  if (!path.includes("/")) path = `movies/${path}/master.m3u8`;
+  else if (!path.endsWith(".m3u8")) path = `${path.replace(/\/+$/, "")}/master.m3u8`;
+  const objPath = path.startsWith("b2/") ? path.slice(3) : path;
+  const prefix = objPath.split("/").slice(0, 2).join("/");
+  const exp = Math.floor(Date.now() / 1000) + Math.min(Math.max(hours, 1), 168) * 3600;
+  const sig = crypto.createHmac("sha256", secret).update(`${prefix}:${exp}`).digest("hex");
+  return `${base.startsWith("http") ? base : "https://" + base}/${path}?t=${exp}.${sig}`;
+}
+
+app.get("/api/own-stream", async (req, res) => {
+  const tmdbId = String(req.query.tmdbId || "").trim();
+  if (!tmdbId) return res.status(400).json({ success: false, error: "tmdbId required" });
+  const wantSeason = parseInt(req.query.season, 10) || 1;
+  const wantEpisode = parseInt(req.query.episode, 10) || 1;
+
+  try {
+    const { data } = await supabase
+      .from("watch_html")
+      .select("slug,title,poster,content_type,hls_url,video_url,episodes")
+      .eq("tmdb_id", tmdbId)
+      .limit(1);
+    const row = data?.[0];
+    if (!row) return res.json({ success: false, reason: "not in our library" });
+
+    const eps = Array.isArray(row.episodes) ? row.episodes : [];
+
+    /* An uploaded episode often carries a season and a label ("EP06") but no
+       episode number, so position inside its season is the fallback — the same
+       rule the watch page uses, kept in step with it deliberately. */
+    if (eps.length) {
+      const pos = {};
+      const numbered = eps.map((e) => {
+        const season = String(e.season || 1);
+        pos[season] = (pos[season] || 0) + 1;
+        const label = String(e.title || "").match(/(?:^|[^0-9])e(?:p|pisode)?\s*[-. ]?(\d{1,3})(?!\d)/i);
+        const n = Number(e.episodeNumberInSeason ?? e.episode) || (label ? Number(label[1]) : 0) || pos[season];
+        return { e, season, n };
+      });
+      const hit = numbered.find((x) => x.season === String(wantSeason) && x.n === wantEpisode);
+      const link = hit && (hit.e.direct_url || hit.e.hls_url);
+      if (link) {
+        const url = signOwnPath(link);
+        if (url) return res.json({
+          success: true, url, kind: "episode", slug: row.slug,
+          title: row.title, poster: row.poster || null,
+          season: wantSeason, episode: wantEpisode,
+        });
+      }
+      return res.json({ success: false, reason: "episode not uploaded" });
+    }
+
+    const link = row.hls_url || row.video_url;
+    if (!link) return res.json({ success: false, reason: "no stream of our own" });
+    const url = signOwnPath(link);
+    if (!url) return res.json({ success: false, reason: "streaming not configured" });
+    res.json({ success: true, url, kind: "movie", slug: row.slug, title: row.title, poster: row.poster || null });
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────
