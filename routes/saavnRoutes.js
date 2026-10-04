@@ -22,6 +22,7 @@
 //   GET /radio?song_id= | &stationid=     songs like this one, as a station
 //   GET /radio?artist=&language=          an artist's station (their songs in that language)
 //   GET /artists?names=a,b,c              each artist's id and photo
+//   GET /artist?id=&page=                 an artist's page: songs (50 a page), albums, similar artists
 // =====================================================================
 
 import express from 'express';
@@ -330,6 +331,34 @@ async function findArtist(name) {
     return value;
 }
 
+/** One artist's page: their songs fifty at a time, best first, plus albums and similar artists. */
+export async function getArtistPage(artistId, page = 0) {
+    const d = await v4({
+        __call: 'artist.getArtistPageDetails', artistId, n_song: '50', n_album: '20',
+        page: String(page), category: '', sort_order: '',
+    });
+    if (!d?.artistId && !d?.name) return null;
+    const songs = (d.topSongs || []).filter(x => x?.id).map(v4Card);
+    return {
+        id: d.artistId,
+        name: formatString(d.name),
+        image: upscaleImage(d.image),
+        followers: Number(d.follower_count) || 0,
+        language: d.dominantLanguage || '',
+        page,
+        songs,
+        hasMore: songs.length >= 50,
+        // Only on the first page; later pages are the songs alone.
+        albums: page ? [] : (d.topAlbums || []).filter(a => a?.id).map(a => ({
+            id: a.id, title: formatString(a.title), poster: upscaleImage(a.image), year: a.year || '',
+            label: formatString(a.subtitle || ''),
+        })),
+        similar: page ? [] : (d.similarArtists || []).filter(a => a?.id).map(a => ({
+            id: a.id, name: formatString(a.name), image: upscaleImage(a.image),
+        })),
+    };
+}
+
 export async function findArtists(names) {
     const out = await Promise.all(names.map(n => findArtist(n).catch(() => null)));
     return out.filter(Boolean);
@@ -488,6 +517,20 @@ async function artistInLanguage(artist, language, n = 20) {
     add([...found.results].sort((a, b) => (b.plays || 0) - (a.plays || 0)));
     return { stationid: '', songs: keep.slice(0, n) };
 }
+
+router.get('/artist', async (req, res) => {
+    const id = (req.query.id || '').trim();
+    if (!id) return res.status(400).json({ detail: 'Artist id is required!' });
+    try {
+        const page = Math.max(0, parseInt(req.query.page || '0', 10) || 0);
+        const artist = await getArtistPage(id, page);
+        if (!artist) return res.status(404).json({ detail: 'Invalid Artist ID!' });
+        res.json(artist);
+    } catch (e) {
+        console.error(`❌ Saavn artist page failed for ${id}: ${e.message}`);
+        res.status(500).json({ detail: `Error fetching artist: ${e.message}` });
+    }
+});
 
 router.get('/radio', async (req, res) => {
     const songId = (req.query.song_id || '').trim();
