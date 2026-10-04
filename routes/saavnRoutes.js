@@ -15,6 +15,11 @@
 //   GET /playlist/?query=&lyrics=         playlist by id or URL
 //   GET /lyrics/?query=                   lyrics by song id or URL
 //   GET /ping                             health of the upstream endpoints
+//
+// And three of our own, over the same api.php (api_version 4):
+//   GET /songs?query=&page=&n=            song search, a page at a time
+//   GET /playlists?query=&page=&n=        playlist search ("kannada love songs")
+//   GET /radio?song_id= | &stationid=     songs like this one, as a station
 // =====================================================================
 
 import express from 'express';
@@ -229,6 +234,73 @@ export async function getPlaylist(listId, includeLyrics = false) {
     return playlist;
 }
 
+// ── Paged search and song radio (api_version 4) ─────────────────────────
+// The autocomplete above answers five songs and no pages. These are the calls
+// JioSaavn's own web player makes: search a page at a time, and a "station"
+// seeded with a song that keeps answering with songs like it — the same
+// language, mostly well played — for as long as it is asked.
+
+const v4 = (params) => saavnGet({ api_version: '4', ctx: 'web6dot0', ...params });
+
+/** A version-4 song row → the card the music pages render. */
+function v4Card(s) {
+    const mi = s?.more_info || {};
+    const primary = (mi.artistMap?.primary_artists || []).map(a => a.name).filter(Boolean).join(', ');
+    const title = formatString(s?.title);
+    const album = formatString(mi.album || '');
+    const artist = formatString(primary || mi.music || s?.subtitle || '');
+    return {
+        id: s?.id,
+        title,
+        poster: upscaleImage(s?.image),
+        label: album && album !== title ? album : (artist || 'Single'),
+        artist: artist || 'Unknown Artist',
+        language: s?.language || '',
+        plays: Number(s?.play_count) || 0,
+    };
+}
+
+const pageOf = (q) => Math.max(1, parseInt(q.page || q.p || '1', 10) || 1);
+const sizeOf = (q, max = 40) => Math.min(max, Math.max(1, parseInt(q.n || '20', 10) || 20));
+
+export async function searchSongsPaged(query, page = 1, n = 20) {
+    const data = await v4({ __call: 'search.getResults', q: query, p: String(page), n: String(n) });
+    return { total: Number(data?.total) || 0, page, results: (data?.results || []).filter(r => r?.id).map(v4Card) };
+}
+
+export async function searchPlaylists(query, page = 1, n = 20) {
+    const data = await v4({ __call: 'search.getPlaylistResults', q: query, p: String(page), n: String(n) });
+    return {
+        total: Number(data?.total) || 0,
+        page,
+        results: (data?.results || []).filter(r => r?.id).map(r => ({
+            id: r.id,
+            title: formatString(r.title),
+            poster: upscaleImage(r.image),
+            songCount: Number(r.more_info?.song_count) || 0,
+            label: formatString(r.more_info?.firstname || r.subtitle || ''),
+        })),
+    };
+}
+
+/** Songs like `songId`. Pass back the stationid it returns to keep the same station going. */
+export async function songRadio({ songId, stationId, n = 20 }) {
+    let station = stationId;
+    if (!station) {
+        const made = await saavnGet({
+            __call: 'webradio.createEntityStation', api_version: '4', ctx: 'android',
+            entity_id: JSON.stringify([songId]), entity_type: 'queue',
+        });
+        station = made?.stationid;
+        if (!station) throw new Error('JioSaavn made no station for this song');
+    }
+    const data = await saavnGet({
+        __call: 'webradio.getSong', api_version: '4', ctx: 'android', stationid: station, k: String(n), next: '1',
+    });
+    const songs = Object.values(data || {}).map(x => x?.song).filter(s => s?.id).map(v4Card);
+    return { stationid: station, songs };
+}
+
 // ── Entity ids out of share URLs ────────────────────────────────────────
 // A jiosaavn.com link carries a short token, not the numeric id the API wants;
 // the id is in the page's bootstrapped state, so read it out of the HTML.
@@ -317,6 +389,40 @@ router.get('/search', async (req, res) => {
     } catch (e) {
         console.error(`❌ Saavn search failed for "${query}": ${e.message}`);
         res.status(500).json({ detail: `Error searching: ${e.message}` });
+    }
+});
+
+router.get('/songs', async (req, res) => {
+    const query = (req.query.query || req.query.q || '').trim();
+    if (!query) return res.status(400).json({ detail: 'Query is required to search!' });
+    try {
+        res.json(await searchSongsPaged(query, pageOf(req.query), sizeOf(req.query)));
+    } catch (e) {
+        console.error(`❌ Saavn paged search failed for "${query}": ${e.message}`);
+        res.status(500).json({ detail: `Error searching songs: ${e.message}` });
+    }
+});
+
+router.get('/playlists', async (req, res) => {
+    const query = (req.query.query || req.query.q || '').trim();
+    if (!query) return res.status(400).json({ detail: 'Query is required to search playlists!' });
+    try {
+        res.json(await searchPlaylists(query, pageOf(req.query), sizeOf(req.query)));
+    } catch (e) {
+        console.error(`❌ Saavn playlist search failed for "${query}": ${e.message}`);
+        res.status(500).json({ detail: `Error searching playlists: ${e.message}` });
+    }
+});
+
+router.get('/radio', async (req, res) => {
+    const songId = (req.query.song_id || '').trim();
+    const stationId = (req.query.stationid || '').trim();
+    if (!songId && !stationId) return res.status(400).json({ detail: 'song_id or stationid is required!' });
+    try {
+        res.json(await songRadio({ songId, stationId, n: sizeOf(req.query, 30) }));
+    } catch (e) {
+        console.error(`❌ Saavn radio failed for ${songId || stationId}: ${e.message}`);
+        res.status(500).json({ detail: `Error building radio: ${e.message}` });
     }
 });
 
