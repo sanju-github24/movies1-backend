@@ -20,6 +20,8 @@
 //   GET /songs?query=&page=&n=            song search, a page at a time
 //   GET /playlists?query=&page=&n=        playlist search ("kannada love songs")
 //   GET /radio?song_id= | &stationid=     songs like this one, as a station
+//   GET /radio?artist=&language=          an artist's station (their songs in that language)
+//   GET /artists?names=a,b,c              each artist's id and photo
 // =====================================================================
 
 import express from 'express';
@@ -283,9 +285,17 @@ export async function searchPlaylists(query, page = 1, n = 20) {
     };
 }
 
-/** Songs like `songId`. Pass back the stationid it returns to keep the same station going. */
-export async function songRadio({ songId, stationId, n = 20 }) {
+/** Songs like `songId` — or by `artist` — as a station. Pass back the stationid to keep it going. */
+export async function songRadio({ songId, stationId, artist, n = 20 }) {
     let station = stationId;
+    if (!station && artist) {
+        const made = await saavnGet({
+            __call: 'webradio.createArtistStation', api_version: '4', ctx: 'android',
+            name: artist, query: artist,
+        });
+        station = made?.stationid;
+        if (!station) throw new Error('JioSaavn made no station for this artist');
+    }
     if (!station) {
         const made = await saavnGet({
             __call: 'webradio.createEntityStation', api_version: '4', ctx: 'android',
@@ -299,6 +309,30 @@ export async function songRadio({ songId, stationId, n = 20 }) {
     });
     const songs = Object.values(data || {}).map(x => x?.song).filter(s => s?.id).map(v4Card);
     return { stationid: station, songs };
+}
+
+/* Each artist's id and photo, by name. A name's answer is kept for a day —
+   the home page asks for the same dozen singers on every visit, and their
+   photos do not change from one hour to the next. */
+const artistCache = new Map();   // lower-cased name → { at, value }
+const ARTIST_TTL = 24 * 3600 * 1000;
+
+async function findArtist(name) {
+    const key = name.toLowerCase();
+    const hit = artistCache.get(key);
+    if (hit && Date.now() - hit.at < ARTIST_TTL) return hit.value;
+    const data = await v4({ __call: 'search.getArtistResults', q: name, p: '1', n: '3' });
+    const results = data?.results || [];
+    // The closest name, not just the first answer.
+    const r = results.find(x => formatString(x.name).toLowerCase() === key) || results[0];
+    const value = r ? { id: r.id, name: formatString(r.name), image: upscaleImage(r.image), query: name } : null;
+    artistCache.set(key, { at: Date.now(), value });
+    return value;
+}
+
+export async function findArtists(names) {
+    const out = await Promise.all(names.map(n => findArtist(n).catch(() => null)));
+    return out.filter(Boolean);
 }
 
 // ── Entity ids out of share URLs ────────────────────────────────────────
@@ -414,12 +448,60 @@ router.get('/playlists', async (req, res) => {
     }
 });
 
+router.get('/artists', async (req, res) => {
+    const names = String(req.query.names || '').split(',').map(s => s.trim()).filter(Boolean).slice(0, 24);
+    if (!names.length) return res.status(400).json({ detail: 'names is required!' });
+    try {
+        res.json({ artists: await findArtists(names) });
+    } catch (e) {
+        console.error(`❌ Saavn artist lookup failed: ${e.message}`);
+        res.status(500).json({ detail: `Error finding artists: ${e.message}` });
+    }
+});
+
+/* An artist's songs in one language. Their station ignores language — a
+   Kannada singer's station is mostly their Hindi songs — so it is filtered,
+   and topped up from a search for the artist in that language. No stationid
+   comes back: carrying on from the station would drift out of the language,
+   so the player follows on with song radio, which stays in it. */
+async function artistInLanguage(artist, language, n = 20) {
+    const lang = language.toLowerCase();
+    const byArtist = (s) => s.artist.toLowerCase().includes(artist.toLowerCase());
+    const seen = new Set();
+    const keep = [];
+    // One of each song: the same track is often uploaded several times, under different ids.
+    const titleKey = (s) => s.title.toLowerCase().replace(/\(.*?\)|\[.*?\]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+    const add = (list) => {
+        for (const s of list) {
+            if (!s.id || s.language !== lang || !byArtist(s)) continue;
+            const k = titleKey(s);
+            if (seen.has(s.id) || seen.has(k)) continue;
+            seen.add(s.id); seen.add(k); keep.push(s);
+        }
+    };
+    const [station, found] = await Promise.all([
+        songRadio({ artist, n: 30 }).catch(() => ({ songs: [] })),
+        searchSongsPaged(`${artist} ${language}`, 1, 40).catch(() => ({ results: [] })),
+    ]);
+    add(station.songs);
+    // Searches come back best match first; most-played first reads better as a station.
+    add([...found.results].sort((a, b) => (b.plays || 0) - (a.plays || 0)));
+    return { stationid: '', songs: keep.slice(0, n) };
+}
+
 router.get('/radio', async (req, res) => {
     const songId = (req.query.song_id || '').trim();
     const stationId = (req.query.stationid || '').trim();
-    if (!songId && !stationId) return res.status(400).json({ detail: 'song_id or stationid is required!' });
+    const artist = (req.query.artist || '').trim();
+    const language = (req.query.language || '').trim();
+    if (!songId && !stationId && !artist) return res.status(400).json({ detail: 'song_id, artist or stationid is required!' });
     try {
-        res.json(await songRadio({ songId, stationId, n: sizeOf(req.query, 30) }));
+        if (artist && language) {
+            const inLang = await artistInLanguage(artist, language, sizeOf(req.query, 30));
+            // Too few in that language: the whole station is better than a short list.
+            if (inLang.songs.length >= 6) return res.json(inLang);
+        }
+        res.json(await songRadio({ songId, stationId, artist, n: sizeOf(req.query, 30) }));
     } catch (e) {
         console.error(`❌ Saavn radio failed for ${songId || stationId}: ${e.message}`);
         res.status(500).json({ detail: `Error building radio: ${e.message}` });
