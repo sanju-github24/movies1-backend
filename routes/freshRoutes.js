@@ -60,8 +60,8 @@ function readPosts(html) {
   const recentAt = lower.indexOf('recently added');
   const inTop = (at) => topAt >= 0 && at > topAt && (recentAt < 0 || recentAt < topAt || at < recentAt);
   const posts = [], byId = new Map();
-  for (const m of html.matchAll(/href="[^"]*?\/forums\/topic\/(\d+)-([^"/]+)\/?"/g)) {
-    const [, id, raw] = m;
+  for (const m of html.matchAll(/href="([^"]*?\/forums\/topic\/(\d+)-([^"/]+)\/?)"/g)) {
+    const [, href, id, raw] = m;
     if (byId.has(id)) { if (inTop(m.index)) byId.get(id).topWeek = true; continue; }
     let slug = raw;
     try { slug = decodeURIComponent(raw); } catch { /* leave it */ }
@@ -74,7 +74,7 @@ function readPosts(html) {
     const series = /(^|-)s\d{1,3}(-|$)|(^|-)ep?-?\d{1,3}(-|$)|(^|-)season(-|$)|(^|-)day-\d+/.test(rest);
     const langs = [...new Set((rest.match(/tamil|telugu|hindi|malayalam|kannada|english|eng|bengali|marathi|punjabi|gujarati/g) || []).map((l) => LANGS[l]))];
     const print = printOf(rest);
-    const post = { id: Number(id), name: name.replace(/-/g, ' ').trim(), year: Number(year), series, langs, print, topWeek: inTop(m.index) };
+    const post = { id: Number(id), href: href.replace(/&amp;/g, '&'), name: name.replace(/-/g, ' ').trim(), year: Number(year), series, langs, print, topWeek: inTop(m.index) };
     byId.set(id, post);
     posts.push(post);
     if (posts.length >= MAX_POSTS) break;
@@ -183,6 +183,7 @@ async function refresh() {
       const have = byId.get(key);
       if (have) {
         have.languages = [...new Set([...have.languages, ...p.langs])];
+        if (have.topics.length < 8) have.topics.push(p.href);
         // The best print any of its posts has.
         if ((CLEAN_PRINT.test(p.print) && !CLEAN_PRINT.test(have.print)) || !have.print) have.print = p.print;
         if (p.topWeek) have.top_week = true;
@@ -213,6 +214,7 @@ async function refresh() {
         languages: p.langs,
         print: p.print,
         top_week: !!p.topWeek,
+        topics: [p.href],
         first_seen: new Date(firstSeen.get(key)).toISOString(),
       });
     });
@@ -237,7 +239,137 @@ router.get('/', async (req, res) => {
   // answering with nothing.
   if (!state.updatedAt) await refresh();
   res.set('Cache-Control', 'public, max-age=600');
-  res.json({ updatedAt: state.updatedAt, items: state.items });
+  res.json({ updatedAt: state.updatedAt, items: state.items.map(({ topics, ...rest }) => ({ ...rest, has_files: topics.length > 0 })) });
+});
+
+/* ── 4. A title's files ─────────────────────────────────────────────────
+   Each release's post lists its files one after another: the .torrent
+   attachment (named after the file, size included), then MAGNET, then —
+   on most posts, not all — DIRECT LINK, a page that leads to the file.
+
+   GET /files?tmdb=movie:123
+     { files: [{ name, quality, size, magnet, direct }] }   direct is a key for /direct, or null
+   GET /direct?key=…
+     { url, name, expires }
+
+   The direct link is followed only when asked: what it leads to carries a
+   token that runs out in a few hours. Only links read from a post here are
+   followed, so /direct is not a general-purpose redirect follower. */
+const filesCache = new Map();   // topic href → { at, files }
+const directPages = new Map();  // key → { page, name }
+const cleanName = (n) => String(n || '').replace(/^\s*www\.1tamilmv\.[a-z]+\s*-\s*/i, '').replace(/\.torrent$/i, '').trim();
+
+async function topicFiles(href) {
+  const hit = filesCache.get(href);
+  if (hit && Date.now() - hit.at < 30 * 60e3) return hit.files;
+  const r = await fetchRetry(href, () => ({ headers: { 'User-Agent': UA, Accept: 'text/html' }, signal: AbortSignal.timeout(20000) }));
+  if (!r.ok) throw new Error(`topic answered ${r.status}`);
+  const html = await r.text();
+  const files = [];
+  const un = (h) => h.replace(/&amp;/g, '&');
+  for (const m of html.matchAll(/<a [^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)) {
+    const link = un(m[1]);
+    const text = m[2].replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    if (/attachment\.php/.test(link) && /\.(mkv|mp4|avi)/i.test(text)) {
+      files.push({ name: cleanName(text), magnet: null, page: null });
+    } else if (link.startsWith('magnet:')) {
+      const last = files[files.length - 1];
+      if (last && !last.magnet) last.magnet = link;
+      else {
+        const dn = decodeURIComponent((link.match(/[?&]dn=([^&]+)/) || [])[1] || '').replace(/\+/g, ' ');
+        files.push({ name: cleanName(dn), magnet: link, page: null });
+      }
+    } else if (/^direct\s*link$/i.test(text) && /^https?:/.test(link)) {
+      const last = files[files.length - 1];
+      if (last && !last.page) last.page = link;
+    }
+  }
+  filesCache.set(href, { at: Date.now(), files });
+  if (filesCache.size > 300) filesCache.delete(filesCache.keys().next().value);
+  return files;
+}
+
+router.get('/files', async (req, res) => {
+  const [type, id] = String(req.query.tmdb || '').split(':');
+  const item = state.items.find((x) => x.content_type === type && String(x.tmdb_id) === id);
+  if (!item) return res.json({ files: [] });
+  try {
+    const lists = await Promise.all(item.topics.map((t) => topicFiles(t).catch(() => [])));
+    const seen = new Set();
+    const files = lists.flat().filter((f) => f.name && !seen.has(f.name) && seen.add(f.name)).map((f) => {
+      let key = null;
+      if (f.page) {
+        key = Buffer.from(f.page).toString('base64url');
+        directPages.set(key, { page: f.page, name: f.name });
+        if (directPages.size > 3000) directPages.delete(directPages.keys().next().value);
+      }
+      return {
+        name: f.name,
+        quality: (f.name.match(/\b(2160|1080|720|480|360)p\b/i) || [])[0] || (/\b4k\b/i.test(f.name) ? '2160p' : ''),
+        size: (f.name.match(/([\d.]+\s*[GM]B)\b/i) || [])[1] || '',
+        magnet: f.magnet,
+        direct: key,
+      };
+    });
+    res.json({ files });
+  } catch (e) {
+    res.status(502).json({ error: e.message, files: [] });
+  }
+});
+
+/* The way to the file: the link's page redirects to a ten-second wait page
+   whose button, under the same session, redirects to the file host's page,
+   which links the file itself. The wait is only in the browser. Cookies are
+   carried by hand: fetch keeps none between requests. */
+async function followDirect(page) {
+  const jar = new Map();   // host → cookie string
+  const take = (url, r) => {
+    const set = r.headers.getSetCookie?.() || [];
+    if (!set.length) return;
+    const host = new URL(url).host;
+    const have = new Map((jar.get(host) || '').split('; ').filter(Boolean).map((c) => [c.split('=')[0], c]));
+    set.forEach((c) => { const kv = c.split(';')[0]; have.set(kv.split('=')[0], kv); });
+    jar.set(host, [...have.values()].join('; '));
+  };
+  const go = async (url, referer) => {
+    let cur = url;
+    for (let i = 0; i < 8; i++) {
+      const cookie = jar.get(new URL(cur).host);
+      const r = await fetch(cur, { redirect: 'manual', signal: AbortSignal.timeout(15000), headers: {
+        'User-Agent': UA, Accept: 'text/html', ...(referer ? { Referer: referer } : {}), ...(cookie ? { Cookie: cookie } : {}) } });
+      take(cur, r);
+      const loc = r.headers.get('location');
+      if (r.status >= 300 && r.status < 400 && loc) { referer = cur; cur = new URL(loc, cur).href; continue; }
+      return { url: cur, html: await r.text() };
+    }
+    throw new Error('too many redirects');
+  };
+  const wait = await go(page);
+  const out = (wait.html.match(/href="(https?:\/\/[^"]+\/out\?t=[^"]+)"/) || [])[1];
+  if (!out) throw new Error('no way past the wait page');
+  const host = await go(out.replace(/&amp;/g, '&'), wait.url);
+  const file = (host.html.match(/href="(https?:\/\/[^"]+\/files\/[^"]+)"/) || [])[1];
+  if (!file) throw new Error('no file on the host page');
+  return file.replace(/&amp;/g, '&');
+}
+
+const directCache = new Map();  // key → { at, value }
+router.get('/direct', async (req, res) => {
+  const key = String(req.query.key || '');
+  const known = directPages.get(key);
+  if (!known) return res.status(404).json({ error: 'Open the title\'s downloads again — that link is not known here' });
+  const hit = directCache.get(key);
+  if (hit && Date.now() - hit.at < 30 * 60e3) return res.json(hit.value);
+  try {
+    const url = await followDirect(known.page);
+    const exp = Number(new URL(url).searchParams.get('exp')) || 0;
+    const value = { url, name: known.name, expires: exp ? new Date(exp * 1000).toISOString() : null };
+    directCache.set(key, { at: Date.now(), value });
+    res.json(value);
+  } catch (e) {
+    console.warn(`⚠️ Direct link not followed: ${e.message}`);
+    res.status(502).json({ error: 'The file host is not answering right now' });
+  }
 });
 
 export default router;
