@@ -5,7 +5,7 @@ import { URL } from 'url';
 
 const router = Router();
 
-const TMDB_API_KEY = "452111addfd12727f394865d09a805b4"; 
+export const TMDB_API_KEY = "452111addfd12727f394865d09a805b4"; 
 const BASE_URL = "https://api.themoviedb.org/3/";
 const IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"; 
 const BACKDROP_BASE_URL = "https://image.tmdb.org/t/p/w1280"; 
