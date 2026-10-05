@@ -117,7 +117,19 @@ async function matchTitle(p) {
       hit = any.filter(same).find((r) => Math.abs(yearOf(r) - p.year) <= 1) || null;
     }
   }
-  const value = hit ? { ...hit, media_type: p.series ? 'tv' : 'movie' } : null;
+  let value = hit ? { ...hit, media_type: p.series ? 'tv' : 'movie' } : null;
+  /* The title logo, for the hero: English first, then one with no text, then
+     the title's own language — many Indian films have only that. Asked once
+     per title; the match is kept. */
+  if (value) {
+    try {
+      const im = await tmdb(`/${value.media_type}/${value.id}/images`, { include_image_language: 'en,null,hi,kn,ta,te,ml,bn,mr' });
+      const logos = im.logos || [];
+      const logo = logos.find((l) => l.iso_639_1 === 'en') || logos.find((l) => !l.iso_639_1)
+        || logos.find((l) => l.iso_639_1 === value.original_language) || logos[0];
+      value = { ...value, logo_path: logo?.file_path || null };
+    } catch { /* a missing logo leaves the title as text */ }
+  }
   matches.set(key, value);
   if (matches.size > 3000) matches.delete(matches.keys().next().value);
   return value;
@@ -180,6 +192,7 @@ async function refresh() {
         slug: `${slugify(title)}-${year}`,
         poster: t.poster_path ? `${IMG}w500${t.poster_path}` : null,
         cover_poster: t.backdrop_path ? `${IMG}w1280${t.backdrop_path}` : null,
+        title_logo: t.logo_path ? `${IMG}w500${t.logo_path}` : null,
         description: t.overview || '',
         imdb_rating: t.vote_average ? Number(t.vote_average).toFixed(1) : '',
         genres: [...new Set((t.genre_ids || []).map((g) => names.get(g)).filter(Boolean))],
