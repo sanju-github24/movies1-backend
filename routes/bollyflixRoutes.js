@@ -84,7 +84,12 @@ export async function getBollyflixPost(url) {
             files.push({
                 label,
                 quality: (label.match(/\b(480|540|720|1080|2160)p\b/i) || [])[0] || (/\b4k\b/i.test(label) ? '2160p' : ''),
-                size: (label.match(/\[([\d.]+\s*[GM]B)\]/i) || [])[1] || '',
+                // "[560MB]", or "[180MB/E]" on a series — per episode.
+                size: (() => {
+                    const m = label.match(/\[([\d.]+\s*[GM]B)(\s*\/\s*E(?:p(?:isode)?)?)?\]/i);
+                    return m ? `${m[1]}${m[2] ? ' / episode' : ''}` : '';
+                })(),
+                series: /\/\s*E(?:p(?:isode)?)?\]|season|episode/i.test(label),
                 links,
             });
         });
