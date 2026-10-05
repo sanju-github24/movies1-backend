@@ -48,12 +48,21 @@ const slugify = (s) => norm(s).replace(/ /g, '-');
    Each release is a link to its topic, and the topic's address spells it
    out: /topic/200127-jailer-2-rave-2026-tamil-true-web-dl-1080p-… The text
    of the link is often only "[1080p & 720p …]", so the address is read. */
+/* The page has two lists: "Top releases this week", a weekly pick that
+   repeats titles posted days ago, and "Recently added", the real order. So
+   the order on the page is not the order of release; the topic number is —
+   the forum numbers topics as they are posted — and a title listed again
+   in the weekly pick is not new. A post in that pick is marked, for the
+   home page's Trending row. */
 function readPosts(html) {
-  const posts = [], seen = new Set();
+  const lower = html.toLowerCase();
+  const topAt = lower.indexOf('top releases this week');
+  const recentAt = lower.indexOf('recently added');
+  const inTop = (at) => topAt >= 0 && at > topAt && (recentAt < 0 || recentAt < topAt || at < recentAt);
+  const posts = [], byId = new Map();
   for (const m of html.matchAll(/href="[^"]*?\/forums\/topic\/(\d+)-([^"/]+)\/?"/g)) {
     const [, id, raw] = m;
-    if (seen.has(id)) continue;
-    seen.add(id);
+    if (byId.has(id)) { if (inTop(m.index)) byId.get(id).topWeek = true; continue; }
     let slug = raw;
     try { slug = decodeURIComponent(raw); } catch { /* leave it */ }
     slug = slug.replace(/ /g, '-').toLowerCase();
@@ -65,10 +74,13 @@ function readPosts(html) {
     const series = /(^|-)s\d{1,3}(-|$)|(^|-)ep?-?\d{1,3}(-|$)|(^|-)season(-|$)|(^|-)day-\d+/.test(rest);
     const langs = [...new Set((rest.match(/tamil|telugu|hindi|malayalam|kannada|english|eng|bengali|marathi|punjabi|gujarati/g) || []).map((l) => LANGS[l]))];
     const print = printOf(rest);
-    posts.push({ id: Number(id), name: name.replace(/-/g, ' ').trim(), year: Number(year), series, langs, print });
+    const post = { id: Number(id), name: name.replace(/-/g, ' ').trim(), year: Number(year), series, langs, print, topWeek: inTop(m.index) };
+    byId.set(id, post);
+    posts.push(post);
     if (posts.length >= MAX_POSTS) break;
   }
-  return posts;
+  // Newest post first, whichever list it sat in.
+  return posts.sort((a, b) => b.id - a.id);
 }
 
 // One retry: a dropped connection should not empty the list for an hour.
@@ -173,6 +185,7 @@ async function refresh() {
         have.languages = [...new Set([...have.languages, ...p.langs])];
         // The best print any of its posts has.
         if ((CLEAN_PRINT.test(p.print) && !CLEAN_PRINT.test(have.print)) || !have.print) have.print = p.print;
+        if (p.topWeek) have.top_week = true;
         return;
       }
       /* Front-page order is newest first; a title seen before keeps its time.
@@ -199,6 +212,7 @@ async function refresh() {
         original_language: t.original_language || '',
         languages: p.langs,
         print: p.print,
+        top_week: !!p.topWeek,
         first_seen: new Date(firstSeen.get(key)).toISOString(),
       });
     });
