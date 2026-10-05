@@ -307,9 +307,60 @@ export async function songRadio({ songId, stationId, artist, n = 20 }) {
     }
     const data = await saavnGet({
         __call: 'webradio.getSong', api_version: '4', ctx: 'android', stationid: station, k: String(n), next: '1',
-    });
+    }).catch(() => null);
     const songs = Object.values(data || {}).map(x => x?.song).filter(s => s?.id).map(v4Card);
-    return { stationid: station, songs };
+    if (songs.length) return { stationid: station, songs };
+
+    /* An empty station. JioSaavn makes the station but fills it only for
+       listeners in India — from our server it comes back with no songs — so
+       the songs come from the artists instead: the seed song's own artists,
+       or the artist asked for, their best-played songs in the song's
+       language. No stationid, so the next call asks the same way again. */
+    const fallback = songId ? await songsLikeSong(songId, n) : artist ? await songsByArtistName(artist, n) : [];
+    return { stationid: '', songs: fallback };
+}
+
+/* Best-played first, but not the same order every time: the top forty are
+   shuffled, so a song's "similar songs" and the radio vary from one listen
+   to the next while staying with what people actually play. */
+function freshTop(songs, n) {
+    const top = [...songs].sort((a, b) => (b.plays || 0) - (a.plays || 0)).slice(0, Math.max(n * 2, 40));
+    for (let i = top.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [top[i], top[j]] = [top[j], top[i]]; }
+    return top.slice(0, n);
+}
+
+function uniqueSongs(songs, skipId) {
+    const seen = new Set();
+    return songs.filter((s) => {
+        const k = s.title.toLowerCase().replace(/\(.*?\)|\[.*?\]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+        if (!s.id || s.id === skipId || seen.has(s.id) || seen.has(k)) return false;
+        seen.add(s.id); seen.add(k); return true;
+    });
+}
+
+export async function songsLikeSong(songId, n) {
+    const data = await saavnGet({ __call: 'song.getDetails', cc: 'in', pids: songId }).catch(() => null);
+    const raw = data?.[songId] || (Array.isArray(data?.songs) ? data.songs[0] : null);
+    if (!raw) return [];
+    const lang = raw.language || '';
+    const ids = String(raw.primary_artists_id || '').split(',').map(x => x.trim()).filter(Boolean).slice(0, 3);
+    const pages = await Promise.all(ids.map(id => getArtistPage(id, 0).catch(() => null)));
+    let songs = uniqueSongs(pages.flatMap(p => p?.songs || []), songId);
+    const sameLang = songs.filter(s => !lang || s.language === lang);
+    if (sameLang.length >= 6) songs = sameLang;
+    // A short list: widen with a search for the artists in the language.
+    if (songs.length < n && raw.primary_artists) {
+        const more = await searchSongsPaged(`${formatString(raw.primary_artists).split(',')[0]} ${lang}`, 1, 40).catch(() => ({ results: [] }));
+        songs = uniqueSongs([...songs, ...more.results.filter(s => !lang || s.language === lang)], songId);
+    }
+    return freshTop(songs, n);
+}
+
+export async function songsByArtistName(name, n) {
+    const a = await findArtist(name).catch(() => null);
+    if (!a?.id) return [];
+    const page = await getArtistPage(a.id, 0).catch(() => null);
+    return freshTop(uniqueSongs(page?.songs || []), n);
 }
 
 /* Each artist's id and photo, by name. A name's answer is kept for a day —
