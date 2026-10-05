@@ -80,7 +80,13 @@ const app = express();
 const port = process.env.PORT || 4000;
 
 await connectDBs();
-startTelegramBot();
+/* Two copies of this server can run side by side (the site spreads visitors
+   across them). Set INSTANCE_ROLE=secondary on every copy but one: the jobs
+   that must happen once — the Telegram bot, the live-match alerts, the ICC
+   harvest — run only on the primary, or each would happen twice. */
+const isPrimary = process.env.INSTANCE_ROLE !== 'secondary';
+console.log(`🧭 Instance role: ${isPrimary ? 'primary' : 'secondary (bot, alerts and harvest off)'}`);
+if (isPrimary) startTelegramBot();
 
 // -------------------- LOAD CLEANED MOVIE DATA --------------------
 const dataPath = path.join(__dirname, 'data', 'all_south_indian_movies.json');
@@ -820,7 +826,7 @@ app.get('/api/icc/highlights', async (req, res) => {
     if (!error && data && data.length) {
       const total = count ?? data.length;
       res.json({ success: true, videos: data, total, hasMore: offset + data.length < total });
-      if (Date.now() - _iccHarvestedAt > ICC_HARVEST_TTL) {
+      if (isPrimary && Date.now() - _iccHarvestedAt > ICC_HARVEST_TTL) {
         _iccHarvestedAt = Date.now();
         /* Do not swallow the reason. This ran, failed silently and left the
            page serving a finished tournament's videos, with the timestamp
@@ -4889,7 +4895,7 @@ async function checkLiveMatches() {
 }
 
 /* Only where push is actually configured, so a local run stays quiet. */
-if (pushReady || telegramReady) {
+if (isPrimary && (pushReady || telegramReady)) {
   setTimeout(checkLiveMatches, 15_000).unref?.();
   setInterval(checkLiveMatches, LIVE_ALERT_MS).unref?.();
 }
