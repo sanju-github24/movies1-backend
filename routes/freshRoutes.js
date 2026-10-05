@@ -289,12 +289,52 @@ async function topicFiles(href) {
   return files;
 }
 
+/* A title not on the front page: the forum's own search, keeping only the
+   posts that name exactly this title (and year, for a film) — a search for
+   "Kantara" also finds its music album and a fifty-film pack. */
+const searchCache = new Map();  // "type|title|year" → { at, topics }
+async function searchTopics(title, year, series) {
+  const key = `${series ? 'tv' : 'movie'}|${norm(title)}|${year || ''}`;
+  const hit = searchCache.get(key);
+  if (hit && Date.now() - hit.at < 60 * 60e3) return hit.topics;
+  const q = norm(title);
+  if (!q) return [];
+  const url = `${SOURCE}/index.php?/search/&q=${encodeURIComponent(q)}&type=forums_topic&search_and_or=and&sortby=newest`;
+  const r = await fetchRetry(url, () => ({ headers: { 'User-Agent': UA, Accept: 'text/html' }, signal: AbortSignal.timeout(20000) }));
+  if (!r.ok) throw new Error(`search answered ${r.status}`);
+  const html = await r.text();
+  const topics = [], seen = new Set();
+  for (const m of html.matchAll(/href='([^']*?\/forums\/topic\/(\d+)-([^'\/&]+)\/?)[^']*'/g)) {
+    const [, href, id, raw] = m;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    let slug = raw;
+    try { slug = decodeURIComponent(raw); } catch { /* leave it */ }
+    slug = slug.replace(/\u00a0/g, '-').toLowerCase();
+    const mm = slug.match(/^(.+?)-((?:19|20)\d{2})(?:-|$)(.*)$/);
+    if (!mm) continue;
+    const [, name, y, rest] = mm;
+    if (norm(name.replace(/-/g, ' ')) !== q) continue;
+    if (!series && year && Math.abs(Number(y) - Number(year)) > 1) continue;
+    if (/music|video-album|video-songs|songs|trailer|teaser/.test(rest)) continue;
+    topics.push(href.replace(/&amp;/g, '&'));
+    if (topics.length >= 8) break;
+  }
+  searchCache.set(key, { at: Date.now(), topics });
+  if (searchCache.size > 1000) searchCache.delete(searchCache.keys().next().value);
+  return topics;
+}
+
 router.get('/files', async (req, res) => {
   const [type, id] = String(req.query.tmdb || '').split(':');
   const item = state.items.find((x) => x.content_type === type && String(x.tmdb_id) === id);
-  if (!item) return res.json({ files: [] });
+  const title = String(req.query.title || '').slice(0, 200);
+  const year = String(req.query.year || '').slice(0, 4);
   try {
-    const lists = await Promise.all(item.topics.map((t) => topicFiles(t).catch(() => [])));
+    // A title from the front page knows its posts; any other is searched for.
+    const topics = item ? item.topics : title ? await searchTopics(title, year, type === 'tv') : [];
+    if (!topics.length) return res.json({ files: [] });
+    const lists = await Promise.all(topics.map((t) => topicFiles(t).catch(() => [])));
     const seen = new Set();
     const files = lists.flat().filter((f) => f.name && !seen.has(f.name) && seen.add(f.name)).map((f) => {
       let key = null;
