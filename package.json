@@ -6,7 +6,7 @@
   "scripts": {
     "start": "node server.js",
     "server": "nodemon server.js",
-    "postinstall": "puppeteer browsers install chrome && pip install -r requirements.txt && playwright install chromium"
+    "postinstall": "puppeteer browsers install chrome && sh scripts/install-python.sh"
   },
   "author": "",
   "license": "ISC",

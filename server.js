@@ -2,6 +2,11 @@ import express from 'express';
 import webpush from 'web-push';
 import cors from 'cors';
 import 'dotenv/config';
+import { delimiter as pathDelimiter, resolve as resolvePath } from 'path';
+
+// The scrapers' Python packages are installed into .pydeps at build time (see
+// scripts/install-python.sh); the python3 processes started below inherit this.
+process.env.PYTHONPATH = [resolvePath('.pydeps'), process.env.PYTHONPATH].filter(Boolean).join(pathDelimiter);
 import cookieParser from 'cookie-parser';
 import axios from 'axios';
 import fs from 'fs';       

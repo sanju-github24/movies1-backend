@@ -7,3 +7,6 @@ __pycache__/
 .playwright/
 
 .DS_Store
+
+# Python packages for the scrapers, installed at build time
+.pydeps/
