@@ -28,6 +28,7 @@ import tmdbRouter from './routes/tmdbRoutes.js';
 import geminiRoutes from './routes/geminiRoutes.js';
 import autofillRouter from './routes/autofill.js';
 import saavnRouter, { searchSongs } from './routes/saavnRoutes.js';
+import bollyflixRouter from './routes/bollyflixRoutes.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
 import crypto from "crypto";
@@ -857,6 +858,7 @@ app.use('/api',        popadsRoute);
 app.use('/api',        tmdbRouter);
 // The music pages' only data source — a port of github.com/anxkhn/jiosaavn-api.
 app.use('/api/saavn',  saavnRouter);
+app.use('/api/bollyflix', bollyflixRouter);   // download sources for the download page
 
 async function fetchBCCI(url) {
     const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
