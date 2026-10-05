@@ -10,6 +10,9 @@ const BASE_URL = "https://api.themoviedb.org/3/";
 const IMAGE_BASE_URL = "https://image.tmdb.org/t/p/w500"; 
 const BACKDROP_BASE_URL = "https://image.tmdb.org/t/p/w1280"; 
 const LOGO_BASE_URL = "https://image.tmdb.org/t/p/w300";
+/* Images in English, with no text, and in the Indian languages most titles
+   here are in: many Indian films have a logo only in their own script. */
+const IMAGE_LANGS = 'en,null,hi,kn,ta,te,ml,bn,mr,pa,gu';
 const YOUTUBE_WATCH_BASE = "https://www.youtube.com/watch?v=";
 const DATA_FILE_PATH = './data/data/all_south_indian_movies.json'; 
 const CASTHQ_API_BASE = 'https://casthq.to/api'; 
@@ -85,7 +88,7 @@ const _search_imdb_id = async (imdb_id) => {
 const _get_full_details = async (tmdb_id, media_type) => {
   try {
     const r = await axiosWithRetry({ method:"get", url:`${BASE_URL}${media_type}/${tmdb_id}`,
-      params:{ api_key:TMDB_API_KEY, append_to_response:'credits,external_ids,videos,release_dates,content_ratings,images', include_image_language:'en,null' }
+      params:{ api_key:TMDB_API_KEY, append_to_response:'credits,external_ids,videos,release_dates,content_ratings,images', include_image_language:IMAGE_LANGS }
     });
     return r.data;
   } catch(e){ console.error("TMDB Details:",e.message); }
@@ -267,9 +270,24 @@ router.get('/tmdb-details', async (req, res) => {
   }));
 
   // ── Logo ──
+  // English first, then one with no language, then the title's own language.
   const logos = details.images?.logos || [];
-  const logo  = logos.find(l => l.iso_639_1 === 'en') || logos[0];
+  const logo  = logos.find(l => l.iso_639_1 === 'en') || logos.find(l => !l.iso_639_1)
+             || logos.find(l => l.iso_639_1 === details.original_language) || logos[0];
   const title_logo = logo ? `${LOGO_BASE_URL}${logo.file_path}` : null;
+
+  /* Every image TMDB has, best voted first, for the admin to choose from when
+     adding a title. The single picks above stay what everything else uses. */
+  const byVotes = (a, b) => (b.vote_average || 0) - (a.vote_average || 0) || (b.vote_count || 0) - (a.vote_count || 0);
+  const imageList = (list, base) => [...(list || [])].sort(byVotes).slice(0, 30).map(i => ({
+    url: `${base}${i.file_path}`, thumb: `https://image.tmdb.org/t/p/w300${i.file_path}`,
+    lang: i.iso_639_1 || null, width: i.width, height: i.height,
+  }));
+  const images = {
+    backdrops: imageList(details.images?.backdrops, BACKDROP_BASE_URL),
+    logos:     imageList(details.images?.logos, LOGO_BASE_URL),
+    posters:   imageList(details.images?.posters, IMAGE_BASE_URL),
+  };
 
   const slug = (details.title || details.name || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
 
@@ -288,6 +306,7 @@ router.get('/tmdb-details', async (req, res) => {
       poster_url:       details.poster_path  ? `${IMAGE_BASE_URL}${details.poster_path}`    : null,
       cover_poster_url: details.backdrop_path? `${BACKDROP_BASE_URL}${details.backdrop_path}`: null,
       title_logo,
+      images,
       original_language: details.original_language,
       imdb_rating:      details.vote_average ? details.vote_average.toFixed(1) : "0.0",
       vote_count:       details.vote_count || 0,
