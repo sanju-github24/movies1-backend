@@ -257,7 +257,8 @@ router.get('/', async (req, res) => {
    followed, so /direct is not a general-purpose redirect follower. */
 const filesCache = new Map();   // topic href → { at, files }
 const directPages = new Map();  // key → { page, name }
-const cleanName = (n) => String(n || '').replace(/^\s*www\.1tamilmv\.[a-z]+\s*-\s*/i, '').replace(/\.torrent$/i, '').trim();
+const cleanName = (n) => String(n || '').replace(/&amp;/g, '&').replace(/&#0?39;/g, "'").replace(/&quot;/g, '"')
+  .replace(/^\s*www\.1tamilmv\.[a-z]+\s*-\s*/i, '').replace(/\.torrent$/i, '').trim();
 
 async function topicFiles(href) {
   const hit = filesCache.get(href);
@@ -318,7 +319,7 @@ async function searchTopics(title, year, series) {
     if (!series && year && Math.abs(Number(y) - Number(year)) > 1) continue;
     if (/music|video-album|video-songs|songs|trailer|teaser/.test(rest)) continue;
     topics.push(href.replace(/&amp;/g, '&'));
-    if (topics.length >= 8) break;
+    if (topics.length >= 12) break;
   }
   searchCache.set(key, { at: Date.now(), topics });
   if (searchCache.size > 1000) searchCache.delete(searchCache.keys().next().value);
@@ -331,12 +332,32 @@ router.get('/files', async (req, res) => {
   const title = String(req.query.title || '').slice(0, 200);
   const year = String(req.query.year || '').slice(0, 4);
   try {
-    // A title from the front page knows its posts; any other is searched for.
-    const topics = item ? item.topics : title ? await searchTopics(title, year, type === 'tv') : [];
+    /* A title from the front page knows the posts listed there; any other is
+       searched for. Both are searched, in fact: a film is often posted once
+       per language, and the front page shows only some of those posts. */
+    const found = await searchTopics(item ? item.title : title, item ? item.year : year, type === 'tv').catch(() => []);
+    // One per topic, whichever address it came by.
+    const byTopic = new Map();
+    for (const t of [...(item ? item.topics : []), ...found]) {
+      const tid = (t.match(/\/topic\/(\d+)-/) || [])[1] || t;
+      if (!byTopic.has(tid)) byTopic.set(tid, t);
+    }
+    const topics = [...byTopic.values()].slice(0, 12);
     if (!topics.length) return res.json({ files: [] });
     const lists = await Promise.all(topics.map((t) => topicFiles(t).catch(() => [])));
+    /* Once each. A multi-language file is attached to every language's post
+       — the same 4K file under the Tamil post and the Malayalam one — so a
+       file is known by its torrent's hash, which is the same wherever it is
+       posted, and by its name where it has no magnet. */
     const seen = new Set();
-    const files = lists.flat().filter((f) => f.name && !seen.has(f.name) && seen.add(f.name)).map((f) => {
+    const keyOf = (f) => ((f.magnet || '').match(/btih:([a-z0-9]+)/i) || [])[1]?.toLowerCase() || f.name.toLowerCase().replace(/\s+/g, ' ');
+    const files = lists.flat().filter((f) => {
+      if (!f.name) return false;
+      const k = keyOf(f), n = f.name.toLowerCase().replace(/\s+/g, ' ');
+      if (seen.has(k) || seen.has(n)) return false;
+      seen.add(k); seen.add(n);
+      return true;
+    }).map((f) => {
       let key = null;
       if (f.page) {
         key = Buffer.from(f.page).toString('base64url');
