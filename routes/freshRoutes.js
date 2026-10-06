@@ -129,22 +129,72 @@ async function matchTitle(p) {
       hit = any.filter(same).find((r) => Math.abs(yearOf(r) - p.year) <= 1) || null;
     }
   }
-  let value = hit ? { ...hit, media_type: p.series ? 'tv' : 'movie' } : null;
-  /* The title logo, for the hero: English first, then one with no text, then
-     the title's own language — many Indian films have only that. Asked once
-     per title; the match is kept. */
-  if (value) {
-    try {
-      const im = await tmdb(`/${value.media_type}/${value.id}/images`, { include_image_language: 'en,null,hi,kn,ta,te,ml,bn,mr' });
-      const logos = im.logos || [];
-      const logo = logos.find((l) => l.iso_639_1 === 'en') || logos.find((l) => !l.iso_639_1)
-        || logos.find((l) => l.iso_639_1 === value.original_language) || logos[0];
-      value = { ...value, logo_path: logo?.file_path || null };
-    } catch { /* a missing logo leaves the title as text */ }
-  }
+  const value = hit ? await withLogo({ ...hit, media_type: p.series ? 'tv' : 'movie' }) : null;
   matches.set(key, value);
   if (matches.size > 3000) matches.delete(matches.keys().next().value);
   return value;
+}
+
+/* The title logo, for the hero: English first, then one with no text, then
+   the title's own language — many Indian films have only that. Asked once
+   per title; the match is kept. */
+async function withLogo(value) {
+  try {
+    const im = await tmdb(`/${value.media_type}/${value.id}/images`, { include_image_language: 'en,null,hi,kn,ta,te,ml,bn,mr' });
+    const logos = im.logos || [];
+    const logo = logos.find((l) => l.iso_639_1 === 'en') || logos.find((l) => !l.iso_639_1)
+      || logos.find((l) => l.iso_639_1 === value.original_language) || logos[0];
+    return { ...value, logo_path: logo?.file_path || null };
+  } catch { return value; /* a missing logo leaves the title as text */ }
+}
+
+/* A post that names its IMDb id is matched by it — exact, whatever the name
+   says. */
+async function matchImdb(imdb, series) {
+  const key = `imdb|${imdb}`;
+  if (matches.has(key)) return matches.get(key);
+  const d = await tmdb(`/find/${imdb}`, { external_source: 'imdb_id' });
+  const tv = (d.tv_results || [])[0], mv = (d.movie_results || [])[0];
+  const hit = series ? (tv || mv) : (mv || tv);
+  const value = hit ? await withLogo({ ...hit, media_type: hit === tv ? 'tv' : 'movie', imdb_id: imdb }) : null;
+  matches.set(key, value);
+  return value;
+}
+
+/* ── HDHub4u's newest posts ─────────────────────────────────────────────
+   Its search index (the one its own search page asks) lists posts newest
+   first, each with its title, the time it went up and usually its IMDb id:
+     "Spider-Man: Brand New Day (2026) DS4K WEB-DL [Hindi (DD5.1) & English] 4K …"
+     "The Punisher (Season 1) DS4K WEB-DL [Hindi … & English] …" */
+const HDHUB_SEARCH = process.env.HDHUB_SEARCH || 'https://search.pingora.fyi/collections/post/documents/search';
+const HDHUB_BASE = (process.env.HDHUB_BASE || 'https://new1.hdhub4u.free').replace(/\/$/, '');
+async function readHdhub(pages = 2) {
+  const posts = [];
+  for (let page = 1; page <= pages; page++) {
+    const u = new URL(HDHUB_SEARCH);
+    Object.entries({ q: '*', query_by: 'post_title', sort_by: 'sort_by_date:desc', per_page: '50', page: String(page) })
+      .forEach(([k, v]) => u.searchParams.set(k, v));
+    const r = await fetchRetry(u.href, () => ({ headers: { 'User-Agent': UA, Referer: `${HDHUB_BASE}/` }, signal: AbortSignal.timeout(15000) }));
+    if (!r.ok) throw new Error(`HDHub4u index answered ${r.status}`);
+    for (const h of (await r.json()).hits || []) {
+      const d = h.document || {};
+      const t = String(d.post_title || '');
+      const season = t.match(/^(.+?)\s*\((?:Season|S)\s*\d+\)/i);
+      const film = t.match(/^(.+?)\s*\(((?:19|20)\d{2})\)/);
+      const name = (season ? season[1] : film ? film[1] : '').trim();
+      if (!name || /^bigg\s*boss\b/i.test(name)) continue;
+      const rest = t.slice((season || film)[0].length);
+      const bracket = (rest.match(/\[([^\]]+)\]/) || [])[1] || '';
+      const langs = [...new Set((bracket.toLowerCase().match(/[a-z]+/g) || []).map((w) => LANGS[w]).filter(Boolean))];
+      const imdb = /^tt\d+$/.test(String(d.imdb_id || '')) ? d.imdb_id : '';
+      posts.push({
+        source: 'hdhub', id: Number(d.sort_by_date) || 0, at: (Number(d.sort_by_date) || 0) * 1000,
+        name, year: film ? Number(film[2]) : 0, series: !!season, langs,
+        print: printOf(rest.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')), imdb,
+      });
+    }
+  }
+  return posts;
 }
 
 /* ── 3. The list ──────────────────────────────────────────────────────── */
@@ -156,16 +206,24 @@ let running = null;
 async function refresh() {
   if (running) return running;
   running = (async () => {
-    const res = await fetchRetry(SOURCE + '/', () => ({ headers: { 'User-Agent': UA, Accept: 'text/html' }, signal: AbortSignal.timeout(20000) }));
-    if (!res.ok) throw new Error(`1TamilMV answered ${res.status}`);
-    const posts = readPosts(await res.text());
-    if (!posts.length) throw new Error('no releases found on the front page');
+    /* Both sites, each on its own: one being down costs only its titles. */
+    const tmv = await (async () => {
+      const res = await fetchRetry(SOURCE + '/', () => ({ headers: { 'User-Agent': UA, Accept: 'text/html' }, signal: AbortSignal.timeout(20000) }));
+      if (!res.ok) throw new Error(`1TamilMV answered ${res.status}`);
+      return readPosts(await res.text()).map((p) => ({ ...p, source: 'tamilmv' }));
+    })().catch((e) => { console.warn(`⚠️ 1TamilMV not read: ${e.message}`); return []; });
+    const hd = await readHdhub().catch((e) => { console.warn(`⚠️ HDHub4u not read: ${e.message}`); return []; });
+    const posts = [...tmv, ...hd];
+    if (!posts.length) throw new Error('no releases from either site');
     const names = await genres();
 
     const found = [];
     for (let i = 0; i < posts.length; i += 6) {
       const batch = await Promise.all(posts.slice(i, i + 6).map(async (p) => {
-        try { return { p, t: await matchTitle(p) }; } catch { return { p, t: null }; }
+        try {
+          const t = (p.imdb && await matchImdb(p.imdb, p.series)) || ((p.year || p.series) ? await matchTitle(p) : null);
+          return { p, t };
+        } catch { return { p, t: null }; }
       }));
       found.push(...batch);
     }
@@ -181,20 +239,29 @@ async function refresh() {
       if ((t.genre_ids || []).some((g) => [10763, 10764, 10767].includes(g))) return;
       const key = `${t.media_type}:${t.id}`;
       const have = byId.get(key);
+      /* When this post went up. HDHub4u says; 1TamilMV does not, so its
+         front-page order stands in: newest first, a title seen before keeps
+         its time, and a newer topic for it (a new episode) moves it back to
+         the front. A title on both sites takes the later of the two. */
+      const tk = `${p.source}:${key}`;
+      let at;
+      if (p.source === 'hdhub') at = p.at || now;
+      else {
+        if (!firstSeen.has(tk) || p.id > (newestPost.get(tk) || 0) && newestPost.has(tk)) firstSeen.set(tk, now - i * 60e3);
+        newestPost.set(tk, Math.max(p.id, newestPost.get(tk) || 0));
+        at = firstSeen.get(tk);
+      }
       if (have) {
         have.languages = [...new Set([...have.languages, ...p.langs])];
-        if (have.topics.length < 8) have.topics.push(p.href);
+        if (p.href && have.topics.length < 8) have.topics.push(p.href);
         // The best print any of its posts has.
         if ((CLEAN_PRINT.test(p.print) && !CLEAN_PRINT.test(have.print)) || !have.print) have.print = p.print;
         if (p.topWeek) have.top_week = true;
+        if (!have.sources.includes(p.source)) have.sources.push(p.source);
+        if (!have.imdb_id && (p.imdb || t.imdb_id)) have.imdb_id = p.imdb || t.imdb_id;
+        if (at > Date.parse(have.first_seen)) have.first_seen = new Date(at).toISOString();
         return;
       }
-      /* Front-page order is newest first; a title seen before keeps its time.
-         A series posted episode by episode is still one title — its posts
-         merge here — but a new episode (a newer topic than any seen for it)
-         moves it back to the front. */
-      if (!firstSeen.has(key) || p.id > (newestPost.get(key) || 0) && newestPost.has(key)) firstSeen.set(key, now - i * 60e3);
-      newestPost.set(key, Math.max(p.id, newestPost.get(key) || 0));
       const title = t.title || t.name;
       const year = String(t.release_date || t.first_air_date || p.year).slice(0, 4);
       byId.set(key, {
@@ -214,13 +281,17 @@ async function refresh() {
         languages: p.langs,
         print: p.print,
         top_week: !!p.topWeek,
-        topics: [p.href],
-        first_seen: new Date(firstSeen.get(key)).toISOString(),
+        topics: p.href ? [p.href] : [],
+        // Lets the watch page find the HDHub4u post exactly.
+        imdb_id: p.imdb || t.imdb_id || null,
+        sources: [p.source],
+        first_seen: new Date(at).toISOString(),
       });
     });
-    const items = [...byId.values()].filter((x) => x.poster);
+    const items = [...byId.values()].filter((x) => x.poster)
+      .sort((a, b) => Date.parse(b.first_seen) - Date.parse(a.first_seen));
     state = { updatedAt: new Date(now).toISOString(), items, error: null };
-    console.log(`🆕 Fresh titles: ${items.length} matched from ${posts.length} releases`);
+    console.log(`🆕 Fresh titles: ${items.length} matched from ${tmv.length} 1TamilMV + ${hd.length} HDHub4u posts`);
     return state;
   })().catch((e) => {
     state = { ...state, error: e.message };
