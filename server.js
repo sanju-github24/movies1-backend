@@ -36,6 +36,7 @@ import saavnRouter, { searchSongs } from './routes/saavnRoutes.js';
 import bollyflixRouter from './routes/bollyflixRoutes.js';
 import hdhubRouter from './routes/hdhubRoutes.js';
 import freshRouter from './routes/freshRoutes.js';
+import moviboxRouter from './routes/moviboxRoutes.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
 import crypto from "crypto";
@@ -874,6 +875,7 @@ app.use('/api/saavn',  saavnRouter);
 app.use('/api/bollyflix', bollyflixRouter);   // download sources for the download page
 app.use('/api/hdhub', hdhubRouter);           // more of them, wait pages skipped
 app.use('/api/fresh', freshRouter);           // what has just come out, matched to TMDB
+app.use('/api/movibox', moviboxRouter);       // a title's per-language MPD/MP4 links, by TMDB id or name
 
 async function fetchBCCI(url) {
     const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
