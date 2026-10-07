@@ -3481,6 +3481,45 @@ function toMuxProxyUrl(req, m3u8) {
 // Read the page and take the <source>. No browser, no policy key: a GET and a
 // regex, in about a second. The scraper stays as the fallback for everything
 // else, and for BCCI pages that don't match this shape.
+/* The rebuilt bcci.tv hosts its video on Mux. A video page server-renders
+   the player's props, playbackUrl among them — an HLS master at
+   stream.mux.com with a signed token good for about a day — so it reads
+   straight out of the HTML: no browser, about a second. Kept a while, well
+   inside the token's life. */
+const _bcciPlayCache = new Map();   // page → { at, url }
+async function bcciPlaybackUrl(pageUrl) {
+  const hit = _bcciPlayCache.get(pageUrl);
+  if (hit && Date.now() - hit.at < 3 * 3600e3) return hit.url;
+  const r = await fetch(pageUrl, { headers: { 'User-Agent': BCCI_HL_UA, Accept: 'text/html' }, signal: AbortSignal.timeout(15000) });
+  if (!r.ok) throw new Error(`bcci.tv answered ${r.status}`);
+  const html = await r.text();
+  const m = html.match(/\\?"playbackUrl\\?"\s*:\s*\\?"(https:\/\/stream\.mux\.com\/[^"\\]+)/)
+    || html.match(/(https:\/\/stream\.mux\.com\/[A-Za-z0-9]+\.m3u8\?token=[A-Za-z0-9._-]+)/);
+  const url = m ? m[1].replace(/\\u0026/g, '&') : null;
+  if (url) {
+    _bcciPlayCache.set(pageUrl, { at: Date.now(), url });
+    if (_bcciPlayCache.size > 500) _bcciPlayCache.delete(_bcciPlayCache.keys().next().value);
+  }
+  return url;
+}
+
+/* A BCCI video page → its stream, for the highlight players. Only bcci.tv
+   video pages: this is not a general fetcher. */
+app.get('/api/bcci/play', async (req, res) => {
+  const page = String(req.query.url || '');
+  let ok = false;
+  try { const u = new URL(page); ok = /(^|\.)bcci\.tv$/i.test(u.hostname) && /^\/videos\//.test(u.pathname); } catch { ok = false; }
+  if (!ok) return res.status(400).json({ success: false, error: 'Not a bcci.tv video page' });
+  try {
+    const url = await bcciPlaybackUrl(page);
+    if (!url) return res.status(404).json({ success: false, error: 'No stream on that page' });
+    res.json({ success: true, url });
+  } catch (e) {
+    console.warn('[bcci] play failed:', e.message);
+    res.status(502).json({ success: false, error: e.message });
+  }
+});
+
 async function bcciDirectMp4(pageUrl) {
     const r = await withTimeout(fetch(pageUrl, {
         redirect: 'follow',            // /bccilink/videos/<code> → /video/<id>/<slug>
@@ -3518,6 +3557,9 @@ app.get('/api/get-stream', async (req, res) => {
 
     if (/(^|\.)bcci\.tv$/i.test((() => { try { return new URL(targetUrl).hostname; } catch { return ''; } })())) {
         try {
+            // The rebuilt site: its Mux stream, read from the page.
+            const mux = await bcciPlaybackUrl(targetUrl).catch(() => null);
+            if (mux) return res.json({ success: true, url: mux, source: 'bcci:mux' });
             const mp4 = await bcciDirectMp4(targetUrl);
             if (mp4) {
                 console.log(`✅ bcci direct mp4: ${mp4}`);
