@@ -504,4 +504,28 @@ router.get('/direct', async (req, res) => {
   }
 });
 
+/* The same file, for a player: a redirect to it, followed when the video
+   element asks — the file's link lasts a few hours, so it is found at play
+   time rather than when the title's list was made. The key is the post's
+   direct-link page in base64url; one this server did not list is accepted
+   only if it has that page's shape (host/l/<code>), and with several backends
+   behind the site the list and the play can land on different ones. */
+const DIRECT_PAGE = /^https:\/\/[a-z0-9.-]+\/l\/[A-Za-z0-9]+$/i;
+router.get('/play', async (req, res) => {
+  const key = String(req.query.key || '');
+  let page = directPages.get(key)?.page;
+  if (!page) { try { page = Buffer.from(key, 'base64url').toString(); } catch { page = ''; } }
+  if (!DIRECT_PAGE.test(page)) return res.status(400).send('Not a direct link');
+  try {
+    const hit = directCache.get(key);
+    const url = hit && Date.now() - hit.at < 30 * 60e3 ? hit.value.url : await followDirect(page);
+    if (!hit) directCache.set(key, { at: Date.now(), value: { url, name: directPages.get(key)?.name || '' } });
+    res.set('Cache-Control', 'no-store');
+    res.redirect(302, url);
+  } catch (e) {
+    console.warn(`⚠️ Play link not followed: ${e.message}`);
+    res.status(502).send('The file host is not answering right now');
+  }
+});
+
 export default router;
