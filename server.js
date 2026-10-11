@@ -36,6 +36,7 @@ import bollyflixRouter from './routes/bollyflixRoutes.js';
 import hdhubRouter from './routes/hdhubRoutes.js';
 import freshRouter from './routes/freshRoutes.js';
 import moviboxRouter from './routes/moviboxRoutes.js';
+import hotstarProxy from './routes/hotstarProxy.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
 import crypto from "crypto";
@@ -153,6 +154,10 @@ const corsOptions = {
   },
   credentials: true,
 };
+
+/* Ahead of the CORS layer: a player fetches every segment from whatever page
+   embeds it, and this route answers any origin itself. */
+app.use('/api/hs-proxy', hotstarProxy);
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
