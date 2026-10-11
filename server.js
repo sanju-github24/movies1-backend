@@ -15,7 +15,6 @@ import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { spawn } from 'child_process';
 import { Readable } from 'stream';
-import { startTelegramBot } from "./telegram/bot.js";
 
 import authRouter from './routes/authRoutes.js';
 import userRouter from './routes/userRoutes.js';
@@ -89,11 +88,11 @@ const port = process.env.PORT || 4000;
 await connectDBs();
 /* Two copies of this server can run side by side (the site spreads visitors
    across them). Set INSTANCE_ROLE=secondary on every copy but one: the jobs
-   that must happen once — the Telegram bot, the live-match alerts, the ICC
-   harvest — run only on the primary, or each would happen twice. */
+   that must happen once — the live-match alerts (push and the Telegram
+   channel) and the ICC harvest — run only on the primary, or each would
+   happen twice. */
 const isPrimary = process.env.INSTANCE_ROLE !== 'secondary';
-console.log(`🧭 Instance role: ${isPrimary ? 'primary' : 'secondary (bot, alerts and harvest off)'}`);
-if (isPrimary) startTelegramBot();
+console.log(`🧭 Instance role: ${isPrimary ? 'primary' : 'secondary (alerts and harvest off)'}`);
 
 // -------------------- LOAD CLEANED MOVIE DATA --------------------
 const dataPath = path.join(__dirname, 'data', 'all_south_indian_movies.json');
@@ -4551,7 +4550,7 @@ app.post('/api/push/prune-host', async (req, res) => {
    algorithm sits between us and them — which makes it worth more than the
    search work, honestly, and it costs one API call per upload.
 
-   Uses the bot that already exists (@anchormovies_bot). Set TELEGRAM_CHANNEL
+   Posts through the bot's token (BOT_TOKEN) only — nothing polls it. Set TELEGRAM_CHANNEL
    to the channel (@name, or the -100… id for a private one) and add the bot
    as an administrator with "post messages". Unset, this does nothing.
    ───────────────────────────────────────────────────────────────────── */
