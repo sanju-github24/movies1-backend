@@ -353,6 +353,20 @@ export async function songsLikeSong(songId, n) {
         const more = await searchSongsPaged(`${formatString(raw.primary_artists).split(',')[0]} ${lang}`, 1, 40).catch(() => ({ results: [] }));
         songs = uniqueSongs([...songs, ...more.results.filter(s => !lang || s.language === lang)], songId);
     }
+    /* Still short — a little-known singer has a handful of songs — so it
+       keeps widening until there is a full list, nearest first: the same
+       album or film, its music director, then the language's most played.
+       Similar songs should never come back empty. */
+    const widen = async (q) => {
+        if (songs.length >= n || !q) return;
+        const more = await searchSongsPaged(q, 1, 40).catch(() => ({ results: [] }));
+        songs = uniqueSongs([...songs, ...more.results.filter(s => !lang || s.language === lang)], songId);
+    };
+    const album = formatString(raw.album || '').replace(/\s*\((?:from|original).*$/i, '').trim();
+    await widen(album);
+    await widen(formatString(raw.music || '').split(',')[0].trim() && `${formatString(raw.music).split(',')[0].trim()} ${lang}`);
+    await widen(lang && `${lang} hits`);
+    await widen(lang && `latest ${lang} songs`);
     return freshTop(songs, n);
 }
 
