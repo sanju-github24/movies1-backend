@@ -10,3 +10,5 @@ __pycache__/
 
 # Python packages for the scrapers, installed at build time
 .pydeps/
+
+data/radio-cache.json
