@@ -74,7 +74,7 @@ router.get('/', async (req, res) => {
   const slugs = ranked.map((r) => r.slug);
   const { data } = await supabase
     .from('watch_html')
-    .select('slug, title, poster, cover_poster, title_logo, content_type, imdb_rating, trailer_codes, genres, language')
+    .select('slug, title, poster, cover_poster, title_logo, content_type, imdb_rating, trailer_codes, genres')
     .in('slug', slugs);
   const bySlug = new Map((data || []).map((w) => [w.slug, w]));
 
