@@ -16,8 +16,13 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createClient } from '@supabase/supabase-js';
+import { freshItems } from './freshRoutes.js';
 
 const router = express.Router();
+// What a title listed in the source sites' "top releases this week" is worth
+// before anyone here has played it — enough to seed the row, below a few real
+// local plays.
+const SOURCE_WEIGHT = 2;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const FILE = path.join(__dirname, '..', 'data', 'trending.json');
 const HALF_LIFE_MS = 3 * 24 * 3600e3;      // a vote is worth half as much three days on
@@ -62,15 +67,30 @@ router.get('/', async (req, res) => {
   const now = Date.now();
   if (cache.value && now - cache.at < 60e3) return res.json(cache.value.slice(0, limit));
 
-  const ranked = Object.entries(hits)
-    .map(([slug, h]) => ({ slug, score: decay(h, now) }))
-    .filter((r) => r.score > 0.05)
+  /* One score per title from two sources: what people here have played
+     (decayed votes) and what the source sites list as hot this week (a
+     baseline, so fresh releases from 1TamilMV/HDHub4u trend before anyone
+     here has watched them). Real local plays rise above the baseline. */
+  const fresh = freshItems();
+  const freshBySlug = new Map(fresh.map((f) => [f.slug, f]));
+  const score = new Map();
+  for (const [slug, h] of Object.entries(hits)) {
+    const s = decay(h, now);
+    if (s > 0.05) score.set(slug, (score.get(slug) || 0) + s);
+  }
+  for (const f of fresh) {
+    if (f.top_week && f.slug) score.set(f.slug, (score.get(f.slug) || 0) + SOURCE_WEIGHT);
+  }
+
+  const ranked = [...score.entries()]
+    .map(([slug, s]) => ({ slug, score: s }))
     .sort((a, b) => b.score - a.score)
     .slice(0, 20);
 
   if (!ranked.length) { res.set('Cache-Control', 'public, max-age=60'); return res.json([]); }
 
-  // Enrich from watch_html — the table a watch page is built from.
+  // Enrich from watch_html (our uploads) first; a title that is only on the
+  // source sites comes from the fresh cache instead.
   const slugs = ranked.map((r) => r.slug);
   const { data } = await supabase
     .from('watch_html')
@@ -79,22 +99,23 @@ router.get('/', async (req, res) => {
   const bySlug = new Map((data || []).map((w) => [w.slug, w]));
 
   const list = ranked.map((r, i) => {
-    const w = bySlug.get(r.slug) || {};
+    const w = bySlug.get(r.slug) || freshBySlug.get(r.slug) || {};
     return {
       id: `trend_${r.slug}`,
       slug: r.slug,
       rank: i + 1,
+      tmdb_id: w.tmdb_id || null,
       title: w.title || r.slug,
       poster: w.poster || '/default-poster.jpg',
       cover_poster: w.cover_poster || w.poster || '',
       title_logo: w.title_logo || null,
       content_type: w.content_type || 'movie',
-      imdbRating: w.imdb_rating != null ? String(w.imdb_rating) : null,
+      imdbRating: w.imdb_rating != null && w.imdb_rating !== '' ? String(w.imdb_rating) : null,
       trailer_key: w.trailer_codes || null,
       language: w.language || [],
       genres: w.genres || [],
     };
-  }).filter((m) => m.cover_poster || m.poster);   // need an image to show
+  }).filter((m) => m.cover_poster || (m.poster && m.poster !== '/default-poster.jpg'));   // need real art
 
   cache = { at: now, value: list };
   res.set('Cache-Control', 'public, max-age=60');

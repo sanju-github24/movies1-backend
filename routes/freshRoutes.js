@@ -201,6 +201,10 @@ async function readHdhub(pages = 2) {
 const firstSeen = new Map();   // "tv:123" → when this server first saw it, or its newest post
 const newestPost = new Map();  // "tv:123" → the highest topic number seen for it
 let state = { updatedAt: null, items: [], error: null };
+
+/* The current fresh titles (1TamilMV + HDHub4u, TMDB-matched), for other
+   modules — the trending Top 10 seeds from and enriches against these. */
+export const freshItems = () => state.items;
 let running = null;
 
 async function refresh() {
