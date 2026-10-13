@@ -12,3 +12,5 @@ __pycache__/
 .pydeps/
 
 data/radio-cache.json
+
+data/trending.json

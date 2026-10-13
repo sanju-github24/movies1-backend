@@ -33,6 +33,7 @@ import geminiRoutes from './routes/geminiRoutes.js';
 import autofillRouter from './routes/autofill.js';
 import saavnRouter, { searchSongs } from './routes/saavnRoutes.js';
 import radioRouter from './routes/radioRoutes.js';
+import trendingRouter from './routes/trendingRoutes.js';
 import bollyflixRouter from './routes/bollyflixRoutes.js';
 import hdhubRouter from './routes/hdhubRoutes.js';
 import freshRouter from './routes/freshRoutes.js';
@@ -878,6 +879,7 @@ app.use('/api',        tmdbRouter);
 // The music pages' only data source — a port of github.com/anxkhn/jiosaavn-api.
 app.use('/api/saavn',  saavnRouter);
 app.use('/api/radio',  radioRouter);
+app.use('/api/trending', trendingRouter);
 app.use('/api/bollyflix', bollyflixRouter);   // download sources for the download page
 app.use('/api/hdhub', hdhubRouter);           // more of them, wait pages skipped
 app.use('/api/fresh', freshRouter);           // what has just come out, matched to TMDB
