@@ -3113,7 +3113,7 @@ app.get('/api/mx/shelf', async (req, res) => {
   const pathSlug = String(req.query.path || '').trim();
   if (!pathSlug) return res.status(400).json({ success: false, error: 'Pass ?path=' });
   const lang = String(req.query.lang || '').trim().toLowerCase();
-  const limit = Math.min(Number(req.query.limit) || 24, 40);
+  const limit = Math.min(Number(req.query.limit) || 24, 60);
   console.log(`🎬 MX shelf requested: ${pathSlug}${lang ? ` (${lang})` : ''}`);
   try {
     const data = await mxBrowse(pathSlug);
