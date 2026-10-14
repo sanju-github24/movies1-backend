@@ -3061,6 +3061,78 @@ app.get('/api/mx/episodes', async (req, res) => {
   }
 });
 
+/* A browse/category page as a shelf — e.g. Korean dramas or Anime — in MX's own
+   on-page order, which is to say how MX is trending them right now. MX serves
+   these SSR pages only to Indian residential IPs (same wall as the hero), so it
+   rides mxFetch. Returns lightweight cards; clicking one opens /mx-watch and the
+   Playwright resolver turns its webUrl into a real stream, exactly like search. */
+function mxMapCard(it) {
+  const rel = it.webUrl ? it.webUrl.replace(/^https?:\/\/[^/]+/, '') : null;
+  return {
+    id: it.id,
+    title: it.title,
+    type: it.type,                                  // movie | tvshow | episode
+    webUrl: rel ? 'https://www.mxplayer.in' + rel : null,
+    poster: mxImg(it, ['portrait_large', 'portrait', 'landscape', 'bigpic']),
+    thumb: mxImg(it, ['landscape', 'bigpic', 'banner_and_static_bg_desktop', 'portrait_large']),
+    year: it.releaseDate ? new Date(it.releaseDate).getFullYear() : null,
+    languages: (it.languages || []).map((l) => (typeof l === 'string' ? l : (l && (l.name || l.title || l.language)) || '')).filter(Boolean),
+    genres: (it.genres || []).map((g) => (typeof g === 'string' ? g : (g && (g.name || g.title)) || '')).filter(Boolean),
+    seasons: it.childCount || it.seasons || null,
+  };
+}
+
+async function mxBrowse(pathSlug) {
+  const clean = String(pathSlug).replace(/^\/+/, '');
+  const res = await mxFetch('https://www.mxplayer.in/' + clean);
+  const html = await res.text();
+  if (/^\s*You have /i.test(html)) throw new MxUnavailable(html.slice(0, 120));
+  const blob = mxExtractBlob(html, 'window.__mxs__');
+  if (!blob) throw new Error('No SSR state (residential IP required)');
+  const state = JSON.parse(blob);
+  const ent = state.entities || {};
+  const browse = state.browse || {};
+  // The browse container is keyed by the page path; fall back to the first one.
+  const keys = Object.keys(browse);
+  const key = keys.find((k) => k === '/' + clean || k === clean || k.includes(clean)) || keys[0];
+  const cont = (key && browse[key]) || {};
+  const raw = cont.items || cont.list || cont.contentItems || [];
+  const resolve = (x) => {
+    if (!x) return null;
+    if (typeof x === 'string') return ent[x] || null;
+    if (x.id && ent[x.id]) return ent[x.id];
+    return x.title ? x : null;
+  };
+  let items = raw.map(resolve).filter((it) => it && it.title && it.type);
+  // Layout shuffle fallback: no container found → take titled film/show entities.
+  if (!items.length) items = Object.values(ent).filter((v) => v && v.title && /movie|tvshow/i.test(v.type || ''));
+  return { style: cont.style || null, total: cont.total || items.length, items: items.map(mxMapCard) };
+}
+
+app.get('/api/mx/shelf', async (req, res) => {
+  const pathSlug = String(req.query.path || '').trim();
+  if (!pathSlug) return res.status(400).json({ success: false, error: 'Pass ?path=' });
+  const lang = String(req.query.lang || '').trim().toLowerCase();
+  const limit = Math.min(Number(req.query.limit) || 24, 40);
+  console.log(`🎬 MX shelf requested: ${pathSlug}${lang ? ` (${lang})` : ''}`);
+  try {
+    const data = await mxBrowse(pathSlug);
+    let items = data.items;
+    if (lang) {
+      const hit = items.filter((it) => (it.languages || []).some((l) => l.toLowerCase().includes(lang)));
+      if (hit.length) items = hit;          // keep the full list if nothing matches — better than an empty row
+    }
+    res.json({ success: true, style: data.style, items: items.slice(0, limit) });
+  } catch (e) {
+    if (e.name === 'MxUnavailable' || /No SSR state/.test(e.message)) {
+      console.warn(`⚠️ MX shelf unavailable: ${e.message}`);
+      return res.status(503).json({ success: false, unavailable: true, reason: e.message, items: [] });
+    }
+    console.error(`❌ MX shelf failed: ${e.message}`);
+    res.status(502).json({ success: false, error: e.message, items: [] });
+  }
+});
+
 
 // =====================================
 // 🗃️  YOUTUBE RESULT CACHE — conserve the daily Search-API quota
