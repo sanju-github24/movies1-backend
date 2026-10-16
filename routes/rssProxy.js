@@ -16,6 +16,7 @@
 
 import express from "express";
 import { XMLParser } from "fast-xml-parser";
+import { extractArticleBody, wordCount } from "../utils/articleExtract.js";
 
 const router = express.Router();
 
@@ -122,6 +123,16 @@ function isAllowedArticleUrl(url) {
 
 // ─── Parse ───────────────────────────────────────────────────────────────────
 
+/* Cricinfo's feed still names its pictures on the old plain-http image host,
+   which a secure page will not show as-is and which only serves the full-size
+   original (about 800 KB). Its image CDN has the same picture resized — about
+   40 KB at card width. Anything else on plain http is asked for over https. */
+function betterThumb(url = "") {
+  const ci = url.match(/^https?:\/\/p\.imgci\.com\/(db\/PICTURES\/.+)$/i);
+  if (ci) return `https://img1.hscicdn.com/image/upload/f_auto,t_ds_wide_w_960,q_70/lsci/${ci[1]}`;
+  return url.replace(/^http:\/\//i, "https://");
+}
+
 // Pulls plain text out of whatever shape fast-xml-parser handed back.
 function getText(val) {
   if (val == null) return "";
@@ -160,6 +171,7 @@ function parseRSS(xml, feedKey) {
       const m = description.match(/<img[^>]+src=["']([^"']+)["']/i);
       if (m) thumbnail = m[1];
     }
+    thumbnail = betterThumb(thumbnail);
 
     const preview = description
       .replace(/<[^>]+>/g, " ")
@@ -317,7 +329,7 @@ router.get("/rss/article", async (req, res) => {
     const ogImageMatch =
       html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i) ||
       html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
-    const thumbnail = ogImageMatch?.[1] || "";
+    const thumbnail = betterThumb(ogImageMatch?.[1] || "");
 
     const dateMatch =
       html.match(/datePublished["'\s:]+["']([^"']+)["']/i) ||
@@ -371,6 +383,13 @@ router.get("/rss/article", async (req, res) => {
       .replace(/<!--[\s\S]*?-->/g, "")
       .replace(/<div[^>]+class=["'][^"']*(ad|social|share|related|widget|promo)[^"']*["'][^>]*>[\s\S]*?<\/div>/gi, "")
       .trim();
+
+    /* The parser-based extractor reads the page's real nesting, so it gets the
+       whole story where the regexes above stop at the first nested block. The
+       regex result stays as a fallback, used only when it found clearly more
+       text (a layout the parser's selectors do not know yet). */
+    const parsed = extractArticleBody(html, articleUrl);
+    if (parsed && wordCount(parsed) >= wordCount(content) * 0.8) content = parsed;
 
     if (!content) {
       return res.status(422).json({ success: false, error: "Could not extract article content" });
