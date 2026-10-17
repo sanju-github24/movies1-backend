@@ -62,6 +62,20 @@ export function extractArticleBody(html, pageUrl) {
   // "Comments" jump links and similar in-page anchors lead nowhere on our page.
   body.find("a[href^='#'], a[href*='#vuukle'], a[href*='#comments']").remove();
 
+  /* An Instagram embed is a blockquote that Instagram's script turns into the
+     post. Without the script it is the words "View this post on Instagram"
+     and a byline floating in the story; say plainly what it is instead. */
+  body.find("blockquote").each((_, bq) => {
+    const $bq = $(bq);
+    const link = $bq.find("a[href*='instagram.com/']").first();
+    if (!link.length) return;
+    const href = String(link.attr("href")).split("?")[0];
+    const byline = $bq.find("p").toArray().map((p) => $(p).text().trim())
+      .find((t) => /post shared by/i.test(t));
+    const who = byline ? byline.replace(/^.*?post shared by\s*/i, "") : "";
+    $bq.replaceWith($("<p>").append($("<a>").attr("href", href).text(who ? `Instagram post by ${who}` : "View this post on Instagram")));
+  });
+
   // Lazy-loaded images keep the real address in a data attribute.
   body.find("img").each((_, img) => {
     const $img = $(img);
