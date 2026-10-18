@@ -383,6 +383,63 @@ router.get('/tmdb-collection', async (req, res) => {
   }
 });
 
+// ── /tmdb-network ─────────────────────────────────────────────────────────────
+// A "studio": the shows + movies for one streaming brand, from TMDB discover.
+//   GET /api/tmdb-network?network=<id>&provider=<id>&company=<id>&region=IN&page=1
+// TV comes from with_networks (a TMDB network), or with_watch_providers when a
+// provider id is given; movies come from with_watch_providers, or with_companies.
+// Whatever ids a studio has are used; the rest are skipped. Results merge and
+// sort by popularity so the row leads with what people actually watch.
+router.get('/tmdb-network', async (req, res) => {
+  const network  = String(req.query.network  || '').replace(/\D/g, '');
+  const provider = String(req.query.provider || '').replace(/\D/g, '');
+  const company  = String(req.query.company  || '').replace(/\D/g, '');
+  const region   = String(req.query.region   || 'US').slice(0, 2).toUpperCase() || 'US';
+  const page     = Math.min(Math.max(parseInt(req.query.page, 10) || 1, 1), 500);
+  if (!network && !provider && !company) {
+    return res.status(400).json({ success: false, message: 'Pass network, provider or company.' });
+  }
+
+  const discover = async (type, params) => {
+    try {
+      const r = await axiosWithRetry({
+        method: 'get', url: `${BASE_URL}discover/${type}`,
+        params: { api_key: TMDB_API_KEY, language: 'en-US', include_adult: false,
+          sort_by: 'popularity.desc', page, 'vote_count.gte': 20, ...params },
+      });
+      return { results: r?.data?.results || [], total_pages: r?.data?.total_pages || 1 };
+    } catch { return { results: [], total_pages: 1 }; }
+  };
+
+  try {
+    const tvParams    = network ? { with_networks: network }
+                       : provider ? { with_watch_providers: provider, watch_region: region } : null;
+    const movieParams = company ? { with_companies: company }
+                       : provider ? { with_watch_providers: provider, watch_region: region } : null;
+
+    const [tv, movie] = await Promise.all([
+      tvParams    ? discover('tv', tvParams)      : Promise.resolve({ results: [], total_pages: 1 }),
+      movieParams ? discover('movie', movieParams): Promise.resolve({ results: [], total_pages: 1 }),
+    ]);
+
+    const items = [
+      ...tv.results.map((t) => _normalise_list_item(t, 'tv')),
+      ...movie.results.map((m) => _normalise_list_item(m, 'movie')),
+    ].filter((x) => x.poster_path)
+     .sort((a, b) => (b.vote_count || 0) - (a.vote_count || 0));
+
+    res.json({
+      success: true,
+      page,
+      total_pages: Math.max(tv.total_pages, movie.total_pages),
+      data: items,
+    });
+  } catch (e) {
+    console.error('tmdb-network:', e.message);
+    res.status(500).json({ success: false, message: 'Failed to fetch studio titles.' });
+  }
+});
+
 // ── /tmdb-episodes ────────────────────────────────────────────────────────────
 // GET /api/tmdb-episodes?tmdbId=12345
 // GET /api/tmdb-episodes?imdbId=tt1234567
