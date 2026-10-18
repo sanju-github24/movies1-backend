@@ -394,6 +394,9 @@ router.get('/tmdb-network', async (req, res) => {
   // Ids may be OR-lists (TMDB accepts "2303|2616"), so keep digits and pipes.
   const network  = String(req.query.network  || '').replace(/[^0-9|]/g, '');
   const provider = String(req.query.provider || '').replace(/[^0-9|]/g, '');
+  // Some brands have a different provider id in India (Prime 119, Disney→JioHotstar
+  // 2336). When given, it's used for the India slice; otherwise the global one is.
+  const providerIn = String(req.query.providerIn || '').replace(/[^0-9|]/g, '') || provider;
   const company  = String(req.query.company  || '').replace(/[^0-9|]/g, '');
   const region   = String(req.query.region   || 'US').slice(0, 2).toUpperCase() || 'US';
   const type     = String(req.query.type || 'both').toLowerCase();   // movie | tv | both
@@ -419,23 +422,43 @@ router.get('/tmdb-network', async (req, res) => {
     const movieParams = company ? { with_companies: company }
                        : provider ? { with_watch_providers: provider, watch_region: region } : null;
 
+    /* TMDB popularity is global, so every studio otherwise fills with Hollywood.
+       Alongside the general set we pull an India-origin set (same network/provider,
+       watch_region IN, origin country IN) and interleave the two, so each studio
+       shows Indian films & shows next to the global hits instead of only them. */
+    // Network stays as-is (its catalogue is the brand's own); a provider slice
+    // swaps to the India provider id and watch_region IN.
+    const indianise = (p) => p && (p.with_networks || p.with_companies
+      ? { ...p, with_origin_country: 'IN' }
+      : { with_watch_providers: providerIn, watch_region: 'IN', with_origin_country: 'IN' });
+
     const wantTv    = type !== 'movie';
     const wantMovie = type !== 'tv';
-    const [tv, movie] = await Promise.all([
-      wantTv    && tvParams    ? discover('tv', tvParams)      : Promise.resolve({ results: [], total_pages: 1 }),
-      wantMovie && movieParams ? discover('movie', movieParams): Promise.resolve({ results: [], total_pages: 1 }),
+    const none = Promise.resolve({ results: [], total_pages: 1 });
+    const [tvGen, tvIn, mvGen, mvIn] = await Promise.all([
+      wantTv    && tvParams    ? discover('tv', tvParams)                : none,
+      wantTv    && tvParams    ? discover('tv', indianise(tvParams))     : none,
+      wantMovie && movieParams ? discover('movie', movieParams)          : none,
+      wantMovie && movieParams ? discover('movie', indianise(movieParams)) : none,
     ]);
 
-    const items = [
-      ...tv.results.map((t) => _normalise_list_item(t, 'tv')),
-      ...movie.results.map((m) => _normalise_list_item(m, 'movie')),
-    ].filter((x) => x.poster_path)
-     .sort((a, b) => (b.vote_count || 0) - (a.vote_count || 0));
+    const norm = (list, mt) => list.map((x) => _normalise_list_item(x, mt)).filter((x) => x.poster_path);
+    // Indian first in each pool, then interleave Indian/global so both run all the way down.
+    const indian = [...norm(tvIn.results, 'tv'), ...norm(mvIn.results, 'movie')];
+    const global = [...norm(tvGen.results, 'tv'), ...norm(mvGen.results, 'movie')];
+    const seen = new Set();
+    const items = [];
+    const n = Math.max(indian.length, global.length);
+    for (let i = 0; i < n; i++) {
+      for (const x of [indian[i], global[i]]) {
+        if (x && !seen.has(x.tmdb_id)) { seen.add(x.tmdb_id); items.push(x); }
+      }
+    }
 
     res.json({
       success: true,
       page,
-      total_pages: Math.max(tv.total_pages, movie.total_pages),
+      total_pages: Math.max(tvGen.total_pages, tvIn.total_pages, mvGen.total_pages, mvIn.total_pages),
       data: items,
     });
   } catch (e) {
