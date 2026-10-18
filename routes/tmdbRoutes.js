@@ -670,7 +670,35 @@ router.get('/tmdb-recommendations', async (req, res) => {
       }
     }
 
-    const sliced   = out.slice(0, limit);
+    /* An Indian slice too, so a global title's row isn't all Hollywood. Same
+       genres, origin India; kept apart, then interleaved ~1-in-3 below. */
+    const indianItems = [];
+    if (req.query.indian === '1') {
+      const map = type === 'tv' ? TV_GENRE_MAP : MOVIE_GENRE_MAP;
+      const wanted = String(genres || '').split(',').map(g => g.trim().toLowerCase()).filter(Boolean);
+      const ids = Object.entries(map).filter(([, n]) => wanted.includes(String(n).toLowerCase())).map(([id]) => id);
+      const d = await axiosWithRetry({ method:'get', url:`${BASE_URL}discover/${type}`, params:{
+        api_key: TMDB_API_KEY, sort_by:'popularity.desc', include_adult:false,
+        with_origin_country:'IN', 'vote_count.gte':8, ...(ids.length ? { with_genres: ids.join(',') } : {}),
+      }}).catch(() => null);
+      (d?.data?.results || []).forEach(it => {
+        if (!it?.id || seen.has(it.id) || String(it.id) === String(tmdbId)) return;
+        seen.add(it.id); indianItems.push(_normalise_list_item(it, type));
+      });
+    }
+
+    let sliced;
+    if (indianItems.length) {
+      sliced = []; let gi = 0, ii = 0;
+      while (sliced.length < limit && (gi < out.length || ii < indianItems.length)) {
+        if (sliced.length % 3 === 2 && ii < indianItems.length) sliced.push(indianItems[ii++]);
+        else if (gi < out.length) sliced.push(out[gi++]);
+        else if (ii < indianItems.length) sliced.push(indianItems[ii++]);
+        else break;
+      }
+    } else {
+      sliced = out.slice(0, limit);
+    }
     const enriched = enrich ? await _enrich_batch(sliced, 6) : sliced;
     res.json({ success:true, tmdb_id: tmdbId ? Number(tmdbId) : null, content_type:type, results:enriched });
   } catch (e) {
