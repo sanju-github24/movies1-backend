@@ -391,10 +391,12 @@ router.get('/tmdb-collection', async (req, res) => {
 // Whatever ids a studio has are used; the rest are skipped. Results merge and
 // sort by popularity so the row leads with what people actually watch.
 router.get('/tmdb-network', async (req, res) => {
-  const network  = String(req.query.network  || '').replace(/\D/g, '');
-  const provider = String(req.query.provider || '').replace(/\D/g, '');
-  const company  = String(req.query.company  || '').replace(/\D/g, '');
+  // Ids may be OR-lists (TMDB accepts "2303|2616"), so keep digits and pipes.
+  const network  = String(req.query.network  || '').replace(/[^0-9|]/g, '');
+  const provider = String(req.query.provider || '').replace(/[^0-9|]/g, '');
+  const company  = String(req.query.company  || '').replace(/[^0-9|]/g, '');
   const region   = String(req.query.region   || 'US').slice(0, 2).toUpperCase() || 'US';
+  const type     = String(req.query.type || 'both').toLowerCase();   // movie | tv | both
   const page     = Math.min(Math.max(parseInt(req.query.page, 10) || 1, 1), 500);
   if (!network && !provider && !company) {
     return res.status(400).json({ success: false, message: 'Pass network, provider or company.' });
@@ -417,9 +419,11 @@ router.get('/tmdb-network', async (req, res) => {
     const movieParams = company ? { with_companies: company }
                        : provider ? { with_watch_providers: provider, watch_region: region } : null;
 
+    const wantTv    = type !== 'movie';
+    const wantMovie = type !== 'tv';
     const [tv, movie] = await Promise.all([
-      tvParams    ? discover('tv', tvParams)      : Promise.resolve({ results: [], total_pages: 1 }),
-      movieParams ? discover('movie', movieParams): Promise.resolve({ results: [], total_pages: 1 }),
+      wantTv    && tvParams    ? discover('tv', tvParams)      : Promise.resolve({ results: [], total_pages: 1 }),
+      wantMovie && movieParams ? discover('movie', movieParams): Promise.resolve({ results: [], total_pages: 1 }),
     ]);
 
     const items = [
