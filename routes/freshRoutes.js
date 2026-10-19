@@ -197,12 +197,50 @@ async function readHdhub(pages = 2) {
   return posts;
 }
 
+/* ── India4Movies' newest posts ─────────────────────────────────────────
+   WordPress, so its REST API lists posts newest first with the time each
+   went up. One post per language, merged below with the rest by TMDB id:
+     "Street Fighter (2026) 1080p | 720p | 480p HDTC [Tamil (DD2.0)]"
+     "MobLand – Season 2 (2026) WEB-HDRip [EP 05 Added] [Hindi (DDP5.1) + English]" */
+const I4M_BASE = (process.env.I4M_BASE || 'https://go6.india4movies.net').replace(/\/$/, '');
+const unescapeHtml = (s) => String(s || '').replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
+  .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
+  .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#039;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+async function readIndia4movies(pages = 2) {
+  const posts = [];
+  // 50 a page: asked for 100, the site answers with something that is not JSON.
+  for (let page = 1; page <= pages; page++) {
+    const u = `${I4M_BASE}/wp-json/wp/v2/posts?per_page=50&page=${page}&_fields=id,date_gmt,link,title`;
+    const r = await fetchRetry(u, () => ({ headers: { 'User-Agent': UA, Accept: 'application/json' }, signal: AbortSignal.timeout(15000) }));
+    if (!r.ok) throw new Error(`India4Movies answered ${r.status}`);
+    for (const d of await r.json()) {
+      const t = unescapeHtml(d.title?.rendered).replace(/\s+/g, ' ').trim();
+      const season = t.match(/^(.+?)\s*[–—-]\s*Season\s*\d+\s*\(((?:19|20)\d{2})\)/i);
+      const film = season ? null : t.match(/^(.+?)\s*\(((?:19|20)\d{2})\)/);
+      const m = season || film;
+      if (!m) continue;
+      const name = m[1].trim();
+      if (/^bigg\s*boss\b|^wwe\b/i.test(name)) continue;
+      const rest = t.slice(m[0].length);
+      const words = [...rest.matchAll(/\[([^\]]+)\]/g)].map((x) => x[1]).join(' ').toLowerCase().match(/[a-z]+/g) || [];
+      const at = Date.parse(`${d.date_gmt}Z`) || 0;
+      posts.push({
+        source: 'i4m', id: Number(d.id) || 0, at,
+        name, year: Number(m[2]), series: !!season,
+        langs: [...new Set(words.map((w) => LANGS[w]).filter(Boolean))],
+        print: printOf(rest.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')), imdb: '',
+      });
+    }
+  }
+  return posts;
+}
+
 /* ── 3. The list ──────────────────────────────────────────────────────── */
 const firstSeen = new Map();   // "tv:123" → when this server first saw it, or its newest post
 const newestPost = new Map();  // "tv:123" → the highest topic number seen for it
 let state = { updatedAt: null, items: [], error: null };
 
-/* The current fresh titles (1TamilMV + HDHub4u, TMDB-matched), for other
+/* The current fresh titles (1TamilMV + HDHub4u + India4Movies, TMDB-matched), for other
    modules — the trending Top 10 seeds from and enriches against these. */
 export const freshItems = () => state.items;
 let running = null;
@@ -210,15 +248,16 @@ let running = null;
 async function refresh() {
   if (running) return running;
   running = (async () => {
-    /* Both sites, each on its own: one being down costs only its titles. */
+    /* Every site on its own: one being down costs only its titles. */
     const tmv = await (async () => {
       const res = await fetchRetry(SOURCE + '/', () => ({ headers: { 'User-Agent': UA, Accept: 'text/html' }, signal: AbortSignal.timeout(20000) }));
       if (!res.ok) throw new Error(`1TamilMV answered ${res.status}`);
       return readPosts(await res.text()).map((p) => ({ ...p, source: 'tamilmv' }));
     })().catch((e) => { console.warn(`⚠️ 1TamilMV not read: ${e.message}`); return []; });
     const hd = await readHdhub().catch((e) => { console.warn(`⚠️ HDHub4u not read: ${e.message}`); return []; });
-    const posts = [...tmv, ...hd];
-    if (!posts.length) throw new Error('no releases from either site');
+    const i4m = await readIndia4movies().catch((e) => { console.warn(`⚠️ India4Movies not read: ${e.message}`); return []; });
+    const posts = [...tmv, ...hd, ...i4m];
+    if (!posts.length) throw new Error('no releases from any site');
     const names = await genres();
 
     const found = [];
@@ -246,10 +285,10 @@ async function refresh() {
       /* When this post went up. HDHub4u says; 1TamilMV does not, so its
          front-page order stands in: newest first, a title seen before keeps
          its time, and a newer topic for it (a new episode) moves it back to
-         the front. A title on both sites takes the later of the two. */
+         the front. A title on several sites takes the latest. */
       const tk = `${p.source}:${key}`;
       let at;
-      if (p.source === 'hdhub') at = p.at || now;
+      if (p.source === 'hdhub' || p.source === 'i4m') at = p.at || now;   // they say when
       else {
         if (!firstSeen.has(tk) || p.id > (newestPost.get(tk) || 0) && newestPost.has(tk)) firstSeen.set(tk, now - i * 60e3);
         newestPost.set(tk, Math.max(p.id, newestPost.get(tk) || 0));
@@ -295,7 +334,7 @@ async function refresh() {
     const items = [...byId.values()].filter((x) => x.poster)
       .sort((a, b) => Date.parse(b.first_seen) - Date.parse(a.first_seen));
     state = { updatedAt: new Date(now).toISOString(), items, error: null };
-    console.log(`🆕 Fresh titles: ${items.length} matched from ${tmv.length} 1TamilMV + ${hd.length} HDHub4u posts`);
+    console.log(`🆕 Fresh titles: ${items.length} matched from ${tmv.length} 1TamilMV + ${hd.length} HDHub4u + ${i4m.length} India4Movies posts`);
     return state;
   })().catch((e) => {
     state = { ...state, error: e.message };
