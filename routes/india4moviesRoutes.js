@@ -6,7 +6,8 @@
 //                    files: [{ label, quality, size, info, url, code, playable, episodes }] }] }
 //        A series (type=tv) has its episodes: watchEpisodes and each file's
 //        episodes are [{ ep, code }], every code one episode's file.
-//   GET /servers?code=    one file's download servers, asked for when it is opened:
+//   GET /servers?code=    one file's download servers, asked for when it is opened
+//               ?url=     (or an older post's full4drive link):
 //        { name, servers: [{ name, url }] }
 //   GET /play?v=          the file itself, for a player: a redirect to it
 //
@@ -28,6 +29,7 @@
 
 import express from 'express';
 import * as cheerio from 'cheerio';
+import { hdhubServers } from './hdhubRoutes.js';
 
 const router = express.Router();
 
@@ -242,13 +244,44 @@ export async function india4moviesServers(code) {
     });
 }
 
+/* ── An older post's file ─────────────────────────────────────────────
+   Its button is a full4drive page, whose Extralink button leads to a page
+   of mirrors; of those only Direct Download works, and it is a plain GET
+   (/s/<code>/download/?driveIndex=0) that redirects to the file itself on
+   a Cloudflare worker — an MKV with CORS and ranges, named after
+   1Full4Movies. Followed here, so the viewer gets the file in one tap.
+   The worker's host changes from one ask to the next; its path does not. */
+const FULL4DRIVE = /^https:\/\/(?:[a-z0-9-]+\.)?full4drive\.[a-z]+\/file\/[A-Za-z0-9]+\/?$/i;
+export async function full4driveServers(link) {
+    return remember(`x:${link}`, 20 * 60e3, async () => {
+        const html = await get(link);
+        const name = clean((html.match(/<b>Name:<\/b>\s*([^<]+)/i) || [])[1]);
+        const size = clean((html.match(/<b>Size:<\/b>\s*([^<]+)/i) || [])[1]);
+        const xl = (html.match(/https:\/\/[a-z0-9.-]*extralink\.[a-z]+\/s\/([A-Za-z0-9]+)/i) || []);
+        if (!xl[0]) {
+            /* Older still: no Extralink, but a HubCloud copy, whose servers
+               HDHub4u's route already knows how to follow. */
+            const hub = (html.match(/https:\/\/[a-z0-9.-]*hubcloud\.[a-z]+\/drive\/[A-Za-z0-9]+/i) || [])[0];
+            const got = hub ? await hdhubServers(hub).catch(() => null) : null;
+            return { name, size, servers: got?.servers || [] };
+        }
+        const res = await fetch(`${new URL(xl[0]).origin}/s/${xl[1]}/download/?driveIndex=0`, {
+            headers: { 'User-Agent': UA, Referer: `${xl[0]}/` }, redirect: 'manual', signal: AbortSignal.timeout(15000),
+        });
+        res.body?.cancel();
+        const file = res.headers.get('location') || '';
+        return { name, size, servers: /^https:/i.test(file) ? [{ name: 'Direct Download', url: file }] : [] };
+    });
+}
+
 router.get('/servers', async (req, res) => {
     const code = clean(req.query.code);
-    if (!CODE.test(code)) return res.status(400).json({ error: 'Not a MultiCloudLinks file', servers: [] });
+    const url = clean(req.query.url);
+    if (!CODE.test(code) && !FULL4DRIVE.test(url)) return res.status(400).json({ error: 'Not a MultiCloudLinks or full4drive file', servers: [] });
     try {
-        res.json(await india4moviesServers(code));
+        res.json(code ? await india4moviesServers(code) : await full4driveServers(url));
     } catch (e) {
-        console.error(`❌ India4Movies servers failed for ${code}: ${e.message}`);
+        console.error(`❌ India4Movies servers failed for ${code || url}: ${e.message}`);
         res.status(502).json({ error: 'The file host is not answering right now', servers: [] });
     }
 });
