@@ -4421,11 +4421,27 @@ app.get('/sitemap.xml', async (req, res) => {
     console.error('❌ sitemap matches:', e.message);
   }
 
+  /* A title in both the movies and watch_html tables was listed at /movie/<slug>
+     AND /watch/<slug> — the same content under two URLs, which Google reports as
+     "Duplicate without user-selected canonical". The watch page is the primary
+     one (player + full metadata + JSON-LD), so drop the /movie/ twin when a
+     /watch/ exists for that slug. */
+  const watchSlugs = new Set(
+    urls.filter((u) => u.loc.includes('/watch/'))
+        .map((u) => { try { return decodeURIComponent(u.loc.split('/watch/')[1]); } catch { return u.loc.split('/watch/')[1]; } })
+  );
+  const deduped = urls.filter((u) => {
+    if (!u.loc.includes('/movie/')) return true;
+    let slug = u.loc.split('/movie/')[1];
+    try { slug = decodeURIComponent(slug); } catch { /* keep raw */ }
+    return !watchSlugs.has(slug);
+  });
+
   const body = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
       + ' xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">',
-    ...urls.map(urlEntry),
+    ...deduped.map(urlEntry),
     '</urlset>',
   ].join('\n');
 
