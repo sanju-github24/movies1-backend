@@ -1,8 +1,11 @@
 // =====================================================================
 // India4Movies — download sources, and the last fallback for AnchorHD
 //
-//   GET /files?q=&year=   the title's posts, one per language:
-//        { posts: [{ title, url, lang, print, watch, files: [{ label, quality, size, info, url, code, playable }] }] }
+//   GET /files?q=&year=&type=   the title's posts, one per language:
+//        { posts: [{ title, url, lang, print, season, watch, watchEpisodes,
+//                    files: [{ label, quality, size, info, url, code, playable, episodes }] }] }
+//        A series (type=tv) has its episodes: watchEpisodes and each file's
+//        episodes are [{ ep, code }], every code one episode's file.
 //   GET /servers?code=    one file's download servers, asked for when it is opened:
 //        { name, servers: [{ name, url }] }
 //   GET /play?v=          the file itself, for a player: a redirect to it
@@ -17,6 +20,10 @@
 // runs out in a few hours, so it is read from the player page at play time.
 // The ".m3u" the player offers for VLC is that same link in a playlist.
 // Older posts link a file host's page (full4drive…) and are download only.
+//
+// A series post's buttons lead to a list instead — "Episode 1 - Watch
+// Online", "Episode 2"… and a Batch/Zip — one per quality, each episode
+// with its own code, which the player opens like any other.
 // =====================================================================
 
 import express from 'express';
@@ -39,13 +46,29 @@ const remember = async (key, ttl, make) => {
 };
 
 async function get(url, as = 'text') {
-    const res = await fetch(url, {
+    const ask = () => fetch(url, {
         headers: { 'User-Agent': UA, Accept: as === 'json' ? 'application/json' : 'text/html', Referer: `${BASE}/` },
         redirect: 'follow',
         signal: AbortSignal.timeout(15000),
     });
+    // One retry: the site drops a connection now and then.
+    const res = await ask().catch(async () => { await new Promise((r) => setTimeout(r, 1500)); return ask(); });
     if (!res.ok) throw new Error(`${new URL(url).host} answered ${res.status}`);
     return as === 'json' ? res.json() : res.text();
+}
+
+/* MultiCloudLinks answers one request at a time: asked several at once, all
+   but one get a 17-byte page instead of theirs. So its pages are fetched in
+   turn, and one that comes back that short is asked again. */
+let mclQueue = Promise.resolve();
+function getMcl(url) {
+    const turn = mclQueue.then(async () => {
+        let html = await get(url);
+        if (html.length < 500) { await new Promise((r) => setTimeout(r, 1000)); html = await get(url); }
+        return html;
+    });
+    mclQueue = turn.catch(() => {});
+    return turn;
 }
 
 const clean = (s) => String(s || '').replace(/\s+/g, ' ').trim();
@@ -56,25 +79,39 @@ const nameOf = (t) => norm(String(t || '').split(/\((?:19|20)\d{2}|\b(?:480|720|
 
 // "[Hindi + Multi Audio (DD2.0)]" → "Hindi + Multi Audio"
 const langOf = (title) => {
-    const groups = [...title.matchAll(/\[([^\]]+)\]/g)].map((m) => m[1].replace(/\(.*?\)/g, '').trim());
+    const groups = [...title.matchAll(/\[([^\]]+)\]/g)].map((m) => clean(m[1].replace(/\(.*?\)/g, ' ')));
     return groups.reverse().find((g) => /^[a-z][a-z +&,]*$/i.test(g) && !/x26|hevc/i.test(g)) || '';
 };
 const PRINT = /\b(WEB-?HDRip|WEB-?DL|WEB-?Rip|HDRip|Blu-?Ray|BDRip|HDTV|PreDVD|Pre-?HD|HDTC|HDTS|HDCAM|CAMRip|DVDScr|DVDRip)\b/i;
 const printOf = (s) => (String(s).match(PRINT) || [])[1] || '';
 
 /* The posts that are this title, newest first: a WEB-DL beats the cam print
-   it replaced. */
-async function findPosts(q, year) {
-    const url = new URL(`${BASE}/wp-json/wp/v2/posts`);
-    Object.entries({ search: q, per_page: '20', _fields: 'link,title,date' }).forEach(([k, v]) => url.searchParams.set(k, v));
+   it replaced. A series is searched with "season" too — by its name alone,
+   a short one ("Love") is lost among the films that share the word — and
+   its year is the season's, not the show's, so it is not held to one. */
+const seasonOf = (t) => Number((String(t).match(/\bSeason\s*(\d{1,3})/i) || [])[1]) || 0;
+async function findPosts(q, year, tv = false) {
     const want = nameOf(q);
     if (!want) return [];
-    return (await get(url.href, 'json'))
+    const search = async (term) => {
+        const url = new URL(`${BASE}/wp-json/wp/v2/posts`);
+        Object.entries({ search: term, per_page: '20', _fields: 'link,title,date' }).forEach(([k, v]) => url.searchParams.set(k, v));
+        return get(url.href, 'json');
+    };
+    /* Either search may be dropped; only both failing is a failure (and is
+       not remembered, so the next viewer asks again). */
+    const asked = await Promise.allSettled(tv ? [search(`${q} season`), search(q)] : [search(q)]);
+    if (asked.every((x) => x.status === 'rejected')) throw asked[0].reason;
+    const found = asked.flatMap((x) => (x.status === 'fulfilled' ? x.value : []));
+    const seen = new Set();
+    return found
         .map((p) => ({ title: text(p.title?.rendered), url: p.link }))
         .filter((p) => {
-            if (nameOf(p.title) !== want) return false;
+            if (seen.has(p.url) || nameOf(p.title) !== want) return false;
+            seen.add(p.url);
+            if (tv !== !!seasonOf(p.title)) return false;   // a film is not its series
             const y = (p.title.match(/\(((?:19|20)\d{2})\)/) || [])[1];
-            return !year || !y || y === String(year);
+            return tv || !year || !y || y === String(year);
         })
         .slice(0, 8);
 }
@@ -137,15 +174,42 @@ async function postFiles(url) {
     return { watch, files };
 }
 
-export async function india4moviesFiles(q, year = '') {
-    return remember(`f:${q.toLowerCase()}|${year}`, 3 * 3600e3, async () => {
-        const posts = await findPosts(q, year);
-        const read = await Promise.all(posts.map((p) => postFiles(p.url).catch((e) => {
-            console.warn(`⚠️ India4Movies post not read (${p.url}): ${e.message}`);
-            return { watch: '', files: [] };
-        })));
+/* A series' list page: its episodes, each with its own code. The Batch/Zip
+   is left out — it is the whole season, not something to play. */
+async function episodeList(code) {
+    const $ = cheerio.load(await getMcl(`${MCL}/view/${code}`));
+    const eps = [];
+    $('a.premium-btn[href]').each((_, a) => {
+        const ep = Number((clean($(a).text()).match(/\bEpisode\s*(\d{1,4})\b/i) || [])[1]);
+        const c = codeOf($(a).attr('href') || '');
+        if (ep && c && !eps.some((x) => x.ep === ep)) eps.push({ ep, code: c });
+    });
+    return eps;
+}
+
+async function seriesEpisodes(post) {
+    const lists = await Promise.all([post.watch, ...post.files.map((f) => f.code)].map((c) => (c ? episodeList(c).catch(() => []) : [])));
+    return {
+        ...post,
+        watchEpisodes: lists[0],
+        files: post.files.map((f, i) => ({ ...f, episodes: lists[i + 1] })),
+    };
+}
+
+export async function india4moviesFiles(q, year = '', tv = false) {
+    return remember(`f:${tv ? 'tv' : 'movie'}|${q.toLowerCase()}|${year}`, 3 * 3600e3, async () => {
+        const posts = await findPosts(q, year, tv);
+        const read = await Promise.all(posts.map(async (p) => {
+            try {
+                const got = await postFiles(p.url);
+                return tv ? await seriesEpisodes(got) : got;
+            } catch (e) {
+                console.warn(`⚠️ India4Movies post not read (${p.url}): ${e.message}`);
+                return { watch: '', files: [] };
+            }
+        }));
         return {
-            posts: posts.map((p, i) => ({ ...p, lang: langOf(p.title), print: printOf(p.title), ...read[i] }))
+            posts: posts.map((p, i) => ({ ...p, lang: langOf(p.title), print: printOf(p.title), season: seasonOf(p.title), ...read[i] }))
                 .filter((p) => p.watch || p.files.length),
         };
     });
@@ -156,7 +220,7 @@ router.get('/files', async (req, res) => {
     const year = clean(req.query.year).slice(0, 4);
     if (!q) return res.status(400).json({ error: 'q is required', posts: [] });
     try {
-        res.json(await india4moviesFiles(q, year));
+        res.json(await india4moviesFiles(q, year, req.query.type === 'tv'));
     } catch (e) {
         console.error(`❌ India4Movies failed for "${q}": ${e.message}`);
         res.status(502).json({ error: 'India4Movies is not answering right now', posts: [] });
@@ -171,7 +235,7 @@ const CODE = /^[A-Za-z0-9]{4,16}$/;
    run out, so they are read on opening and kept only briefly. */
 export async function india4moviesServers(code) {
     return remember(`v:${code}`, 20 * 60e3, async () => {
-        const $ = cheerio.load(await get(`${MCL}/view/${code}`));
+        const $ = cheerio.load(await getMcl(`${MCL}/view/${code}`));
         const servers = $('a.premium-btn[href]').map((_, a) => ({ name: clean($(a).text()), url: $(a).attr('href') })).get()
             .filter((s) => /^https:/i.test(s.url) && !/watch online/i.test(s.name) && !/player\.php/i.test(s.url));
         return { name: clean($('title').text()), servers };
@@ -200,7 +264,7 @@ router.get('/play', async (req, res) => {
         const hit = playCache.get(code);
         let url = hit && Date.now() - hit.at < 30 * 60e3 ? hit.url : '';
         if (!url) {
-            const html = await get(`${MCL}/player.php/?v=${code}`);
+            const html = await getMcl(`${MCL}/player.php/?v=${code}`);
             url = (html.match(/const\s+streamSrc\s*=\s*"(https:[^"]+)"/) || [])[1] || '';
             if (!url) throw new Error('no stream on the player page');
             playCache.set(code, { at: Date.now(), url });
