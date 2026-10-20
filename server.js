@@ -89,6 +89,21 @@ const __dirname = dirname(__filename);
 const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
 const app = express();
+
+/* Cloudflare, in front of this server, replaces a 502 or 504 from it with its
+   own "error code: 502" page — without our CORS headers. The browser then
+   saw a CORS failure, the site took that for this server being down, and the
+   rest of the visit went to the standby. Our routes answer 502 when the site
+   they ask fails (BollyFlix, HDHub4u…), which is not this server being down:
+   such answers go out as 500, which Cloudflare passes through untouched. A
+   real outage still reaches the browser as Cloudflare's own error. */
+app.use((req, res, next) => {
+  const swap = (code) => (code === 502 || code === 504 ? 500 : code);
+  const status = res.status.bind(res), sendStatus = res.sendStatus.bind(res);
+  res.status = (code) => status(swap(code));
+  res.sendStatus = (code) => sendStatus(swap(code));
+  next();
+});
 const port = process.env.PORT || 4000;
 
 await connectDBs();
