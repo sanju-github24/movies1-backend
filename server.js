@@ -41,6 +41,7 @@ import moviboxRouter from './routes/moviboxRoutes.js';
 import india4moviesRouter from './routes/india4moviesRoutes.js';
 import bingrRouter from './routes/bingrRoutes.js';
 import mbHlsRouter from './routes/mbHlsRoutes.js';
+import serverOrderRouter from './routes/serverOrderRoutes.js';
 import hotstarProxy from './routes/hotstarProxy.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
@@ -905,6 +906,7 @@ app.use('/api/movibox', moviboxRouter);       // a title's per-language MPD/MP4 
 app.use('/api/i4m', india4moviesRouter);      // India4Movies: downloads, and AnchorHD's last fallback
 app.use('/api/bingr', bingrRouter);           // bingr's direct servers, for AnchorHD after Singularity
 app.use('/api/mbhls', mbHlsRouter);           // MoviBox as one multi-audio HLS, segments straight off its CDN
+app.use('/api/server-order', serverOrderRouter); // a title's server order, arranged by the admin
 
 async function fetchBCCI(url) {
     const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
