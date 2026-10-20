@@ -105,6 +105,31 @@ async function streamsFor(dub, se, ep) {
 
 const cache = new Map();   // key → { at, value }
 
+/* A title's language versions on MoviBox, without their streams: the
+   subject ids the TV app's API plays (see mbHlsRoutes.js). By TMDB id, or by
+   title and year. Kept for an hour — the list changes only when MoviBox adds
+   a dub. */
+const dubsCache = new Map();   // key → { at, value }
+export async function moviboxDubs({ tmdb, title, year = 0, type = '' }) {
+  let titles, kind = type;
+  if (tmdb) ({ titles, year, type: kind } = await tmdbTitle(String(tmdb).replace(/\D/g, ''), type));
+  else if (title) titles = [String(title).slice(0, 200)];
+  else throw new Error('tmdb or title is required');
+  const key = `${titles[0]}|${year}|${kind}`;
+  const hit = dubsCache.get(key);
+  if (hit && Date.now() - hit.at < 3600e3) return hit.value;
+  const subject = await findSubject(titles, year, kind || 'movie');
+  if (!subject) return null;
+  const detail = await mb(`/detail?detailPath=${subject.detailPath}`);
+  const dubs = detail?.subject?.dubs || detail?.dubs || [];
+  const versions = (dubs.length ? dubs : [{ subjectId: subject.subjectId, detailPath: subject.detailPath, lanName: 'Original', lanCode: '', original: true }])
+    .map((d) => ({ subjectId: String(d.subjectId), language: d.lanName || '', code: d.lanCode || '', original: !!d.original }));
+  const value = { title: subject.title, year, type: kind || 'movie', versions };
+  dubsCache.set(key, { at: Date.now(), value });
+  if (dubsCache.size > 500) dubsCache.delete(dubsCache.keys().next().value);
+  return value;
+}
+
 router.get('/', async (req, res) => {
   // Optional lock: with MOVIBOX_KEY set, the key must come with the request.
   if (process.env.MOVIBOX_KEY && req.query.key !== process.env.MOVIBOX_KEY && req.get('x-key') !== process.env.MOVIBOX_KEY) {
