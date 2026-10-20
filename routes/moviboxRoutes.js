@@ -53,6 +53,15 @@ async function mb(path, { method = 'GET', body, referer = REFERER } = {}) {
   const user = res.headers.get('x-user');
   if (user) { try { const t = JSON.parse(user).token; if (t) guest = { token: t, at: Date.now() }; } catch { /* keep the old one */ } }
   const json = await res.json().catch(() => null);
+  /* A guest token MoviBox has stopped honouring ("invalid token") is dropped
+     and a fresh one fetched, once — before this, every lookup failed until
+     the old token was six hours old. */
+  if (json && json.code !== 0 && /token/i.test(String(json.message || '')) && guest.token && !mb.retrying) {
+    guest = { token: '', at: 0 };
+    mb.retrying = true;
+    try { await mb('/home?host=movibox.net').catch(() => {}); return await mb(path, { method, body, referer }); }
+    finally { mb.retrying = false; }
+  }
   if (!json || json.code !== 0) throw new Error(`MoviBox ${path.split('?')[0]}: ${json?.message || res.status}`);
   return json.data;
 }
@@ -66,10 +75,19 @@ const yearOf = (s) => Number(String(s || '').slice(0, 4)) || 0;
 async function tmdbTitle(id, type) {
   const kinds = type ? [type] : ['movie', 'tv'];
   for (const k of kinds) {
-    const r = await fetch(`https://api.themoviedb.org/3/${k}/${id}?api_key=${TMDB_API_KEY}`, { signal: AbortSignal.timeout(12000) });
+    const r = await fetch(`https://api.themoviedb.org/3/${k}/${id}?api_key=${TMDB_API_KEY}&append_to_response=alternative_titles`, { signal: AbortSignal.timeout(12000) });
     if (!r.ok) continue;
     const d = await r.json();
-    return { type: k, titles: [d.title || d.name, d.original_title || d.original_name].filter(Boolean),
+    /* The names MoviBox may use, as AnchorMB's lookup looks for them: TMDB's
+       title, its original when in Latin letters, the alternative titles it
+       lists for India, the US and the UK, and the title without a subtitle —
+       TMDB's "Khalifa: The Ruler" is MoviBox's "Khalifa". */
+    const main = d.title || d.name || '';
+    const alts = (d.alternative_titles?.titles || d.alternative_titles?.results || [])
+      .filter((a) => ['IN', 'US', 'GB'].includes(a.iso_3166_1)).map((a) => a.title);
+    const latin = (t) => /^[\x00-\x7F\u00C0-\u024F]+$/.test(String(t || ''));
+    const names = [main, d.original_title || d.original_name, ...alts, main.split(/:\s/)[0]].filter((t) => t && latin(t));
+    return { type: k, titles: [...new Set(names)].slice(0, 6),
       year: yearOf(d.release_date || d.first_air_date), lastYear: yearOf(d.last_air_date) };
   }
   throw new Error('TMDB has no title with that id');
@@ -89,8 +107,9 @@ async function findSubject(titles, year, type, lastYear = 0) {
     const d = await mb('/subject/search', { method: 'POST', body: { keyword: t, page: 1, perPage: 20, subjectType } });
     // A series is often listed with its seasons in the name ("Love S1-S3", "Love S2").
     const bare = (x) => (type === 'tv' ? norm(String(x.title || '').replace(/\s+S\d+(?:\s*-\s*S?\d+)?\s*$/i, '')) : norm(x.title));
-    // Spacing differs between sites: TMDB's "The Rajasaab" is MoviBox's "The Raja Saab".
-    const tight = (n) => n.replace(/ /g, '');
+    // Spacing differs between sites: TMDB's "The Rajasaab" is MoviBox's "The Raja Saab";
+    // so do doubled letters ("TamilRockerz" / "Tamil Rockerz"), as AnchorMB's lookup allows.
+    const tight = (n) => n.replace(/ /g, '').replace(/(.)\1+/g, '$1');
     const named = (d.items || []).filter((x) => want.includes(bare(x)) || want.map(tight).includes(tight(bare(x))));
     const hi = type === 'tv' ? Math.max(year, lastYear || 0) : year;
     const hit = named.find((x) => !year || (yearOf(x.releaseDate) >= year - 1 && yearOf(x.releaseDate) <= hi + 1));
