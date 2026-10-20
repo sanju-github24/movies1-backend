@@ -70,21 +70,30 @@ async function tmdbTitle(id, type) {
     if (!r.ok) continue;
     const d = await r.json();
     return { type: k, titles: [d.title || d.name, d.original_title || d.original_name].filter(Boolean),
-      year: yearOf(d.release_date || d.first_air_date) };
+      year: yearOf(d.release_date || d.first_air_date), lastYear: yearOf(d.last_air_date) };
   }
   throw new Error('TMDB has no title with that id');
 }
 
 /* The MoviBox title that is this one: the same name (any language's version
-   — they all list the others) and, for a film, the same year give or take one. */
-async function findSubject(titles, year, type) {
+   — they all list the others) and the same year give or take one. A series
+   used to skip the year, and a short name then found someone else's show —
+   "#Love" (Tamil, 2026) has a US "Love" and a Korean one beside it. A
+   series may be dated by a later season, so for one its year may fall
+   anywhere from its first air year to its last (TMDB's), give or take one. */
+async function findSubject(titles, year, type, lastYear = 0) {
   await ensureGuest();
   const want = titles.map(norm).filter(Boolean);
   const subjectType = type === 'tv' ? 2 : 1;
   for (const t of titles) {
     const d = await mb('/subject/search', { method: 'POST', body: { keyword: t, page: 1, perPage: 20, subjectType } });
-    const hit = (d.items || []).find((x) => want.includes(norm(x.title))
-      && (!year || type === 'tv' || Math.abs(yearOf(x.releaseDate) - year) <= 1));
+    // A series is often listed with its seasons in the name ("Love S1-S3", "Love S2").
+    const bare = (x) => (type === 'tv' ? norm(String(x.title || '').replace(/\s+S\d+(?:\s*-\s*S?\d+)?\s*$/i, '')) : norm(x.title));
+    // Spacing differs between sites: TMDB's "The Rajasaab" is MoviBox's "The Raja Saab".
+    const tight = (n) => n.replace(/ /g, '');
+    const named = (d.items || []).filter((x) => want.includes(bare(x)) || want.map(tight).includes(tight(bare(x))));
+    const hi = type === 'tv' ? Math.max(year, lastYear || 0) : year;
+    const hit = named.find((x) => !year || (yearOf(x.releaseDate) >= year - 1 && yearOf(x.releaseDate) <= hi + 1));
     if (hit) return hit;
   }
   return null;
@@ -111,14 +120,14 @@ const cache = new Map();   // key → { at, value }
    a dub. */
 const dubsCache = new Map();   // key → { at, value }
 export async function moviboxDubs({ tmdb, title, year = 0, type = '' }) {
-  let titles, kind = type;
-  if (tmdb) ({ titles, year, type: kind } = await tmdbTitle(String(tmdb).replace(/\D/g, ''), type));
+  let titles, kind = type, lastYear = 0;
+  if (tmdb) ({ titles, year, type: kind, lastYear } = await tmdbTitle(String(tmdb).replace(/\D/g, ''), type));
   else if (title) titles = [String(title).slice(0, 200)];
   else throw new Error('tmdb or title is required');
   const key = `${titles[0]}|${year}|${kind}`;
   const hit = dubsCache.get(key);
   if (hit && Date.now() - hit.at < 3600e3) return hit.value;
-  const subject = await findSubject(titles, year, kind || 'movie');
+  const subject = await findSubject(titles, year, kind || 'movie', lastYear);
   if (!subject) return null;
   const detail = await mb(`/detail?detailPath=${subject.detailPath}`);
   const dubs = detail?.subject?.dubs || detail?.dubs || [];
@@ -138,8 +147,8 @@ router.get('/', async (req, res) => {
   const type = req.query.type === 'tv' ? 'tv' : req.query.type === 'movie' ? 'movie' : '';
   const se = Number(req.query.se) || 0, ep = Number(req.query.ep) || 0;
   try {
-    let titles, year = Number(req.query.year) || 0, kind = type;
-    if (req.query.tmdb) ({ titles, year, type: kind } = await tmdbTitle(String(req.query.tmdb).replace(/\D/g, ''), type));
+    let titles, year = Number(req.query.year) || 0, kind = type, lastYear = 0;
+    if (req.query.tmdb) ({ titles, year, type: kind, lastYear } = await tmdbTitle(String(req.query.tmdb).replace(/\D/g, ''), type));
     else if (req.query.title) titles = [String(req.query.title).slice(0, 200)];
     else return res.status(400).json({ error: 'tmdb or title is required' });
 
@@ -147,7 +156,7 @@ router.get('/', async (req, res) => {
     const hit = cache.get(key);
     if (hit && Date.now() - hit.at < 20 * 60e3) return res.json(hit.value);
 
-    const subject = await findSubject(titles, year, kind || 'movie');
+    const subject = await findSubject(titles, year, kind || 'movie', lastYear);
     if (!subject) return res.status(404).json({ error: 'MoviBox has no title by that name', title: titles[0], year });
 
     const detail = await mb(`/detail?detailPath=${subject.detailPath}`);

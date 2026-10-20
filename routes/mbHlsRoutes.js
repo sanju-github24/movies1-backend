@@ -2,7 +2,8 @@
 // MoviBox as one multi-audio HLS stream, played straight off its CDN
 //
 //   GET /title?tmdb=<id>&type=movie|tv[&se=&ep=]   (or ?title=&year=)
-//        { streams: [{ url, languages: [{ name, code }], height }] }
+//        { streams: [{ url, languages: [{ name, code }], height }],
+//          mp4: [{ name, code, resolution, url, inStream }] }   H.264, signed, CORS
 //   GET /<key>/master.m3u8                         every language as an audio track
 //   GET /<key>/v/<rep>.m3u8   GET /<key>/a/<n>.m3u8  one quality / one language
 //
@@ -92,6 +93,10 @@ async function signedFolder(subjectId, se, ep) {
     let d = await tv('/wefeed-tv-bff/subject/play-info/v2', { params: { subjectId, vipLevel: '2', ...(se ? { se, ep } : {}) } });
     if (d.code === 401 || /jwt|token/i.test(String(d.message || ''))) { tvToken = ''; await ensureToken(); d = await tv('/wefeed-tv-bff/subject/play-info/v2', { params: { subjectId, vipLevel: '2', ...(se ? { se, ep } : {}) } }); }
     const s = (d.data?.streams || []).find((x) => /\.mpd(\?|$)/.test(x.url || '') && x.signCookie);
+    /* The H.264 MP4s beside it, signed in their URLs and served with CORS:
+       what a dub without DASH has, and what a browser without HEVC plays. */
+    const mp4 = (d.data?.resources || []).map((x) => ({ url: x.url || x.resourceLink, resolution: parseInt(x.resolution, 10) || 0, codec: String(x.codec || '') }))
+        .filter((x) => /^https:/.test(x.url || '') && !/hevc|h265/i.test(x.codec)).sort((a, b) => b.resolution - a.resolution);
     let value = null;
     if (s) {
         const c = Object.fromEntries(String(s.signCookie).split(';').map((x) => x.trim()).filter(Boolean)
@@ -103,6 +108,7 @@ async function signedFolder(subjectId, se, ep) {
                 expMs = pol.Statement[0].Condition.DateLessThan['AWS:EpochTime'] * 1000;
             } catch { /* a day, then */ }
             value = {
+                mp4,
                 mpd: s.url,
                 base: s.url.replace(/[^/]+$/, ''),
                 q: `Policy=${c['CloudFront-Policy']}&Signature=${c['CloudFront-Signature']}&Key-Pair-Id=${c['CloudFront-Key-Pair-Id']}`,
@@ -110,6 +116,7 @@ async function signedFolder(subjectId, se, ep) {
             };
         }
     }
+    if (!value && mp4.length) value = { mp4, mpd: null, expMs: Date.now() + 6 * 3600e3 };
     folders.set(k, { at: Date.now(), value });
     if (folders.size > 3000) folders.delete(folders.keys().next().value);
     return value;
@@ -193,12 +200,15 @@ async function mapLimit(list, n, fn) {
 
 async function buildTitle({ tmdb, title, year, type, se, ep }) {
     const dubs = await moviboxDubs({ tmdb, title, year, type });
-    if (!dubs) return { streams: [] };
+    if (!dubs) return { streams: [], mp4: [] };
     // A subtitled copy ("Arabic sub") has the original's audio: nothing to add.
     const versions = dubs.versions.filter((v) => !/\bsub\b/i.test(v.language));
+    const mp4 = [];   // { name, code, resolution, url } — every version's, the player picks
     const read = await mapLimit(versions, 3, async (v) => {
         const f = await signedFolder(v.subjectId, se, ep);
         if (!f) return null;
+        for (const x of f.mp4 || []) mp4.push({ subjectId: v.subjectId, name: nameFrom(v, ''), code: v.code || '', resolution: x.resolution, url: x.url, original: v.original });
+        if (!f.mpd) return null;
         const r = await fetch(`${f.mpd}?${f.q}`, { signal: AbortSignal.timeout(20000) });
         if (!r.ok) return null;
         const mpd = parseMpd(await r.text());
@@ -219,7 +229,14 @@ async function buildTitle({ tmdb, title, year, type, se, ep }) {
         return { url: `/api/mbhls/${key}/master.m3u8`, languages: g.map((m) => ({ name: m.name, code: m.code })), height: g[0].mpd.video[0].height, codecs: g[0].mpd.video[0].codecs };
     });
     if (streams.size > 2000) streams.delete(streams.keys().next().value);
-    return { title: dubs.title, streams: out, expMs: Math.min(...ok.map((m) => m.f.expMs), Date.now() + 24 * 3600e3) };
+    // An original's MP4 takes the language its DASH audio is tagged with ("Original" → "Telugu").
+    for (const x of mp4) { const r = ok.find((m) => m.v.subjectId === x.subjectId); if (r) { x.name = r.name; x.code = r.code; } }
+    // One MP4 per language and resolution, the original first.
+    const seenMp4 = new Set();
+    const mp4s = mp4.sort((a, b) => Number(b.original) - Number(a.original) || b.resolution - a.resolution)
+        .filter((x) => { const k = `${x.name}|${x.resolution}`; if (seenMp4.has(k)) return false; seenMp4.add(k); return true; })
+        .map(({ original, subjectId, ...x }) => ({ ...x, inStream: out.some((st) => st.languages.some((l) => l.name === x.name)) }));
+    return { title: dubs.title, streams: out, mp4: mp4s, expMs: Math.min(...ok.map((m) => m.f.expMs), Date.now() + 6 * 3600e3) };
 }
 
 router.get('/title', async (req, res) => {

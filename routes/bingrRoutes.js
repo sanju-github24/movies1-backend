@@ -17,6 +17,7 @@
 // =====================================================================
 
 import express from 'express';
+import { TMDB_API_KEY } from './tmdbRoutes.js';
 
 const router = express.Router();
 
@@ -39,6 +40,34 @@ export const BINGR_SERVERS = {
    first stream plays), not so long that it hands out a dead link. */
 const cache = new Map();   // key → { at, value }
 const TTL = 10 * 60e3;
+
+/* These servers match a title by its name, and a short one finds the wrong
+   show: for the Tamil series "#Love" Bastion sent an English/German/Hindi/
+   Portuguese/Spanish "Love". A real answer has the title's own language, or
+   says "Original" / names none; one whose streams all name other languages
+   is someone else's title, and is dropped. The language is TMDB's. */
+const LANG_NAMES = { ta: 'tamil', te: 'telugu', hi: 'hindi', ml: 'malayalam', kn: 'kannada', en: 'english', bn: 'bengali',
+    mr: 'marathi', pa: 'punjabi', gu: 'gujarati', ko: 'korean', ja: 'japanese', zh: 'chinese', cn: 'chinese', es: 'spanish',
+    fr: 'french', de: 'german', it: 'italian', pt: 'portuguese', ru: 'russian', th: 'thai', tr: 'turkish', ar: 'arabic', id: 'indonesian' };
+const origLangs = new Map();   // "tv:123" → "tamil" | ''
+async function originalLanguage(t, id) {
+    const k = `${t}:${id}`;
+    if (origLangs.has(k)) return origLangs.get(k);
+    let name = '';
+    try {
+        const r = await fetch(`https://api.themoviedb.org/3/${t}/${id}?api_key=${TMDB_API_KEY}`, { signal: AbortSignal.timeout(10000) });
+        if (r.ok) name = LANG_NAMES[(await r.json()).original_language] || '';
+    } catch { /* unknown: nothing is dropped */ }
+    origLangs.set(k, name);
+    if (origLangs.size > 5000) origLangs.delete(origLangs.keys().next().value);
+    return name;
+}
+const looksLikeOtherTitle = (sources, orig) => {
+    if (!orig || !sources.length) return false;
+    const named = sources.map((s) => String(s.language || '').toLowerCase()).filter((l) => l && !/original|auto|^und$/.test(l));
+    if (named.length < sources.length) return false;           // something says "Original" or names nothing
+    return !named.some((l) => l.includes(orig));
+};
 
 async function ask(srv, t, id, query) {
     // Aphelion has its own path for an episode, as bingr's player asks it.
@@ -75,7 +104,10 @@ router.get('/stream', async (req, res) => {
     const hit = cache.get(key);
     if (hit && Date.now() - hit.at < TTL) return res.json(hit.value);
     try {
-        const value = { name: BINGR_SERVERS[srv], ...(await ask(srv, t, id, query)) };
+        const [got, orig] = await Promise.all([ask(srv, t, id, query), originalLanguage(t, id)]);
+        const value = looksLikeOtherTitle(got.sources, orig)
+            ? { name: BINGR_SERVERS[srv], sources: [], subtitles: [], dropped: `another title (none in ${orig})` }
+            : { name: BINGR_SERVERS[srv], ...got };
         cache.set(key, { at: Date.now(), value });
         if (cache.size > 1000) cache.delete(cache.keys().next().value);
         res.json(value);
