@@ -33,6 +33,7 @@
 import express from 'express';
 import crypto from 'crypto';
 import { moviboxDubs } from './moviboxRoutes.js';
+import { TMDB_API_KEY } from './tmdbRoutes.js';
 
 const router = express.Router();
 
@@ -179,11 +180,53 @@ function parseMpd(xml) {
 const LANG = { hin: 'Hindi', tam: 'Tamil', tel: 'Telugu', kan: 'Kannada', mal: 'Malayalam', eng: 'English', ben: 'Bengali',
     mar: 'Marathi', pan: 'Punjabi', guj: 'Gujarati', urd: 'Urdu', jpn: 'Japanese', kor: 'Korean', chi: 'Chinese', zho: 'Chinese',
     spa: 'Spanish', fre: 'French', fra: 'French', rus: 'Russian', ara: 'Arabic', ind: 'Indonesian', tha: 'Thai' };
-const nameFrom = (version, mpdLang) => {
+/* The original's language is TMDB's, not the tag on MoviBox's audio: the
+   Tamil film "29" has its original track tagged English, which listed the
+   Tamil audio as "English" and Tamil again from the dub. */
+const ISO1 = { ta: 'Tamil', te: 'Telugu', hi: 'Hindi', ml: 'Malayalam', kn: 'Kannada', en: 'English', bn: 'Bengali', mr: 'Marathi',
+    pa: 'Punjabi', gu: 'Gujarati', ur: 'Urdu', ja: 'Japanese', ko: 'Korean', zh: 'Chinese', cn: 'Chinese', es: 'Spanish',
+    fr: 'French', ru: 'Russian', ar: 'Arabic', id: 'Indonesian', th: 'Thai', de: 'German', it: 'Italian', pt: 'Portuguese', tr: 'Turkish' };
+const CODE_OF = Object.fromEntries(Object.entries(LANG).map(([c, n]) => [n, c]));
+const nameFrom = (version, mpdLang, origName = '') => {
     const own = String(version.language || '').replace(/\s*dub$/i, '').trim();
     if (own && !/^original/i.test(own)) return own;
-    return LANG[mpdLang] || (mpdLang && mpdLang !== 'und' ? mpdLang : 'Original');
+    return origName || LANG[mpdLang] || (mpdLang && mpdLang !== 'und' ? mpdLang : 'Original');
 };
+const origLang = new Map();   // "movie:123" → "Tamil" | ''
+async function tmdbOriginal(type, tmdb) {
+    if (!tmdb) return '';
+    const k = `${type}:${tmdb}`;
+    if (origLang.has(k)) return origLang.get(k);
+    let name = '';
+    try {
+        const r = await fetch(`https://api.themoviedb.org/3/${type}/${tmdb}?api_key=${TMDB_API_KEY}`, { signal: AbortSignal.timeout(10000) });
+        if (r.ok) name = ISO1[(await r.json()).original_language] || '';
+    } catch { /* the tag on the audio, then */ }
+    origLang.set(k, name);
+    if (origLang.size > 5000) origLang.delete(origLang.keys().next().value);
+    return name;
+}
+
+/* The title and its language versions, found exactly as AnchorMB finds them
+   — its lookup (m3u8-player's /api/movibox, on Vercel) — so the two servers
+   never disagree about which film it is or which dubs it has. Our own lookup
+   stands in when that one does not answer. */
+const ANCHOR_MB = process.env.ANCHOR_MB_LOOKUP || 'https://m3u8-player-orcin.vercel.app/api/movibox';
+async function findVersions({ tmdb, title, year, type }) {
+    if (tmdb) {
+        try {
+            const r = await fetch(`${ANCHOR_MB}?tmdb=${tmdb}&type=${type}`, { signal: AbortSignal.timeout(25000) });
+            if (r.status === 404) return null;   // it has looked and MoviBox has no such title
+            if (r.ok) {
+                const d = await r.json();
+                if (Array.isArray(d.languages) && d.languages.length) {
+                    return { title: d.title, versions: d.languages.map((l) => ({ subjectId: String(l.subjectId), language: l.language || '', code: l.code || '', original: !!l.original })) };
+                }
+            }
+        } catch { /* fall back */ }
+    }
+    return moviboxDubs({ tmdb, title, year, type });
+}
 
 const streams = new Map();   // key → { at, expMs, members: [{ name, code, base, q, mpd }] }
 const titles = new Map();    // title key → { at, expMs, value }
@@ -199,7 +242,7 @@ async function mapLimit(list, n, fn) {
 }
 
 async function buildTitle({ tmdb, title, year, type, se, ep }) {
-    const dubs = await moviboxDubs({ tmdb, title, year, type });
+    const [dubs, origName] = await Promise.all([findVersions({ tmdb, title, year, type }), tmdbOriginal(type, tmdb)]);
     if (!dubs) return { streams: [], mp4: [] };
     // A subtitled copy ("Arabic sub") has the original's audio: nothing to add.
     const versions = dubs.versions.filter((v) => !/\bsub\b/i.test(v.language));
@@ -207,13 +250,14 @@ async function buildTitle({ tmdb, title, year, type, se, ep }) {
     const read = await mapLimit(versions, 3, async (v) => {
         const f = await signedFolder(v.subjectId, se, ep);
         if (!f) return null;
-        for (const x of f.mp4 || []) mp4.push({ subjectId: v.subjectId, name: nameFrom(v, ''), code: v.code || '', resolution: x.resolution, url: x.url, original: v.original });
+        for (const x of f.mp4 || []) mp4.push({ subjectId: v.subjectId, name: nameFrom(v, '', origName), code: v.code || '', resolution: x.resolution, url: x.url, original: v.original });
         if (!f.mpd) return null;
         const r = await fetch(`${f.mpd}?${f.q}`, { signal: AbortSignal.timeout(20000) });
         if (!r.ok) return null;
         const mpd = parseMpd(await r.text());
         if (!mpd.video.length || !mpd.audio.length) return null;
-        return { v, f, mpd, name: nameFrom(v, mpd.audio[0].lang), code: mpd.audio[0].lang || v.code || 'und' };
+        const name = nameFrom(v, mpd.audio[0].lang, origName);
+        return { v, f, mpd, name, code: CODE_OF[name] || mpd.audio[0].lang || v.code || 'und' };
     });
     const ok = read.filter(Boolean);
     // Same cut, same stream. The original leads its group; else the best video.
