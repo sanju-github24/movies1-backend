@@ -232,6 +232,7 @@ router.get('/tmdb-details', async (req, res) => {
           overview:    ep.overview || "",
           air_date:    ep.air_date || null,
           still_path:  ep.still_path ? `${IMAGE_BASE_URL}${ep.still_path}` : null,
+          runtime:     ep.runtime || null,   // minutes, for the player's episode list
         });
       });
     });

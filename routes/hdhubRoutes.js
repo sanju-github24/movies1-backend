@@ -235,14 +235,19 @@ export async function hdhubServers(link) {
         const cloud = await hubcloudPage(link);
         if (!cloud) return { name: '', size: '', servers: [] };
         const page1 = await get(cloud);
-        const next = (page1.match(/var\s+url\s*=\s*'([^']+)'/) || [])[1];
+        // A /drive/ page sets it in a script; a /video/ page links it.
+        const next = (page1.match(/var\s+url\s*=\s*'([^']+)'/) || [])[1]
+            || (page1.match(/href="(https:\/\/[^"]+\/hubcloud\.php\?[^"]+)"/) || [])[1]?.replace(/&amp;/g, '&');
         if (!next) return { name: '', size: '', servers: [] };
         const $ = cheerio.load(await get(next));
         const found = [];
         $('a[href]').each((_, a) => {
-            const m = clean($(a).text()).match(/download\s*\[\s*([^\]]+?)\s*\]/i);
+            const label = clean($(a).text());
+            const m = label.match(/download\s*\[\s*([^\]]+?)\s*\]/i);
             const href = $(a).attr('href');
             if (m && /^https?:/i.test(href)) found.push({ name: m[1].replace(/server/ig, ' ').replace(/\s*:\s*/, ' ').replace(/\s+/g, ' ').trim(), url: href });
+            // Some pages (a /video/ one) offer one button, the file itself: "Download File [576 MB]".
+            else if (/^download file\b/i.test(label) && /^https:/i.test(href)) found.push({ name: 'Direct', url: href });
         });
         const servers = (await Promise.all(found.map(async (x) => ({ ...x, url: await finalUrl(x.name, x.url) })))).filter((x) => x.url);
         return {

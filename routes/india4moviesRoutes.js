@@ -7,7 +7,7 @@
 //        A series (type=tv) has its episodes: watchEpisodes and each file's
 //        episodes are [{ ep, code }], every code one episode's file.
 //   GET /servers?code=    one file's download servers, asked for when it is opened
-//               ?url=     (or an older post's full4drive link):
+//               ?url=     (or an older post's full4drive or HubCloud link):
 //        { name, servers: [{ name, url }] }
 //   GET /play?v=          the file itself, for a player: a redirect to it
 //
@@ -274,12 +274,20 @@ export async function full4driveServers(link) {
     });
 }
 
+// An older post's other copy of a file, beside its full4drive one.
+const HUBCLOUD = /^https:\/\/(?:[a-z0-9-]+\.)?hubcloud\.[a-z]+\/(?:drive|video)\/[A-Za-z0-9_-]+\/?$/i;
+
 router.get('/servers', async (req, res) => {
     const code = clean(req.query.code);
     const url = clean(req.query.url);
-    if (!CODE.test(code) && !FULL4DRIVE.test(url)) return res.status(400).json({ error: 'Not a MultiCloudLinks or full4drive file', servers: [] });
+    if (!CODE.test(code) && !FULL4DRIVE.test(url) && !HUBCLOUD.test(url)) {
+        return res.status(400).json({ error: 'Not a MultiCloudLinks, full4drive or HubCloud file', servers: [] });
+    }
     try {
-        res.json(code ? await india4moviesServers(code) : await full4driveServers(url));
+        res.json(code ? await india4moviesServers(code)
+            : FULL4DRIVE.test(url) ? await full4driveServers(url)
+            // HubCloud is slow at times: one more try before giving up.
+            : await hdhubServers(url).catch(() => hdhubServers(url)));
     } catch (e) {
         console.error(`❌ India4Movies servers failed for ${code || url}: ${e.message}`);
         res.status(502).json({ error: 'The file host is not answering right now', servers: [] });
