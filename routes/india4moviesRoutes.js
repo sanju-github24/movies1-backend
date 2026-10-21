@@ -1,7 +1,7 @@
 // =====================================================================
 // India4Movies — download sources, and the last fallback for AnchorHD
 //
-//   GET /files?q=&year=&type=   the title's posts, one per language:
+//   GET /files?q=&year=&type=movie|tv|any   the title's posts, one per language:
 //        { posts: [{ title, url, lang, print, season, watch, watchEpisodes,
 //                    files: [{ label, quality, size, info, url, code, playable, episodes }] }] }
 //        A series (type=tv) has its episodes: watchEpisodes and each file's
@@ -95,6 +95,17 @@ const printOf = (s) => (String(s).match(PRINT) || [])[1] || '';
 const seasonOf = (t) => Number((String(t).match(/\bSeason\s*(\d{1,3})/i) || [])[1]) || 0;
 /* A title with a second name — "Fakes (Farzi)" — is looked for by each:
    the post may be under either ("Farzi – Season 1", at a "fakes-…" address). */
+/* A post can be titled by one name and addressed by another — "Farzi –
+   Season 1" at /fakes-full-season-1-web-series-download-2/ — so its
+   address counts too: a name, then nothing but the usual words after it. */
+const slugIs = (url, wants) => {
+    let slug = '';
+    try { slug = new URL(url).pathname.replace(/^\/|\/$/g, '').replace(/-/g, ' ').toLowerCase(); } catch { return false; }
+    const rest = /^(?:(?:full|season|s\d{1,2}|\d{1,4}|web|series|movie|download|tamil|telugu|hindi|malayalam|kannada|english|dubbed|hd|hdrip|webrip|watch|online)\s*)*$/;
+    // …but a number straight after the name is a sequel ("jailer 2 2026"), not this title.
+    return [...wants].some((w) => slug.startsWith(`${w} `) && !/^\d{1,2}\b/.test(slug.slice(w.length + 1))
+        && rest.test(slug.slice(w.length + 1)));
+};
 async function findPosts(q, year, tv = false) {
     const terms = titleNames(q).filter((x) => nameOf(x));
     const wants = new Set(terms.map(nameOf));
@@ -113,11 +124,12 @@ async function findPosts(q, year, tv = false) {
     return found
         .map((p) => ({ title: text(p.title?.rendered), url: p.link }))
         .filter((p) => {
-            if (seen.has(p.url) || !wants.has(nameOf(p.title))) return false;
+            if (seen.has(p.url) || !(wants.has(nameOf(p.title)) || slugIs(p.url, wants))) return false;
             seen.add(p.url);
-            if (tv !== !!seasonOf(p.title)) return false;   // a film is not its series
+            const series = !!seasonOf(p.title);
+            if (tv !== 'any' && !!tv !== series) return false;   // a film is not its series
             const y = (p.title.match(/\(((?:19|20)\d{2})\)/) || [])[1];
-            return tv || !year || !y || y === String(year);
+            return series || !year || !y || y === String(year);
         })
         .slice(0, 8);
 }
@@ -203,12 +215,13 @@ async function seriesEpisodes(post) {
 }
 
 export async function india4moviesFiles(q, year = '', tv = false) {
-    return remember(`f:${tv ? 'tv' : 'movie'}|${q.toLowerCase()}|${year}`, 3 * 3600e3, async () => {
+    // tv: true a series, false a film, 'any' either (a search box that cannot tell).
+    return remember(`f:${tv === 'any' ? 'any' : tv ? 'tv' : 'movie'}|${q.toLowerCase()}|${year}`, 3 * 3600e3, async () => {
         const posts = await findPosts(q, year, tv);
         const read = await Promise.all(posts.map(async (p) => {
             try {
                 const got = await postFiles(p.url);
-                return tv ? await seriesEpisodes(got) : got;
+                return seasonOf(p.title) ? await seriesEpisodes(got) : got;
             } catch (e) {
                 console.warn(`⚠️ India4Movies post not read (${p.url}): ${e.message}`);
                 return { watch: '', files: [] };
@@ -226,7 +239,8 @@ router.get('/files', async (req, res) => {
     const year = clean(req.query.year).slice(0, 4);
     if (!q) return res.status(400).json({ error: 'q is required', posts: [] });
     try {
-        res.json(await india4moviesFiles(q, year, req.query.type === 'tv'));
+        const type = req.query.type;
+        res.json(await india4moviesFiles(q, year, type === 'tv' ? true : type === 'any' ? 'any' : false));
     } catch (e) {
         console.error(`❌ India4Movies failed for "${q}": ${e.message}`);
         res.status(502).json({ error: 'India4Movies is not answering right now', posts: [] });
