@@ -30,6 +30,7 @@
 import express from 'express';
 import * as cheerio from 'cheerio';
 import { hdhubServers } from './hdhubRoutes.js';
+import { titleNames } from '../utils/titleNames.js';
 
 const router = express.Router();
 
@@ -92,9 +93,12 @@ const printOf = (s) => (String(s).match(PRINT) || [])[1] || '';
    a short one ("Love") is lost among the films that share the word — and
    its year is the season's, not the show's, so it is not held to one. */
 const seasonOf = (t) => Number((String(t).match(/\bSeason\s*(\d{1,3})/i) || [])[1]) || 0;
+/* A title with a second name — "Fakes (Farzi)" — is looked for by each:
+   the post may be under either ("Farzi – Season 1", at a "fakes-…" address). */
 async function findPosts(q, year, tv = false) {
-    const want = nameOf(q);
-    if (!want) return [];
+    const terms = titleNames(q).filter((x) => nameOf(x));
+    const wants = new Set(terms.map(nameOf));
+    if (!wants.size) return [];
     const search = async (term) => {
         const url = new URL(`${BASE}/wp-json/wp/v2/posts`);
         Object.entries({ search: term, per_page: '20', _fields: 'link,title,date' }).forEach(([k, v]) => url.searchParams.set(k, v));
@@ -102,14 +106,14 @@ async function findPosts(q, year, tv = false) {
     };
     /* Either search may be dropped; only both failing is a failure (and is
        not remembered, so the next viewer asks again). */
-    const asked = await Promise.allSettled(tv ? [search(`${q} season`), search(q)] : [search(q)]);
+    const asked = await Promise.allSettled(terms.flatMap((t) => (tv ? [search(`${t} season`), search(t)] : [search(t)])));
     if (asked.every((x) => x.status === 'rejected')) throw asked[0].reason;
     const found = asked.flatMap((x) => (x.status === 'fulfilled' ? x.value : []));
     const seen = new Set();
     return found
         .map((p) => ({ title: text(p.title?.rendered), url: p.link }))
         .filter((p) => {
-            if (seen.has(p.url) || nameOf(p.title) !== want) return false;
+            if (seen.has(p.url) || !wants.has(nameOf(p.title))) return false;
             seen.add(p.url);
             if (tv !== !!seasonOf(p.title)) return false;   // a film is not its series
             const y = (p.title.match(/\(((?:19|20)\d{2})\)/) || [])[1];

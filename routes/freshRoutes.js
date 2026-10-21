@@ -16,6 +16,7 @@
 
 import express from 'express';
 import { TMDB_API_KEY } from './tmdbRoutes.js';
+import { currentBase as hdhubBase } from './hdhubRoutes.js';
 
 const router = express.Router();
 
@@ -167,14 +168,14 @@ async function matchImdb(imdb, series) {
      "Spider-Man: Brand New Day (2026) DS4K WEB-DL [Hindi (DD5.1) & English] 4K …"
      "The Punisher (Season 1) DS4K WEB-DL [Hindi … & English] …" */
 const HDHUB_SEARCH = process.env.HDHUB_SEARCH || 'https://search.pingora.fyi/collections/post/documents/search';
-const HDHUB_BASE = (process.env.HDHUB_BASE || 'https://new1.hdhub4u.free').replace(/\/$/, '');
 async function readHdhub(pages = 2) {
   const posts = [];
   for (let page = 1; page <= pages; page++) {
     const u = new URL(HDHUB_SEARCH);
     Object.entries({ q: '*', query_by: 'post_title', sort_by: 'sort_by_date:desc', per_page: '50', page: String(page) })
       .forEach(([k, v]) => u.searchParams.set(k, v));
-    const r = await fetchRetry(u.href, () => ({ headers: { 'User-Agent': UA, Referer: `${HDHUB_BASE}/` }, signal: AbortSignal.timeout(15000) }));
+    const referer = `${await hdhubBase()}/`;
+    const r = await fetchRetry(u.href, () => ({ headers: { 'User-Agent': UA, Referer: referer }, signal: AbortSignal.timeout(15000) }));
     if (!r.ok) throw new Error(`HDHub4u index answered ${r.status}`);
     for (const h of (await r.json()).hits || []) {
       const d = h.document || {};

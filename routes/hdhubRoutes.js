@@ -20,10 +20,30 @@
 
 import express from 'express';
 import * as cheerio from 'cheerio';
+import { titleNames } from '../utils/titleNames.js';
 
 const router = express.Router();
 
-const BASE = (process.env.HDHUB_BASE || 'https://new1.hdhub4u.free').replace(/\/$/, '');
+/* The site moves from one domain to the next (new1.hdhub4u.free, gone;
+   new8.hdhub4u.cl …), and its search keeps handing out links on old ones.
+   Its own landing page asks a lookup for the domain of the day — {c:
+   base64 "https://new8.hdhub4u.cl/?utm=…"} — and so does this, hourly,
+   keeping the last answer (or HDHUB_BASE) when the lookup is down. */
+let BASE = (process.env.HDHUB_BASE || 'https://new8.hdhub4u.cl').replace(/\/$/, '');
+const HOST_LOOKUPS = ['https://dns.pingora.fyi/v2/host', 'https://h4.suncdn.org/host/'];
+let baseAt = 0;
+export async function currentBase() {
+    if (Date.now() - baseAt < 3600e3) return BASE;
+    baseAt = Date.now();
+    for (const url of HOST_LOOKUPS) {
+        try {
+            const res = await fetch(url, { headers: { 'User-Agent': UA }, signal: AbortSignal.timeout(8000) });
+            const c = res.ok ? Buffer.from(String((await res.json()).c || ''), 'base64').toString() : '';
+            if (/^https:\/\/[a-z0-9.-]*hdhub4u\.[a-z]+/i.test(c)) { BASE = new URL(c).origin; break; }
+        } catch { /* the next lookup */ }
+    }
+    return BASE;
+}
 const SEARCH = process.env.HDHUB_SEARCH || 'https://search.pingora.fyi/collections/post/documents/search';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
 
@@ -80,9 +100,10 @@ async function findPost(q, year, imdb) {
     return scored[0]?.d || null;
 }
 
-/* Posts are listed under an old domain that no longer answers; the paths
-   carry over to the current one. */
-const onBase = (link) => { try { const u = new URL(link); return `${BASE}${u.pathname}${u.search}`; } catch { return link; } };
+// A post's path, on the current domain: the one in its link may be long gone.
+const onBase = async (link) => {
+    try { const u = new URL(link); return `${await currentBase()}${u.pathname}${u.search}`; } catch { return link; }
+};
 
 const FILE_HOSTS = /(^|\.)(hubdrive|hubcloud|hubcdn)\./i;
 const hostName = (link) => { try { return new URL(link).host; } catch { return ''; } };
@@ -162,9 +183,14 @@ async function postFiles(url) {
 
 export async function hdhubFiles(q, year = '', imdb = '') {
     return remember(`f:${imdb}|${q.toLowerCase()}|${year}`, 6 * 3600e3, async () => {
-        const doc = await findPost(q, year, imdb);
+        // By IMDb id, else by each name the title goes by ("Fakes (Farzi)").
+        let doc = await findPost(q, year, imdb);
+        for (const name of titleNames(q)) {
+            if (doc || name === q) break;
+            doc = await findPost(name, year, '');
+        }
         if (!doc) return { post: null, files: [] };
-        const url = onBase(doc.permalink);
+        const url = await onBase(doc.permalink);
         return { post: { title: clean(doc.post_title), url }, files: await postFiles(url) };
     });
 }
