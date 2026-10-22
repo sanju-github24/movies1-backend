@@ -39,6 +39,7 @@ import hdhubRouter from './routes/hdhubRoutes.js';
 import freshRouter from './routes/freshRoutes.js';
 import moviboxRouter from './routes/moviboxRoutes.js';
 import india4moviesRouter from './routes/india4moviesRoutes.js';
+import skipRouter from './routes/skipRoutes.js';
 import bingrRouter from './routes/bingrRoutes.js';
 import mbHlsRouter from './routes/mbHlsRoutes.js';
 import serverOrderRouter from './routes/serverOrderRoutes.js';
@@ -904,6 +905,7 @@ app.use('/api/hdhub', hdhubRouter);           // more of them, wait pages skippe
 app.use('/api/fresh', freshRouter);           // what has just come out, matched to TMDB
 app.use('/api/movibox', moviboxRouter);       // a title's per-language MPD/MP4 links, by TMDB id or name
 app.use('/api/i4m', india4moviesRouter);      // India4Movies: downloads, and AnchorHD's last fallback
+app.use('/api/skip', skipRouter);             // intro / recap / credits timings, for Skip Intro and Next Episode
 app.use('/api/bingr', bingrRouter);           // bingr's direct servers, for AnchorHD after Singularity
 app.use('/api/mbhls', mbHlsRouter);           // MoviBox as one multi-audio HLS, segments straight off its CDN
 app.use('/api/server-order', serverOrderRouter); // a title's server order, arranged by the admin
