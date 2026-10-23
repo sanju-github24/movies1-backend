@@ -58,7 +58,7 @@ async function emailFrom(req) {
     }
     return '';
 }
-async function requireAdmin(req, res, next) {
+export async function requireAdmin(req, res, next) {
     const email = String(await emailFrom(req)).toLowerCase();
     if (!email) return res.status(401).json({ success: false, message: 'Please sign in again' });
     if (ADMIN_EMAILS.includes(email)) return next();

@@ -41,6 +41,7 @@ import moviboxRouter from './routes/moviboxRoutes.js';
 import india4moviesRouter from './routes/india4moviesRoutes.js';
 import skipRouter from './routes/skipRoutes.js';
 import subsRouter from './routes/subsRoutes.js';
+import liveNowRouter from './routes/liveNowRoutes.js';
 import bingrRouter from './routes/bingrRoutes.js';
 import mbHlsRouter from './routes/mbHlsRoutes.js';
 import serverOrderRouter from './routes/serverOrderRoutes.js';
@@ -906,6 +907,7 @@ app.use('/api/hdhub', hdhubRouter);           // more of them, wait pages skippe
 app.use('/api/fresh', freshRouter);           // what has just come out, matched to TMDB
 app.use('/api/movibox', moviboxRouter);       // a title's per-language MPD/MP4 links, by TMDB id or name
 app.use('/api/i4m', india4moviesRouter);      // India4Movies: downloads, and AnchorHD's last fallback
+app.use('/api/live-now', liveNowRouter);      // admin-added lives, and the nightly shows' times
 app.use('/api/subs', subsRouter);             // subtitles searched online (SubDL), as VTT for the player
 app.use('/api/skip', skipRouter);             // intro / recap / credits timings, for Skip Intro and Next Episode
 app.use('/api/bingr', bingrRouter);           // bingr's direct servers, for AnchorHD after Singularity
