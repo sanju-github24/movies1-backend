@@ -16,6 +16,7 @@
 // =====================================================================
 
 import express from 'express';
+import { TMDB_API_KEY } from './tmdbRoutes.js';
 
 const router = express.Router();
 
@@ -50,9 +51,22 @@ const fromOne = (s) => {
     return end != null && end <= start ? null : { start, end };
 };
 
+/* IntroDB knows titles only by IMDb id. A page that has only the TMDB id
+   (our own uploads usually) gets it looked up here, so IntroDB is asked too. */
+const imdbOf = new Map();   // "tv:1396" → "tt0903747" | ''
+async function imdbFor(tmdb, tv) {
+    const k = `${tv ? 'tv' : 'movie'}:${tmdb}`;
+    if (imdbOf.has(k)) return imdbOf.get(k);
+    const d = await getJson(`https://api.themoviedb.org/3/${tv ? 'tv' : 'movie'}/${tmdb}/external_ids?api_key=${TMDB_API_KEY}`);
+    const id = /^tt\d+$/.test(String(d?.imdb_id || '')) ? d.imdb_id : '';
+    if (d) imdbOf.set(k, id);
+    if (imdbOf.size > 5000) imdbOf.delete(imdbOf.keys().next().value);
+    return id;
+}
+
 router.get('/segments', async (req, res) => {
     const tmdb = /^\d{1,9}$/.test(String(req.query.tmdb || '')) ? String(req.query.tmdb) : '';
-    const imdb = /^tt\d{5,10}$/.test(String(req.query.imdb || '')) ? String(req.query.imdb) : '';
+    let imdb = /^tt\d{5,10}$/.test(String(req.query.imdb || '')) ? String(req.query.imdb) : '';
     const tv = req.query.type === 'tv';
     const season = tv ? Math.max(0, parseInt(req.query.season, 10) || 0) : 0;
     const episode = tv ? Math.max(0, parseInt(req.query.episode, 10) || 0) : 0;
@@ -63,6 +77,7 @@ router.get('/segments', async (req, res) => {
     const hit = cache.get(key);
     if (hit && Date.now() - hit.at < (hit.value.found ? TTL : MISS_TTL)) return res.json(hit.value);
 
+    if (!imdb && tmdb && tv) imdb = await imdbFor(tmdb, tv);
     const se = tv ? `&season=${season}&episode=${episode}` : '';
     const [tidb, idb] = await Promise.all([
         tmdb ? getJson(`https://api.theintrodb.org/v2/media?tmdb_id=${tmdb}${se}`) : null,
