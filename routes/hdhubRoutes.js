@@ -308,13 +308,20 @@ const PLAY_ORDER = [
     (s) => /direct/i.test(s.name),
     (s) => /googleusercontent\.com/i.test(hostName(s.url)),
 ];
+/* The server to stream from, of a file's servers; null when none will do.
+   Also used by India4Movies for its older posts' HubCloud copies. A
+   workers.dev "Direct" copy is left out: its link is tied to whoever asked
+   (403 from anywhere else) and Jio's DNS does not resolve it. */
+export function playableServer(servers = []) {
+    const usable = servers.filter((s) => !/buzz|fuckingfast|amazonserver\.workers\.dev/i.test(`${s.name} ${hostName(s.url)}`));
+    return PLAY_ORDER.map((ok) => usable.find(ok)).find(Boolean) || null;
+}
 router.get('/play', async (req, res) => {
     const link = clean(req.query.link);
     if (!/^https:/.test(link) || !FILE_HOSTS.test(hostName(link))) return res.status(400).json({ error: 'Not a HubDrive, HubCloud or HubCDN link' });
     try {
         const { servers } = await hdhubServers(link);
-        const usable = servers.filter((s) => !/buzz|fuckingfast/i.test(`${s.name} ${hostName(s.url)}`));
-        const pick = PLAY_ORDER.map((ok) => usable.find(ok)).find(Boolean) || usable[0];
+        const pick = playableServer(servers);
         if (!pick) return res.status(404).json({ error: 'No server has this file right now' });
         res.set('Cache-Control', 'no-store');
         res.redirect(302, pick.url);

@@ -20,7 +20,10 @@
 // and ranges, so our player can play it too. Its link carries a token that
 // runs out in a few hours, so it is read from the player page at play time.
 // The ".m3u" the player offers for VLC is that same link in a playlist.
-// Older posts link a file host's page (full4drive…) and are download only.
+// Older posts (2024 and before) link full4drive and, beside it, a HubCloud
+// copy. full4drive's download buttons are broken site-wide (2026-10: its
+// /dl/ /gdl/ /wk/ pages error for every file), so such a file plays from its
+// HubCloud copy (/play?url=), streamed from the best of HubCloud's servers.
 //
 // A series post's buttons lead to a list instead — "Episode 1 - Watch
 // Online", "Episode 2"… and a Batch/Zip — one per quality, each episode
@@ -29,7 +32,7 @@
 
 import express from 'express';
 import * as cheerio from 'cheerio';
-import { hdhubServers } from './hdhubRoutes.js';
+import { hdhubServers, playableServer } from './hdhubRoutes.js';
 import { titleNames } from '../utils/titleNames.js';
 import { domainOf } from '../utils/siteDomains.js';
 
@@ -138,6 +141,8 @@ async function findPosts(q, year, tv = false) {
 
 const FILE_HOSTS = /(^|\.)(multicloudlinks\.com|full4drive\.[a-z]+|gdflix\.[a-z]+|filepress\.[a-z]+|hubcloud\.[a-z]+|pixeldrain\.[a-z]+|vikingfile\.[a-z]+|filebee\.[a-z]+)$/i;
 const hostName = (link) => { try { return new URL(link).host; } catch { return ''; } };
+// An older post's other copy of a file, beside its full4drive one.
+const HUBCLOUD = /^https:\/\/(?:[a-z0-9-]+\.)?hubcloud\.[a-z]+\/(?:drive|video)\/[A-Za-z0-9_-]+\/?$/i;
 const QUALITY = /\b(480|540|720|1080|2160)p\b/gi;
 const SIZE = /([\d.]+\s*[GM]B)\b/gi;
 const last = (s, re) => { const all = String(s).match(re); return all ? all[all.length - 1] : ''; };
@@ -172,6 +177,7 @@ async function postFiles(url) {
             const before = clean(context).slice(-300);
             context = '';
             const code = codeOf(href);
+            const hub = HUBCLOUD.test(href) ? href : '';
             if (/player\.php/i.test(href) || /watch/i.test(label)) { if (code && !watch) watch = code; continue; }
             // "… | HDTC x264 DD2.0 AAC HC-ESubs", or "… WEB-HDRip x264 ESubs {Size…"
             const info = clean(last(before, /(?:[\w-]+\s+)?\b(?:x26[45]|HEVC|H\.?26[45])\b[^|{}[\]<>:()]*/gi));
@@ -186,7 +192,8 @@ async function postFiles(url) {
                 info: info || (quality ? '' : prev?.info || ''),
                 url: href,
                 code,
-                playable: !!code && browserSafe(`${info} ${label}`),
+                hub,
+                playable: !!(code || hub) && browserSafe(`${info} ${label}`),
             });
         }
     };
@@ -294,8 +301,6 @@ export async function full4driveServers(link) {
     });
 }
 
-// An older post's other copy of a file, beside its full4drive one.
-const HUBCLOUD = /^https:\/\/(?:[a-z0-9-]+\.)?hubcloud\.[a-z]+\/(?:drive|video)\/[A-Za-z0-9_-]+\/?$/i;
 
 router.get('/servers', async (req, res) => {
     const code = clean(req.query.code);
@@ -320,6 +325,22 @@ router.get('/servers', async (req, res) => {
 const playCache = new Map();   // code → { at, url }
 router.get('/play', async (req, res) => {
     const code = clean(req.query.v);
+    const hub = clean(req.query.url);
+    /* An older post's HubCloud copy: the server to stream from (R2 first;
+       Google, which cannot seek, only when nothing else has it). */
+    if (hub) {
+        if (!HUBCLOUD.test(hub)) return res.status(400).send('Not a HubCloud file');
+        try {
+            const { servers } = await hdhubServers(hub).catch(() => hdhubServers(hub));
+            const pick = playableServer(servers);
+            if (!pick) return res.status(404).send('No server has this file right now');
+            res.set('Cache-Control', 'no-store');
+            return res.redirect(302, pick.url);
+        } catch (e) {
+            console.warn(`⚠️ India4Movies HubCloud copy not followed (${hub}): ${e.message}`);
+            return res.status(502).send('The file host is not answering right now');
+        }
+    }
     if (!CODE.test(code)) return res.status(400).send('Not a MultiCloudLinks file');
     try {
         const hit = playCache.get(code);
