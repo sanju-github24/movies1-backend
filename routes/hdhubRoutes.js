@@ -288,6 +288,31 @@ export async function hdhubServers(link) {
     });
 }
 
+/* ── Play a file where it lies ───────────────────────────────────────
+   GET /play?link=<HubDrive / HubCloud / HubCDN page>  → 302 to the file.
+   AnchorHD plays HDHub4u's MKVs straight off their file servers (through the
+   download relay, which picks the audio language). The servers' links carry
+   tokens that last hours, so the player is given this address instead, and
+   the file's current link is looked up each time it is opened. A server a
+   player can stream from is preferred: R2 (FSL), then Google (10Gbps), then
+   PixelDrain — all answer byte ranges, which seeking needs. */
+const PLAY_ORDER = [/cloudflarestorage\.com|r2\.dev/i, /googleusercontent\.com/i, /pixeldrain\./i];
+router.get('/play', async (req, res) => {
+    const link = clean(req.query.link);
+    if (!/^https:/.test(link) || !FILE_HOSTS.test(hostName(link))) return res.status(400).json({ error: 'Not a HubDrive, HubCloud or HubCDN link' });
+    try {
+        const { servers } = await hdhubServers(link);
+        const pick = PLAY_ORDER.map((re) => servers.find((s) => re.test(hostName(s.url)))).find(Boolean)
+            || servers.find((s) => /direct/i.test(s.name)) || servers[0];
+        if (!pick) return res.status(404).json({ error: 'No server has this file right now' });
+        res.set('Cache-Control', 'no-store');
+        res.redirect(302, pick.url);
+    } catch (e) {
+        console.error(`❌ HDHub4u play failed for ${link}: ${e.message}`);
+        res.status(502).json({ error: 'The file host is not answering right now' });
+    }
+});
+
 router.get('/servers', async (req, res) => {
     const url = clean(req.query.url);
     // Only the file hosts' own pages: this is not a general-purpose fetcher.
