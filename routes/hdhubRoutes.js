@@ -21,6 +21,7 @@
 import express from 'express';
 import * as cheerio from 'cheerio';
 import { titleNames } from '../utils/titleNames.js';
+import { overrideOf, defaultBase } from '../utils/siteDomains.js';
 
 const router = express.Router();
 
@@ -28,11 +29,14 @@ const router = express.Router();
    new8.hdhub4u.cl …), and its search keeps handing out links on old ones.
    Its own landing page asks a lookup for the domain of the day — {c:
    base64 "https://new8.hdhub4u.cl/?utm=…"} — and so does this, hourly,
-   keeping the last answer (or HDHUB_BASE) when the lookup is down. */
-let BASE = (process.env.HDHUB_BASE || 'https://new8.hdhub4u.cl').replace(/\/$/, '');
+   keeping the last answer (or HDHUB_BASE) when the lookup is down.
+   A domain set by the admin (Admin → Source domains) wins over both. */
+let BASE = defaultBase('hdhub');
 const HOST_LOOKUPS = ['https://dns.pingora.fyi/v2/host', 'https://h4.suncdn.org/host/'];
 let baseAt = 0;
+const baseNow = () => overrideOf('hdhub')?.base || BASE;
 export async function currentBase() {
+    if (overrideOf('hdhub')) return overrideOf('hdhub').base;
     if (Date.now() - baseAt < 3600e3) return BASE;
     baseAt = Date.now();
     for (const url of HOST_LOOKUPS) {
@@ -59,7 +63,7 @@ const remember = async (key, ttl, make) => {
 
 async function get(url, as = 'text') {
     const res = await fetch(url, {
-        headers: { 'User-Agent': UA, Accept: as === 'json' ? 'application/json' : 'text/html', Referer: `${BASE}/` },
+        headers: { 'User-Agent': UA, Accept: as === 'json' ? 'application/json' : 'text/html', Referer: `${baseNow()}/` },
         redirect: 'follow',
         signal: AbortSignal.timeout(15000),
     });

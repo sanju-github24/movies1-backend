@@ -41,7 +41,7 @@ const cache = new Map();   // slug → { at, order }
 const supabase = process.env.SUPABASE_URL
     ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_KEY, { auth: { persistSession: false } })
     : null;
-async function emailFrom(req) {
+export async function emailFrom(req) {
     const bearer = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '';
     for (const token of [bearer, req.cookies?.token].filter(Boolean)) {
         try {

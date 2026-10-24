@@ -31,10 +31,12 @@ import express from 'express';
 import * as cheerio from 'cheerio';
 import { hdhubServers } from './hdhubRoutes.js';
 import { titleNames } from '../utils/titleNames.js';
+import { domainOf } from '../utils/siteDomains.js';
 
 const router = express.Router();
 
-const BASE = (process.env.I4M_BASE || 'https://go6.india4movies.net').replace(/\/$/, '');
+/* The domain moves; the admin sets the new one on Admin → Source domains. */
+const base = () => domainOf('i4m');
 const MCL = (process.env.I4M_MCL || 'https://new3.multicloudlinks.com').replace(/\/$/, '');
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
 
@@ -50,7 +52,7 @@ const remember = async (key, ttl, make) => {
 
 async function get(url, as = 'text') {
     const ask = () => fetch(url, {
-        headers: { 'User-Agent': UA, Accept: as === 'json' ? 'application/json' : 'text/html', Referer: `${BASE}/` },
+        headers: { 'User-Agent': UA, Accept: as === 'json' ? 'application/json' : 'text/html', Referer: `${base()}/` },
         redirect: 'follow',
         signal: AbortSignal.timeout(15000),
     });
@@ -111,7 +113,7 @@ async function findPosts(q, year, tv = false) {
     const wants = new Set(terms.map(nameOf));
     if (!wants.size) return [];
     const search = async (term) => {
-        const url = new URL(`${BASE}/wp-json/wp/v2/posts`);
+        const url = new URL(`${base()}/wp-json/wp/v2/posts`);
         Object.entries({ search: term, per_page: '20', _fields: 'link,title,date' }).forEach(([k, v]) => url.searchParams.set(k, v));
         return get(url.href, 'json');
     };

@@ -17,10 +17,13 @@
 import express from 'express';
 import { TMDB_API_KEY } from './tmdbRoutes.js';
 import { currentBase as hdhubBase } from './hdhubRoutes.js';
+import { domainOf, domainEvents } from '../utils/siteDomains.js';
 
 const router = express.Router();
 
-const SOURCE = (process.env.TAMILMV_BASE || 'https://www.1tamilmv.capital').replace(/\/$/, '');
+/* 1TamilMV and India4Movies move domains; the admin sets the new one on
+   Admin → Source domains, and both are read fresh on every use. */
+const source = () => domainOf('tamilmv');
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
 const TMDB = 'https://api.themoviedb.org/3';
 const IMG = 'https://image.tmdb.org/t/p/';
@@ -203,7 +206,7 @@ async function readHdhub(pages = 2) {
    went up. One post per language, merged below with the rest by TMDB id:
      "Street Fighter (2026) 1080p | 720p | 480p HDTC [Tamil (DD2.0)]"
      "MobLand – Season 2 (2026) WEB-HDRip [EP 05 Added] [Hindi (DDP5.1) + English]" */
-const I4M_BASE = (process.env.I4M_BASE || 'https://go6.india4movies.net').replace(/\/$/, '');
+const i4mBase = () => domainOf('i4m');
 const unescapeHtml = (s) => String(s || '').replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Number(n)))
   .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(parseInt(n, 16)))
   .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&#039;|&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
@@ -211,7 +214,7 @@ async function readIndia4movies(pages = 2) {
   const posts = [];
   // 50 a page: asked for 100, the site answers with something that is not JSON.
   for (let page = 1; page <= pages; page++) {
-    const u = `${I4M_BASE}/wp-json/wp/v2/posts?per_page=50&page=${page}&_fields=id,date_gmt,link,title`;
+    const u = `${i4mBase()}/wp-json/wp/v2/posts?per_page=50&page=${page}&_fields=id,date_gmt,link,title`;
     const r = await fetchRetry(u, () => ({ headers: { 'User-Agent': UA, Accept: 'application/json' }, signal: AbortSignal.timeout(15000) }));
     if (!r.ok) throw new Error(`India4Movies answered ${r.status}`);
     for (const d of await r.json()) {
@@ -251,7 +254,7 @@ async function refresh() {
   running = (async () => {
     /* Every site on its own: one being down costs only its titles. */
     const tmv = await (async () => {
-      const res = await fetchRetry(SOURCE + '/', () => ({ headers: { 'User-Agent': UA, Accept: 'text/html' }, signal: AbortSignal.timeout(20000) }));
+      const res = await fetchRetry(source() + '/', () => ({ headers: { 'User-Agent': UA, Accept: 'text/html' }, signal: AbortSignal.timeout(20000) }));
       if (!res.ok) throw new Error(`1TamilMV answered ${res.status}`);
       return readPosts(await res.text()).map((p) => ({ ...p, source: 'tamilmv' }));
     })().catch((e) => { console.warn(`⚠️ 1TamilMV not read: ${e.message}`); return []; });
@@ -348,6 +351,10 @@ async function refresh() {
 // Read on start (once the server has settled) and every hour after.
 setTimeout(refresh, 20_000).unref?.();
 setInterval(refresh, EVERY).unref?.();
+/* A source moved: the list built from its old domain is rebuilt now, not at
+   the next hourly run. A short wait lets a burst of changes land as one. */
+let soon = null;
+domainEvents.on('change', () => { clearTimeout(soon); soon = setTimeout(() => refresh().catch(() => {}), 3000); });
 
 router.get('/', async (req, res) => {
   // A server that has just started waits for its first read rather than
@@ -415,7 +422,7 @@ async function searchTopics(title, year, series) {
   if (hit && Date.now() - hit.at < 60 * 60e3) return hit.topics;
   const q = norm(title);
   if (!q) return [];
-  const url = `${SOURCE}/index.php?/search/&q=${encodeURIComponent(q)}&type=forums_topic&search_and_or=and&sortby=newest`;
+  const url = `${source()}/index.php?/search/&q=${encodeURIComponent(q)}&type=forums_topic&search_and_or=and&sortby=newest`;
   const r = await fetchRetry(url, () => ({ headers: { 'User-Agent': UA, Accept: 'text/html' }, signal: AbortSignal.timeout(20000) }));
   if (!r.ok) throw new Error(`search answered ${r.status}`);
   const html = await r.text();

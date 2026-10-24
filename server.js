@@ -45,6 +45,7 @@ import liveNowRouter from './routes/liveNowRoutes.js';
 import bingrRouter from './routes/bingrRoutes.js';
 import mbHlsRouter from './routes/mbHlsRoutes.js';
 import serverOrderRouter from './routes/serverOrderRoutes.js';
+import siteDomainRouter from './routes/siteDomainRoutes.js';
 import hotstarProxy from './routes/hotstarProxy.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
@@ -913,6 +914,7 @@ app.use('/api/skip', skipRouter);             // intro / recap / credits timings
 app.use('/api/bingr', bingrRouter);           // bingr's direct servers, for AnchorHD after Singularity
 app.use('/api/mbhls', mbHlsRouter);           // MoviBox as one multi-audio HLS, segments straight off its CDN
 app.use('/api/server-order', serverOrderRouter); // a title's server order, arranged by the admin
+app.use('/api/site-domains', siteDomainRouter); // 1TamilMV / HDHub4u / India4Movies domains, changed by the admin
 
 async function fetchBCCI(url) {
     const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
