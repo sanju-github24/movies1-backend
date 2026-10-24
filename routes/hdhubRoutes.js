@@ -293,17 +293,28 @@ export async function hdhubServers(link) {
    AnchorHD plays HDHub4u's MKVs straight off their file servers (through the
    download relay, which picks the audio language). The servers' links carry
    tokens that last hours, so the player is given this address instead, and
-   the file's current link is looked up each time it is opened. A server a
-   player can stream from is preferred: R2 (FSL), then Google (10Gbps), then
-   PixelDrain — all answer byte ranges, which seeking needs. */
-const PLAY_ORDER = [/cloudflarestorage\.com|r2\.dev/i, /googleusercontent\.com/i, /pixeldrain\./i];
+   the file's current link is looked up each time it is opened.
+     Measured on one file (418, 720p), 2026-10-24, 15 MB at two offsets:
+       FSLv2 (R2)       2.9–3.3 MB/s, steady, byte ranges   ← the one to play
+       FSL   (R2)       2.0 then 0.37 MB/s — the film's own rate, so it stalls
+       10Gbps (Google)  fast, but answers a range with the WHOLE file (200):
+                        every seek restarts the download from the start
+       Buzz             403
+   So by name first, host second; Google only when nothing else has it. */
+const PLAY_ORDER = [
+    (s) => /fsl\s*v2/i.test(s.name),
+    (s) => /^fsl\b/i.test(s.name) || /cloudflarestorage\.com|r2\.dev/i.test(hostName(s.url)),
+    (s) => /pixeldrain\./i.test(hostName(s.url)),
+    (s) => /direct/i.test(s.name),
+    (s) => /googleusercontent\.com/i.test(hostName(s.url)),
+];
 router.get('/play', async (req, res) => {
     const link = clean(req.query.link);
     if (!/^https:/.test(link) || !FILE_HOSTS.test(hostName(link))) return res.status(400).json({ error: 'Not a HubDrive, HubCloud or HubCDN link' });
     try {
         const { servers } = await hdhubServers(link);
-        const pick = PLAY_ORDER.map((re) => servers.find((s) => re.test(hostName(s.url)))).find(Boolean)
-            || servers.find((s) => /direct/i.test(s.name)) || servers[0];
+        const usable = servers.filter((s) => !/buzz|fuckingfast/i.test(`${s.name} ${hostName(s.url)}`));
+        const pick = PLAY_ORDER.map((ok) => usable.find(ok)).find(Boolean) || usable[0];
         if (!pick) return res.status(404).json({ error: 'No server has this file right now' });
         res.set('Cache-Control', 'no-store');
         res.redirect(302, pick.url);
