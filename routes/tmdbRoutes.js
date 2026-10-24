@@ -265,8 +265,9 @@ router.get('/tmdb-details', async (req, res) => {
   const trailer_url = trailer_key ? `${YOUTUBE_WATCH_BASE}${trailer_key}` : null;
 
   // ── Cast ──
+  // `id` is the person's TMDB id: the page links each face to /person/:id.
   const cast_list = (details.credits?.cast || []).slice(0, 10).map(m => ({
-    name: m.name, character: m.character, profile_path: m.profile_path || null,
+    id: m.id, name: m.name, character: m.character, profile_path: m.profile_path || null,
     profile_url: m.profile_path ? `${IMAGE_BASE_URL}${m.profile_path}` : null,
   }));
 
@@ -842,6 +843,82 @@ router.post('/save-movie-metadata', async (req, res) => {
     await fs.writeFile(DATA_FILE_PATH,JSON.stringify(movies,null,4));
     res.json({ success:true, message:'Saved.' });
   } catch(e){ console.error('File Write Error:',e); res.status(500).json({ success:false, message:'Write failed.' }); }
+});
+
+// ── /tmdb-person ──────────────────────────────────────────────────────────────
+// GET /api/tmdb-person?id=1234   (or ?name=Chaithra J Achar when no id is known)
+//   An actor's page: who they are, and everything they are credited in,
+//   split by department (Acting, Directing, Writing…) and by movies / series.
+//   Each title has the same shape as /tmdb-search's results, so the page opens
+//   it exactly as search does. A title credited twice (two roles, or acting
+//   and producing) appears once per department, with its roles joined.
+
+const personCache = new Map();   // key -> { at, value }
+router.get('/tmdb-person', async (req, res) => {
+  let id = String(req.query.id || '').trim();
+  const name = String(req.query.name || '').trim();
+  if (!/^\d{1,10}$/.test(id) && !name) return res.status(400).json({ success:false, message:'Give an id or a name.' });
+  const key = id ? `id:${id}` : `name:${name.toLowerCase()}`;
+  const hit = personCache.get(key);
+  if (hit && Date.now() - hit.at < 6 * 3600e3) return res.json(hit.value);
+  try {
+    /* A cast list from before ids were kept, or a name typed somewhere: the
+       most popular person by that name, which for a film's billed cast is
+       almost always the one meant. */
+    if (!/^\d{1,10}$/.test(id)) {
+      const s = await axiosWithRetry({ method:'get', url:`${BASE_URL}search/person`, params:{ api_key:TMDB_API_KEY, query:name, include_adult:false } });
+      const best = (s.data.results || []).sort((a, b) => (b.popularity || 0) - (a.popularity || 0))[0];
+      if (!best) return res.status(404).json({ success:false, message:`No one called ${name} on TMDB.` });
+      id = String(best.id);
+    }
+    const r = await axiosWithRetry({ method:'get', url:`${BASE_URL}person/${id}`,
+      params:{ api_key:TMDB_API_KEY, append_to_response:'combined_credits,external_ids' } });
+    const p = r.data;
+
+    // department -> { movie: Map, tv: Map }, keyed by title id
+    const depts = new Map();
+    const add = (dept, c, role) => {
+      const kind = c.media_type === 'tv' ? 'tv' : 'movie';
+      if (!depts.has(dept)) depts.set(dept, { movie: new Map(), tv: new Map() });
+      const bucket = depts.get(dept)[kind];
+      const prev = bucket.get(c.id);
+      if (prev) { if (role && !prev.roles.includes(role)) prev.roles.push(role); prev.episode_count += c.episode_count || 0; return; }
+      bucket.set(c.id, { ..._normalise_list_item(c, kind), roles: role ? [role] : [], episode_count: c.episode_count || 0, popularity: c.popularity || 0 });
+    };
+    for (const c of p.combined_credits?.cast || []) {
+      if (c.media_type !== 'movie' && c.media_type !== 'tv') continue;
+      /* Talk shows and award nights list everyone who sat on a sofa once;
+         "Self" credits are left out so the list is the person's work. */
+      if (/^(self|himself|herself|themselves)\b/i.test(c.character || '')) continue;
+      add('Acting', c, c.character || '');
+    }
+    for (const c of p.combined_credits?.crew || []) {
+      if (c.media_type !== 'movie' && c.media_type !== 'tv') continue;
+      add(c.department || 'Crew', c, c.job || '');
+    }
+
+    /* Newest first, and an announced title with no date yet ahead of those —
+       it is the newest of all. */
+    const order = (a, b) => (b.release_date || '9999').localeCompare(a.release_date || '9999') || b.popularity - a.popularity;
+    const known = p.known_for_department || 'Acting';
+    const departments = [...depts.entries()]
+      .map(([department, v]) => ({ department, movies: [...v.movie.values()].sort(order), series: [...v.tv.values()].sort(order) }))
+      .sort((a, b) => (b.department === known) - (a.department === known) || (b.movies.length + b.series.length) - (a.movies.length + a.series.length));
+
+    const value = { success:true, person: {
+      id: p.id, name: p.name, known_for_department: known,
+      birthday: p.birthday || null, deathday: p.deathday || null, place_of_birth: p.place_of_birth || null,
+      biography: p.biography || '', gender: p.gender || 0, also_known_as: p.also_known_as || [],
+      profile_url: p.profile_path ? `${IMAGE_BASE_URL}${p.profile_path}` : null,
+      imdb_id: p.external_ids?.imdb_id || p.imdb_id || null, instagram_id: p.external_ids?.instagram_id || null,
+    }, departments };
+    personCache.set(key, { at: Date.now(), value });
+    if (personCache.size > 2000) personCache.delete(personCache.keys().next().value);
+    res.json(value);
+  } catch (e) {
+    const status = e.response?.status === 404 ? 404 : 500;
+    res.status(status).json({ success:false, message: status === 404 ? 'No such person on TMDB.' : 'Failed to load this person.', details:e.message });
+  }
 });
 
 export default router;
