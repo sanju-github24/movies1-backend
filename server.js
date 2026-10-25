@@ -46,7 +46,9 @@ import bingrRouter from './routes/bingrRoutes.js';
 import mbHlsRouter from './routes/mbHlsRoutes.js';
 import serverOrderRouter from './routes/serverOrderRoutes.js';
 import siteDomainRouter from './routes/siteDomainRoutes.js';
+import analyticsRouter from './routes/analyticsRoutes.js';
 import hotstarProxy from './routes/hotstarProxy.js';
+import hsDirect from './routes/hsDirect.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
 import crypto from "crypto";
@@ -183,6 +185,7 @@ const corsOptions = {
 /* Ahead of the CORS layer: a player fetches every segment from whatever page
    embeds it, and this route answers any origin itself. */
 app.use('/api/hs-proxy', hotstarProxy);
+app.use('/api/hs-direct', hsDirect);   // Hotstar live CDN, served from this box itself
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
@@ -915,6 +918,7 @@ app.use('/api/bingr', bingrRouter);           // bingr's direct servers, for Anc
 app.use('/api/mbhls', mbHlsRouter);           // MoviBox as one multi-audio HLS, segments straight off its CDN
 app.use('/api/server-order', serverOrderRouter); // a title's server order, arranged by the admin
 app.use('/api/site-domains', siteDomainRouter); // 1TamilMV / HDHub4u / India4Movies domains, changed by the admin
+app.use('/api/analytics', analyticsRouter);      // our own visitor tracking, read on Admin → Analytics
 
 async function fetchBCCI(url) {
     const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
