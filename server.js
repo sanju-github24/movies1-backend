@@ -48,7 +48,6 @@ import serverOrderRouter from './routes/serverOrderRoutes.js';
 import siteDomainRouter from './routes/siteDomainRoutes.js';
 import analyticsRouter from './routes/analyticsRoutes.js';
 import hotstarProxy from './routes/hotstarProxy.js';
-import hsDirect from './routes/hsDirect.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
 import crypto from "crypto";
@@ -185,7 +184,6 @@ const corsOptions = {
 /* Ahead of the CORS layer: a player fetches every segment from whatever page
    embeds it, and this route answers any origin itself. */
 app.use('/api/hs-proxy', hotstarProxy);
-app.use('/api/hs-direct', hsDirect);   // Hotstar live CDN, served from this box itself
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
