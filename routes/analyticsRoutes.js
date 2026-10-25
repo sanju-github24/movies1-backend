@@ -2,7 +2,8 @@
 // Site analytics — our own visitor tracking, read on Admin → Analytics
 //
 //   POST /collect          a page view, a heartbeat or a leave, from the site   public
-//        { t: "view"|"ping"|"leave", sid, vid, nv, path, title, ref, sw, sh,
+//                          ("forget": the admin's browser — its visits are deleted)
+//        { t: "view"|"ping"|"leave"|"forget", sid, vid, nv, path, title, ref, sw, sh,
 //          lang, tz, utm: { source, medium, campaign }, u, d }
 //   GET  /summary?days=30  the dashboard: online now, today against yesterday,
 //                          visitors per day, and where / on what they came    admin
@@ -56,6 +57,7 @@ const Visit = mongoose.models.analyticsSession || mongoose.model('analyticsSessi
 const IST_MS = 330 * 60e3;
 const ONLINE_MS = 90e3;
 const ID = /^[A-Za-z0-9_-]{8,64}$/;
+const ADMIN_EMAILS = String(process.env.ADMIN_EMAILS || 'sanjusanjay0444@gmail.com').split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
 const BOT = /bot|crawl|spider|slurp|headless|lighthouse|prerender|preview|facebookexternalhit|whatsapp|telegram|discord|curl|wget|python|axios|node-fetch|go-http/i;
 const regionName = new Intl.DisplayNames(['en'], { type: 'region' });
 const countryName = (cc) => { try { return cc ? regionName.of(cc) : ''; } catch { return cc || ''; } };
@@ -119,6 +121,10 @@ async function record(req) {
         const ua = String(req.headers['user-agent'] || '');
         const ip = clientIp(req);
         if (!ID.test(b.sid || '') || !ID.test(b.vid || '') || BOT.test(ua) || tooMany(ip)) return;
+        /* The admin is not a visitor. Their browser asks to be forgotten once
+           (every visit it sent goes), and a signed-in admin is never stored. */
+        if (b.t === 'forget') { await Visit.deleteMany({ vid: b.vid }); return; }
+        if (b.u && ADMIN_EMAILS.includes(String(b.u).toLowerCase())) { await Visit.deleteMany({ $or: [{ sid: b.sid }, { vid: b.vid }] }); return; }
         const now = new Date();
         const path = clip(b.path, 300) || '/';
         const title = clip(b.title, 200);
