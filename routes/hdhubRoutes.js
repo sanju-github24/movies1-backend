@@ -157,25 +157,35 @@ const QUALITY = /\b(480|540|720|1080|2160)p\b|\b4k\b/i;
 async function postFiles(url) {
     const $ = cheerio.load(await get(url));
     const found = [];
+    /* A series post lists each episode under its own heading — "EPiSODE 1",
+       then "720p – Drive | Instant | WATCH", "1080p – Drive | Instant" — so
+       a quality line after one is that episode's file. Its WATCH link is the
+       site's player, not a file, and is left out (the Drive link comes first). */
+    let episode = 0;
     $('h2, h3, h4, h5').each((_, h) => {
         const label = clean($(h).text());
-        if (!QUALITY.test(label) || /watch|player|trailer/i.test(label)) return;
-        const href = $(h).find('a[href]').first().attr('href');
+        const ep = label.match(/^\W*episode\s*0*(\d{1,4})\W*$/i);
+        if (ep) { episode = Number(ep[1]); return; }
+        if (/^h2$/i.test(h.tagName) && !QUALITY.test(label)) episode = 0;
+        if (!QUALITY.test(label) || /player|trailer/i.test(label)) return;
+        if (/watch/i.test(label) && !episode) return;
+        const href = $(h).find('a[href]').filter((_, a) => !/watch/i.test($(a).text())).first().attr('href');
         if (!href || !/^https?:/i.test(href)) return;
-        found.push({ label, href });
+        found.push({ label: label.replace(/\|?\s*watch\s*$/i, '').trim(), href, episode });
     });
 
     // A few at a time: each wait page is two requests to resolve.
     const files = [];
     for (let i = 0; i < found.length; i += 4) {
-        const batch = await Promise.all(found.slice(i, i + 4).map(async ({ label, href }) => {
+        const batch = await Promise.all(found.slice(i, i + 4).map(async ({ label, href, episode }) => {
             const link = await direct(href);
             const q = (label.match(/\b(480|540|720|1080|2160)p\b/i) || [])[0] || (/\b4k\b/i.test(label) ? '2160p' : '');
             return {
                 label,
                 quality: q,
                 size: (label.match(/([\d.]+\s*[GM]B)/i) || [])[1] || '',
-                series: /episode|season|\bS\d{2}\b|\bE\d{2}\b/i.test(label),
+                series: !!episode || /episode|season|\bS\d{2}\b|\bE\d{2}\b/i.test(label),
+                episode,
                 kind: kindOf(link),
                 links: [{ name: kindOf(link), url: link }],
             };
@@ -186,7 +196,7 @@ async function postFiles(url) {
 }
 
 export async function hdhubFiles(q, year = '', imdb = '') {
-    return remember(`f:${imdb}|${q.toLowerCase()}|${year}`, 6 * 3600e3, async () => {
+    return remember(`f2:${imdb}|${q.toLowerCase()}|${year}`, 6 * 3600e3, async () => {
         // By IMDb id, else by each name the title goes by ("Fakes (Farzi)").
         let doc = await findPost(q, year, imdb);
         for (const name of titleNames(q)) {

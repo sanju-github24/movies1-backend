@@ -19,7 +19,7 @@ export const SITES = {
         test: '/', looks: /1TamilMV|ipsTopic|ipsDataItem/i },
     hdhub: { name: 'HDHub4u', env: 'HDHUB_BASE', fallback: 'https://new8.hdhub4u.cl',
         test: '/', looks: /hdhub4u/i },
-    i4m: { name: 'India4Movies', env: 'I4M_BASE', fallback: 'https://go6.india4movies.net',
+    i4m: { name: 'India4Movies', env: 'I4M_BASE', fallback: 'https://go.india4movies.click',
         test: '/wp-json/wp/v2/posts?per_page=1&_fields=id,link', looks: /^\s*\[\s*\{\s*"id"/ },
 };
 

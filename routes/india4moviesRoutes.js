@@ -3,7 +3,7 @@
 //
 //   GET /files?q=&year=&type=movie|tv|any   the title's posts, one per language:
 //        { posts: [{ title, url, lang, print, season, watch, watchEpisodes,
-//                    files: [{ label, quality, size, info, url, code, playable, episodes }] }] }
+//                    files: [{ label, quality, size, info, url, code, playable, episodes, zip }] }] }
 //        A series (type=tv) has its episodes: watchEpisodes and each file's
 //        episodes are [{ ep, code }], every code one episode's file.
 //   GET /servers?code=    one file's download servers, asked for when it is opened
@@ -201,31 +201,40 @@ async function postFiles(url) {
     return { watch, files };
 }
 
-/* A series' list page: its episodes, each with its own code. The Batch/Zip
-   is left out — it is the whole season, not something to play. */
+/* A series' list page: its episodes, each with its own code, and the
+   Batch/Zip — the whole season in one file, offered as a download beside
+   the episodes (never played). */
 async function episodeList(code) {
     const $ = cheerio.load(await getMcl(`${MCL}/view/${code}`));
     const eps = [];
+    let zip = null;
     $('a.premium-btn[href]').each((_, a) => {
-        const ep = Number((clean($(a).text()).match(/\bEpisode\s*(\d{1,4})\b/i) || [])[1]);
+        const text = clean($(a).text());
         const c = codeOf($(a).attr('href') || '');
-        if (ep && c && !eps.some((x) => x.ep === ep)) eps.push({ ep, code: c });
+        if (!c) return;
+        if (/batch|zip|pack/i.test(text)) {
+            if (!zip) zip = { code: c, label: text, size: (text.match(/([\d.]+\s*[GM]B)/i) || [])[1] || '' };
+            return;
+        }
+        const ep = Number((text.match(/\bEpisode\s*(\d{1,4})\b/i) || [])[1]);
+        if (ep && !eps.some((x) => x.ep === ep)) eps.push({ ep, code: c });
     });
-    return eps;
+    return { eps, zip };
 }
 
 async function seriesEpisodes(post) {
-    const lists = await Promise.all([post.watch, ...post.files.map((f) => f.code)].map((c) => (c ? episodeList(c).catch(() => []) : [])));
+    const none = { eps: [], zip: null };
+    const lists = await Promise.all([post.watch, ...post.files.map((f) => f.code)].map((c) => (c ? episodeList(c).catch(() => none) : none)));
     return {
         ...post,
-        watchEpisodes: lists[0],
-        files: post.files.map((f, i) => ({ ...f, episodes: lists[i + 1] })),
+        watchEpisodes: lists[0].eps,
+        files: post.files.map((f, i) => ({ ...f, episodes: lists[i + 1].eps, zip: lists[i + 1].zip })),
     };
 }
 
 export async function india4moviesFiles(q, year = '', tv = false) {
     // tv: true a series, false a film, 'any' either (a search box that cannot tell).
-    return remember(`f:${tv === 'any' ? 'any' : tv ? 'tv' : 'movie'}|${q.toLowerCase()}|${year}`, 3 * 3600e3, async () => {
+    return remember(`f2:${tv === 'any' ? 'any' : tv ? 'tv' : 'movie'}|${q.toLowerCase()}|${year}`, 3 * 3600e3, async () => {
         const posts = await findPosts(q, year, tv);
         const read = await Promise.all(posts.map(async (p) => {
             try {
