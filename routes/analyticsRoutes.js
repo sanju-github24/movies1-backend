@@ -9,6 +9,14 @@
 //                          visitors per day, and where / on what they came    admin
 //   GET  /live             everyone on the site right now, with details       admin
 //   GET  /sessions?limit=&before=&country=&device=&q=   recent visits          admin
+//   GET  /watch?days=30    watch time in AnchorHD: totals, per day, most-watched  admin
+//   GET  /watch/title?slug=&days=30   one title: its episodes, who watched     admin
+//
+// Watch time ("watch" beacons from AnchorHD's player): the seconds a title
+// actually played — paused and skipped-over time is not counted — and how far
+// in the viewer got, one record per visit per title (per episode for a
+// series). "Viewers" of a title are distinct visitors, so a rewatch or a
+// second tab is one viewer.
 //
 // One document per visit (a "session": one browser tab's stay, sid), keyed by
 // the visitor (vid, kept in the browser, so a returning visitor is counted
@@ -53,6 +61,17 @@ const sessionSchema = new mongoose.Schema({
 }, { versionKey: false });
 sessionSchema.index({ startedAt: 1 }, { expireAfterSeconds: 90 * 86400, name: 'ttl90' });
 const Visit = mongoose.models.analyticsSession || mongoose.model('analyticsSession', sessionSchema);
+
+const watchSchema = new mongoose.Schema({
+    sid: String, vid: { type: String, index: true }, key: String,
+    slug: { type: String, index: true }, title: String, contentType: String,
+    season: Number, episode: Number, epTitle: String, tmdbId: String, poster: String, source: String,
+    startedAt: Date, lastAt: { type: Date, index: true },
+    seconds: { type: Number, default: 0 }, maxPos: { type: Number, default: 0 }, duration: Number,
+}, { versionKey: false });
+watchSchema.index({ sid: 1, key: 1 }, { unique: true });
+watchSchema.index({ startedAt: 1 }, { expireAfterSeconds: 90 * 86400, name: 'ttl90' });
+const Watch = mongoose.models.analyticsWatch || mongoose.model('analyticsWatch', watchSchema);
 
 const IST_MS = 330 * 60e3;
 const ONLINE_MS = 90e3;
@@ -123,8 +142,11 @@ async function record(req) {
         if (!ID.test(b.sid || '') || !ID.test(b.vid || '') || BOT.test(ua) || tooMany(ip)) return;
         /* The admin is not a visitor. Their browser asks to be forgotten once
            (every visit it sent goes), and a signed-in admin is never stored. */
-        if (b.t === 'forget') { await Visit.deleteMany({ vid: b.vid }); return; }
-        if (b.u && ADMIN_EMAILS.includes(String(b.u).toLowerCase())) { await Visit.deleteMany({ $or: [{ sid: b.sid }, { vid: b.vid }] }); return; }
+        if (b.t === 'forget') { await Promise.all([Visit.deleteMany({ vid: b.vid }), Watch.deleteMany({ vid: b.vid })]); return; }
+        if (b.u && ADMIN_EMAILS.includes(String(b.u).toLowerCase())) {
+            await Promise.all([Visit.deleteMany({ $or: [{ sid: b.sid }, { vid: b.vid }] }), Watch.deleteMany({ vid: b.vid })]);
+            return;
+        }
         const now = new Date();
         const path = clip(b.path, 300) || '/';
         const title = clip(b.title, 200);
@@ -147,6 +169,30 @@ async function record(req) {
                 $inc: { pageCount: 1, activeSec: active },
                 $push: { pages: { $each: [{ p: path, t: title, at: now }], $slice: -60 } },
             }, { upsert: true });
+        } else if (b.t === 'watch') {
+            /* Seconds played since the last beacon (sent every 30 s), so a
+               value past a few minutes is not one. */
+            const sec = Math.max(0, Math.min(Number(b.sec) || 0, 300));
+            const slug = clip(b.slug, 200);
+            if (!slug || !sec) return;
+            const season = Number(b.season) > 0 ? Math.floor(Number(b.season)) : null;
+            const episode = Number(b.episode) > 0 ? Math.floor(Number(b.episode)) : null;
+            const key = `${slug}|${season || ''}|${episode || ''}`;
+            const pos = Math.max(0, Number(b.pos) || 0);
+            const dur = Number(b.dur) > 0 && Number(b.dur) < 86400 ? Number(b.dur) : null;
+            await Promise.all([
+                Watch.updateOne({ sid: b.sid, key }, {
+                    $setOnInsert: { sid: b.sid, vid: b.vid, key, slug, season, episode, startedAt: now },
+                    $set: {
+                        lastAt: now, title: clip(b.title, 200), contentType: b.type === 'tv' ? 'tv' : 'movie',
+                        epTitle: clip(b.epTitle, 200), tmdbId: clip(b.tmdbId, 20), poster: clip(b.poster, 400), source: clip(b.source, 80),
+                        ...(dur ? { duration: dur } : {}),
+                    },
+                    $inc: { seconds: sec },
+                    $max: { maxPos: pos },
+                }, { upsert: true }),
+                Visit.updateOne({ sid: b.sid }, { $set: { lastSeen: now, endedAt: null } }),
+            ]);
         } else if (b.t === 'ping' || b.t === 'leave') {
             await Visit.updateOne({ sid: b.sid }, {
                 $set: { lastSeen: now, ...(b.t === 'leave' ? { endedAt: now } : { endedAt: null }), ...(b.path ? { currentPath: path, currentTitle: title } : {}) },
@@ -263,7 +309,12 @@ router.get('/live', async (_req, res) => {
             ]),
         ]);
         const perMinute = Array.from({ length: 30 }, (_, i) => recent.find((r) => r._id === 29 - i)?.views || 0);
-        res.json({ success: true, generatedAt: new Date(now), online: visits.length, visits: visits.map((v) => ({ ...v, pages: v.pages.slice(-15) })), perMinute });
+        // What each of them is playing in AnchorHD right now (heard from in the last 90 s).
+        const playing = await Watch.find({ sid: { $in: visits.map((v) => v.sid) }, lastAt: { $gte: new Date(now - ONLINE_MS) } })
+            .select('-_id sid slug title season episode epTitle seconds maxPos duration lastAt').lean();
+        const bySid = new Map(playing.map((w) => [w.sid, w]));
+        res.json({ success: true, generatedAt: new Date(now), online: visits.length, watching: playing.length,
+            visits: visits.map((v) => ({ ...v, pages: v.pages.slice(-15), playing: bySid.get(v.sid) || null })), perMinute });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
     }
@@ -281,7 +332,89 @@ router.get('/sessions', async (req, res) => {
             q.$or = [{ city: rx }, { country: rx }, { ip: rx }, { 'pages.p': rx }, { 'pages.t': rx }, { refDomain: rx }, { user: rx }, { model: rx }];
         }
         const visits = await Visit.find(q).sort({ startedAt: -1 }).limit(limit).select(PUBLIC_FIELDS).lean();
-        res.json({ success: true, visits, next: visits.length === limit ? visits[visits.length - 1].startedAt : null });
+        const watched = await Watch.find({ sid: { $in: visits.map((v) => v.sid) } }).sort({ startedAt: 1 })
+            .select('-_id sid slug title season episode epTitle seconds maxPos duration startedAt').lean();
+        const bySid = new Map();
+        for (const w of watched) (bySid.get(w.sid) || bySid.set(w.sid, []).get(w.sid)).push(w);
+        res.json({ success: true, visits: visits.map((v) => ({ ...v, watched: bySid.get(v.sid) || [] })), next: visits.length === limit ? visits[visits.length - 1].startedAt : null });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+/* A play "finished" when it reached the last 10 % (credits included). */
+const finishedExpr = { $cond: [{ $and: [{ $gt: ['$duration', 0] }, { $gte: [{ $divide: ['$maxPos', '$duration'] }, 0.9] }] }, 1, 0] };
+
+router.get('/watch', async (req, res) => {
+    try {
+        const days = Math.max(1, Math.min(Number(req.query.days) || 30, 90));
+        const now = Date.now();
+        const today = istDayStart(now);
+        const from = new Date(today.getTime() - (days - 1) * 86400e3);
+        const tz = '+05:30';
+        const [[f], watchingNow] = await Promise.all([
+            Watch.aggregate([
+                { $match: { startedAt: { $gte: from } } },
+                { $facet: {
+                    totals: [{ $group: { _id: null, seconds: { $sum: '$seconds' }, viewers: { $addToSet: '$vid' }, plays: { $sum: 1 }, titles: { $addToSet: '$slug' } } },
+                        { $project: { _id: 0, seconds: 1, plays: 1, viewers: { $size: '$viewers' }, titles: { $size: '$titles' } } }],
+                    today: [{ $match: { startedAt: { $gte: today } } },
+                        { $group: { _id: null, seconds: { $sum: '$seconds' }, viewers: { $addToSet: '$vid' }, plays: { $sum: 1 } } },
+                        { $project: { _id: 0, seconds: 1, plays: 1, viewers: { $size: '$viewers' } } }],
+                    daily: [{ $group: { _id: { $dateToString: { format: '%Y-%m-%d', date: '$startedAt', timezone: tz } }, seconds: { $sum: '$seconds' }, viewers: { $addToSet: '$vid' } } },
+                        { $project: { _id: 0, day: '$_id', seconds: 1, viewers: { $size: '$viewers' } } }, { $sort: { day: 1 } }],
+                    titles: [
+                        { $sort: { lastAt: 1 } },
+                        { $group: { _id: '$slug', title: { $last: '$title' }, poster: { $last: '$poster' }, contentType: { $last: '$contentType' },
+                            viewers: { $addToSet: '$vid' }, plays: { $sum: 1 }, seconds: { $sum: '$seconds' }, finished: { $sum: finishedExpr },
+                            episodes: { $addToSet: '$key' }, lastAt: { $max: '$lastAt' } } },
+                        { $project: { _id: 0, slug: '$_id', title: 1, poster: 1, contentType: 1, plays: 1, seconds: 1, lastAt: 1,
+                            viewers: { $size: '$viewers' }, episodes: { $size: '$episodes' },
+                            completion: { $round: [{ $multiply: [{ $divide: ['$finished', '$plays'] }, 100] }, 0] } } },
+                        { $addFields: { avgPerViewer: { $round: [{ $divide: ['$seconds', { $max: ['$viewers', 1] }] }, 0] } } },
+                        { $sort: { viewers: -1, seconds: -1 } }, { $limit: 60 },
+                    ],
+                } },
+            ]),
+            Watch.countDocuments({ lastAt: { $gte: new Date(now - ONLINE_MS) } }),
+        ]);
+        const byDay = new Map(f.daily.map((d) => [d.day, d]));
+        const daily = Array.from({ length: days }, (_, i) => {
+            const day = new Date(from.getTime() + i * 86400e3 + IST_MS).toISOString().slice(0, 10);
+            return byDay.get(day) || { day, seconds: 0, viewers: 0 };
+        });
+        res.json({ success: true, days, watchingNow,
+            totals: f.totals[0] || { seconds: 0, plays: 0, viewers: 0, titles: 0 },
+            today: f.today[0] || { seconds: 0, plays: 0, viewers: 0 }, daily, titles: f.titles });
+    } catch (e) {
+        res.status(500).json({ success: false, message: e.message });
+    }
+});
+
+router.get('/watch/title', async (req, res) => {
+    try {
+        const slug = clip(req.query.slug, 200);
+        if (!slug) return res.status(400).json({ success: false, message: 'slug is required' });
+        const days = Math.max(1, Math.min(Number(req.query.days) || 30, 90));
+        const from = new Date(istDayStart().getTime() - (days - 1) * 86400e3);
+        const match = { slug, startedAt: { $gte: from } };
+        const [episodes, recent] = await Promise.all([
+            Watch.aggregate([
+                { $match: match },
+                { $group: { _id: { s: '$season', e: '$episode' }, epTitle: { $last: '$epTitle' }, viewers: { $addToSet: '$vid' }, plays: { $sum: 1 }, seconds: { $sum: '$seconds' }, finished: { $sum: finishedExpr } } },
+                { $project: { _id: 0, season: '$_id.s', episode: '$_id.e', epTitle: 1, plays: 1, seconds: 1, viewers: { $size: '$viewers' },
+                    completion: { $round: [{ $multiply: [{ $divide: ['$finished', '$plays'] }, 100] }, 0] } } },
+                { $sort: { season: 1, episode: 1 } },
+            ]),
+            // Who watched, newest first, with where and on what (from their visit).
+            Watch.aggregate([
+                { $match: match }, { $sort: { lastAt: -1 } }, { $limit: 60 },
+                { $lookup: { from: Visit.collection.name, localField: 'sid', foreignField: 'sid', as: 'v',
+                    pipeline: [{ $project: { _id: 0, city: 1, region: 1, country: 1, countryCode: 1, deviceType: 1, vendor: 1, model: 1, browser: 1, os: 1, user: 1, refDomain: 1, utmSource: 1 } }] } },
+                { $project: { _id: 0, vid: 1, season: 1, episode: 1, epTitle: 1, seconds: 1, maxPos: 1, duration: 1, source: 1, startedAt: 1, lastAt: 1, visit: { $first: '$v' } } },
+            ]),
+        ]);
+        res.json({ success: true, slug, episodes, recent });
     } catch (e) {
         res.status(500).json({ success: false, message: e.message });
     }
