@@ -737,6 +737,54 @@ router.get('/tmdb-search', async (req, res) => {
   }
 });
 
+// ── /tmdb-slug ────────────────────────────────────────────────────────────────
+// GET /api/tmdb-slug?slug=prince | prince-2022 | the-family-man
+//   The title a /watch/<slug> address means, for one we hold nothing for —
+//   typed, shared or bookmarked. TMDB's search ranks by popularity, not by
+//   how exact the name is (the Tamil "Prince" is on page 4), so five raw
+//   pages of films and of series are read and only a title whose own slug is
+//   this one is taken; failing that, one holding every word of it in order
+//   ("kantara-chapter-1" → "Kantara - A Legend: Chapter 1"). Of several, the
+//   slug's year decides; else an Indian-language title, then one people have
+//   voted on, then the newest. { success, result } — result null if none.
+
+const INDIAN = new Set(['ta','te','hi','ml','kn','bn','mr','pa','gu','or','ur']);
+const slugCache = new Map();
+const slugify = (t) => String(t||'').toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'')
+  .replace(/&/g,' and ').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'');
+
+router.get('/tmdb-slug', async (req, res) => {
+  const want = slugify(String(req.query.slug||'').replace(/-{2,}/g,'-'));
+  if (!want) return res.status(400).json({ success:false, message:'Must provide slug.' });
+  const hit = slugCache.get(want);
+  if (hit && Date.now() - hit.at < 24*3600e3) return res.json({ success:true, result: hit.result });
+  try {
+    const ym = want.match(/^(.+?)-((?:19|20)\d{2})$/);
+    const base = ym ? ym[1] : want, year = ym ? ym[2] : '';
+    const query = base.replace(/-+/g,' ');
+    const page = (type, p) => axios.get(`${BASE_URL}search/${type}`, { params:{ api_key:TMDB_API_KEY, query, page:p, include_adult:false }, timeout:10000 })
+      .then((r) => (r.data.results||[]).map((it) => _normalise_list_item(it, type))).catch(() => []);
+    const all = (await Promise.all(['movie','tv'].flatMap((t) => [1,2,3,4,5].map((p) => page(t,p))))).flat();
+    let pool = all.filter((h) => { const sl = slugify(h.title); return sl === base || sl === want; });
+    if (!pool.length) {
+      const words = base.split('-');
+      const inOrder = (sl) => { let i = 0; for (const w of sl.split('-')) if (w === words[i]) i++; return i === words.length; };
+      pool = all.filter((h) => { const sl = slugify(h.title); return inOrder(sl) && sl.split('-').length <= words.length + 3; });
+    }
+    if (year) { const y = pool.filter((h) => String(h.year) === year); if (y.length) pool = y; }
+    const seen = (h) => (h.vote_count >= 5 ? 1 : 0);
+    pool.sort((a, b) => (INDIAN.has(b.original_language) - INDIAN.has(a.original_language))
+      || seen(b) - seen(a) || (Number(b.year)||0) - (Number(a.year)||0) || b.vote_count - a.vote_count);
+    let result = pool[0] || null;
+    if (result) result = (await _enrich_batch([result], 1))[0] || result;
+    slugCache.set(want, { at: Date.now(), result });
+    if (slugCache.size > 2000) slugCache.delete(slugCache.keys().next().value);
+    res.json({ success:true, result });
+  } catch (e) {
+    res.status(500).json({ success:false, message:'Failed to find that title.', details:e.message });
+  }
+});
+
 // ── /tmdb-trending-language ───────────────────────────────────────────────────
 // GET /api/tmdb-trending-language?lang=ta&type=movie&limit=5
 //   Top trending titles for one original language: recent releases (last 12
