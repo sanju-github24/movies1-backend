@@ -28,13 +28,17 @@
 import express from 'express';
 import crypto from 'crypto';
 import { TMDB_API_KEY } from './tmdbRoutes.js';
+import { domainOf } from '../utils/siteDomains.js';
 
 const router = express.Router();
 
-const BASE = 'https://movibox.net';
-const API = `${BASE}/wefeed-h5api-bff`;
+/* MoviBox's web domain moves when it is blocked; the admin can change it on
+   Admin → Source domains (site "movibox"), and it is read here each call. */
+const BASE = () => domainOf('movibox');
+const API = () => `${BASE()}/wefeed-h5api-bff`;
+const HOST = () => { try { return new URL(BASE()).host; } catch { return 'movibox.net'; } };
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36';
-const REFERER = `${BASE}/`;
+const REFERER = () => `${BASE()}/`;
 
 const clientToken = () => {
   const t = Math.floor(Date.now() / 1000);
@@ -42,14 +46,14 @@ const clientToken = () => {
 };
 
 let guest = { token: '', at: 0 };
-async function mb(path, { method = 'GET', body, referer = REFERER } = {}) {
+async function mb(path, { method = 'GET', body, referer = REFERER() } = {}) {
   const headers = {
     Accept: 'application/json', 'content-type': 'application/json',
     'X-Client-Info': JSON.stringify({ timezone: 'Asia/Kolkata' }), 'X-Request-Lang': 'en',
-    'User-Agent': UA, Origin: BASE, Referer: referer,
+    'User-Agent': UA, Origin: BASE(), Referer: referer,
     ...(guest.token && Date.now() - guest.at < 6 * 3600e3 ? { Authorization: `Bearer ${guest.token}` } : { 'X-Client-Token': clientToken() }),
   };
-  const res = await fetch(API + path, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(15000) });
+  const res = await fetch(API() + path, { method, headers, body: body ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(15000) });
   const user = res.headers.get('x-user');
   if (user) { try { const t = JSON.parse(user).token; if (t) guest = { token: t, at: Date.now() }; } catch { /* keep the old one */ } }
   const json = await res.json().catch(() => null);
@@ -59,14 +63,14 @@ async function mb(path, { method = 'GET', body, referer = REFERER } = {}) {
   if (json && json.code !== 0 && /token/i.test(String(json.message || '')) && guest.token && !mb.retrying) {
     guest = { token: '', at: 0 };
     mb.retrying = true;
-    try { await mb('/home?host=movibox.net').catch(() => {}); return await mb(path, { method, body, referer }); }
+    try { await mb(`/home?host=${HOST()}`).catch(() => {}); return await mb(path, { method, body, referer }); }
     finally { mb.retrying = false; }
   }
   if (!json || json.code !== 0) throw new Error(`MoviBox ${path.split('?')[0]}: ${json?.message || res.status}`);
   return json.data;
 }
 // A guest token first: search refuses without one.
-const ensureGuest = async () => { if (!guest.token) await mb('/home?host=movibox.net').catch(() => {}); };
+const ensureGuest = async () => { if (!guest.token) await mb(`/home?host=${HOST()}`).catch(() => {}); };
 
 const norm = (s) => String(s || '').toLowerCase().replace(/\[[^\]]*\]/g, ' ').replace(/&/g, ' and ')
   .normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
@@ -119,10 +123,10 @@ async function findSubject(titles, year, type, lastYear = 0) {
 }
 
 async function streamsFor(dub, se, ep) {
-  const watchPage = `${BASE}/movies/${dub.detailPath}?id=${dub.subjectId}&type=/movie/detail&detailSe=${se || ''}&detailEp=${ep || ''}&lang=en`;
+  const watchPage = `${BASE()}/movies/${dub.detailPath}?id=${dub.subjectId}&type=/movie/detail&detailSe=${se || ''}&detailEp=${ep || ''}&lang=en`;
   const d = await mb(`/subject/play?subjectId=${dub.subjectId}&se=${se || 0}&ep=${ep || 0}&detailPath=${dub.detailPath}&streamSignType=1`, { referer: watchPage });
   const dash = (d.dash || [])[0];
-  const signed = (x) => ({ Referer: REFERER, ...(x?.signHeaderKey && x?.signCookie ? { [x.signHeaderKey]: x.signCookie } : {}) });
+  const signed = (x) => ({ Referer: REFERER(), ...(x?.signHeaderKey && x?.signCookie ? { [x.signHeaderKey]: x.signCookie } : {}) });
   return {
     available: !!d.hasResource,
     mpd: dash ? { url: dash.url, resolutions: dash.resolutions, codec: dash.codecName, size: Number(dash.size) || null, headers: signed(dash) } : null,

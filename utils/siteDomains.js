@@ -21,6 +21,8 @@ export const SITES = {
         test: '/', looks: /hdhub4u/i },
     i4m: { name: 'India4Movies', env: 'I4M_BASE', fallback: 'https://go.india4movies.click',
         test: '/wp-json/wp/v2/posts?per_page=1&_fields=id,link', looks: /^\s*\[\s*\{\s*"id"/ },
+    movibox: { name: 'MoviBox', env: 'MOVIBOX_BASE', fallback: 'https://movibox.net',
+        test: '/', looks: /movibox|moviebox|aoneroom/i },
 };
 
 const schema = new mongoose.Schema({
