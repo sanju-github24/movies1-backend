@@ -46,6 +46,12 @@ const CLEAN_PRINT = /WEB|BluRay|BDRip|HDRip|HDTV|DVDRip/;
 
 const norm = (s) => String(s || '').toLowerCase().replace(/&/g, ' and ').normalize('NFKD')
   .replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, ' ').trim();
+/* TMDB names a per-language reality show "Celebrity Master Chef - Tamil";
+   1TamilMV's post is just "Celebrity Master Chef", so the trailing language
+   suffix must come off the title before it is searched and matched, or the
+   post is never found. */
+const LANG_SUFFIX = /\s*[-–:]\s*(tamil|telugu|hindi|malayalam|kannada|english|bengali|marathi|punjabi|gujarati|odia|urdu)\s*$/i;
+const stripLangSuffix = (s) => String(s || '').replace(LANG_SUFFIX, '').trim();
 const slugify = (s) => norm(s).replace(/ /g, '-');
 
 /* ── 1. The front page's posts ──────────────────────────────────────────
@@ -417,6 +423,7 @@ async function topicFiles(href) {
    "Kantara" also finds its music album and a fifty-film pack. */
 const searchCache = new Map();  // "type|title|year" → { at, topics }
 async function searchTopics(title, year, series) {
+  title = stripLangSuffix(title);   // "Celebrity Master Chef - Tamil" → "Celebrity Master Chef"
   const key = `${series ? 'tv' : 'movie'}|${norm(title)}|${year || ''}`;
   const hit = searchCache.get(key);
   if (hit && Date.now() - hit.at < 60 * 60e3) return hit.topics;
