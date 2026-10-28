@@ -36,7 +36,7 @@ import radioRouter from './routes/radioRoutes.js';
 import trendingRouter from './routes/trendingRoutes.js';
 import bollyflixRouter from './routes/bollyflixRoutes.js';
 import hdhubRouter from './routes/hdhubRoutes.js';
-import freshRouter from './routes/freshRoutes.js';
+import freshRouter, { freshItems } from './routes/freshRoutes.js';
 import moviboxRouter from './routes/moviboxRoutes.js';
 import india4moviesRouter from './routes/india4moviesRoutes.js';
 import skipRouter from './routes/skipRoutes.js';
@@ -46,8 +46,10 @@ import bingrRouter from './routes/bingrRoutes.js';
 import mbHlsRouter from './routes/mbHlsRoutes.js';
 import serverOrderRouter from './routes/serverOrderRoutes.js';
 import siteDomainRouter from './routes/siteDomainRoutes.js';
+import tblastersRouter from './routes/tblastersRoutes.js';
 import analyticsRouter from './routes/analyticsRoutes.js';
 import hotstarProxy from './routes/hotstarProxy.js';
+import hsDirect from './routes/hsDirect.js';
 
 import { generateSignedUrl } from "./utils/signUrl.js";
 import crypto from "crypto";
@@ -184,6 +186,7 @@ const corsOptions = {
 /* Ahead of the CORS layer: a player fetches every segment from whatever page
    embeds it, and this route answers any origin itself. */
 app.use('/api/hs-proxy', hotstarProxy);
+app.use('/api/hs-direct', hsDirect);   // Hotstar live CDN, served from this box itself
 
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
@@ -916,7 +919,8 @@ app.use('/api/bingr', bingrRouter);           // bingr's direct servers, for Anc
 app.use('/api/mbhls', mbHlsRouter);           // MoviBox as one multi-audio HLS, segments straight off its CDN
 app.use('/api/server-order', serverOrderRouter); // a title's server order, arranged by the admin
 app.use('/api/site-domains', siteDomainRouter); // 1TamilMV / HDHub4u / India4Movies domains, changed by the admin
-app.use('/api/analytics', analyticsRouter);      // our own visitor tracking, read on Admin → Analytics
+app.use('/api/analytics', analyticsRouter);
+app.use('/api/tblasters', tblastersRouter);     // 1TamilBlasters: direct .mkv downloads + playable source      // our own visitor tracking, read on Admin → Analytics
 
 async function fetchBCCI(url) {
     const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
@@ -4434,6 +4438,27 @@ app.get('/sitemap.xml', async (req, res) => {
     console.error('❌ sitemap watch pages:', e.message);
   }
 
+  /* ── Fresh releases streamed from other sites ──
+     Titles we do not host ourselves but render and play from the providers
+     (1TamilMV, HDHub4u, India4Movies), matched to TMDB. Their /watch/<slug>
+     pages are real, watchable and worth indexing — without this, only our own
+     uploads were in the sitemap and these ranked nowhere. Deduped below
+     against the title pages already listed. */
+  try {
+    for (const f of freshItems()) {
+      if (!f.slug) continue;
+      urls.push({
+        loc: `${SITE_ORIGIN}/watch/${encodeURIComponent(f.slug)}`,
+        lastmod: today,
+        changefreq: 'weekly',
+        priority: '0.6',
+        image: f.poster || undefined,
+      });
+    }
+  } catch (e) {
+    console.error('❌ sitemap fresh releases:', e.message);
+  }
+
   // ── Matches (IPL + India/international) ──
   // The point of generating this per request: a fixture is listed the moment the
   // feed knows about it, so a live match is discoverable while it's still on.
@@ -4457,6 +4482,19 @@ app.get('/sitemap.xml', async (req, res) => {
      "Duplicate without user-selected canonical". The watch page is the primary
      one (player + full metadata + JSON-LD), so drop the /movie/ twin when a
      /watch/ exists for that slug. */
+  // A /watch/<slug> can now come from both watch_html and fresh releases; keep each once.
+  {
+    // Keep the FIRST of a slug (watch_html, our own upload, listed before the
+    // fresh releases); drop a later fresh duplicate of it.
+    const seenWatch = new Set();
+    for (let i = 0; i < urls.length; i++) {
+      const u = urls[i];
+      if (!u.loc.includes('/watch/')) continue;
+      let slug = u.loc.split('/watch/')[1];
+      try { slug = decodeURIComponent(slug); } catch { /* raw */ }
+      if (seenWatch.has(slug)) { urls.splice(i, 1); i--; } else seenWatch.add(slug);
+    }
+  }
   const watchSlugs = new Set(
     urls.filter((u) => u.loc.includes('/watch/'))
         .map((u) => { try { return decodeURIComponent(u.loc.split('/watch/')[1]); } catch { return u.loc.split('/watch/')[1]; } })
