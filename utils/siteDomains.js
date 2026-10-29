@@ -23,6 +23,8 @@ export const SITES = {
         test: '/wp-json/wp/v2/posts?per_page=1&_fields=id,link', looks: /^\s*\[\s*\{\s*"id"/ },
     movibox: { name: 'MoviBox', env: 'MOVIBOX_BASE', fallback: 'https://movibox.net',
         test: '/', looks: /movibox|moviebox|aoneroom/i },
+    tblasters: { name: '1TamilBlasters', env: 'TBLASTERS_BASE', fallback: 'https://www.1tamilblasters.blog',
+        test: '/wp-json/wp/v2/posts?per_page=1&_fields=id', looks: /^\s*\[\s*\{\s*"id"/ },
 };
 
 const schema = new mongoose.Schema({

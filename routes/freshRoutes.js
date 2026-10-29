@@ -422,7 +422,7 @@ async function topicFiles(href) {
    posts that name exactly this title (and year, for a film) — a search for
    "Kantara" also finds its music album and a fifty-film pack. */
 const searchCache = new Map();  // "type|title|year" → { at, topics }
-async function searchTopics(title, year, series) {
+export async function searchTopics(title, year, series) {
   title = stripLangSuffix(title);   // "Celebrity Master Chef - Tamil" → "Celebrity Master Chef"
   const key = `${series ? 'tv' : 'movie'}|${norm(title)}|${year || ''}`;
   const hit = searchCache.get(key);

@@ -27,27 +27,33 @@ const allowed = (h) => h === "hotstar.com" || h.endsWith(".hotstar.com");
 const PROXY_LIST =
   "https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/by-country/in/http.txt";
 
-/* A check that needs no token. Without one Hotstar answers a home connection
-   403 and a datacenter 475, so anything but 475 says Hotstar will serve this
-   proxy once the request carries a real token. */
+/* How a proxy is checked. With the current token — read from our own
+   worker's Hotstar list — a proxy has to fetch a real playlist, a 200. Without
+   it there is a weaker check: tokenless, Hotstar answers a home connection 403
+   and refuses anything else with a 47x of its own (475 for a datacenter, 473
+   for most of the public list), so a 403 is a pass. */
 const PROBE_URL = "https://jcevents.hotstar.com/bpk-tv/JS_ColorsHD/JioHotstar/JS_ColorsHD.m3u8";
+const TOKEN_FEED = "https://jtv-proxy.sanjusanjay0444.workers.dev/?feed=hotstar";
 const HOTSTAR_HEADERS = {
   "User-Agent": "Virat Kohli",
   Referer: "https://www.hotstar.com/",
   Origin: "https://www.hotstar.com",
   Accept: "*/*",
 };
-const BLOCKED = 475;
+const blocked = (status) => status >= 470 && status < 480;
 
-const KEEP = 4;                     // proxies held ready
-const RECHECK_MS = 60_000;          // how often the ready ones are re-checked
-const BAD_FOR_MS = 20 * 60_000;     // a proxy that failed is left alone this long
+const KEEP = 8;                     // proxies held ready
+const RACE = 3;                     // how many of them each request is sent through
+const RECHECK_MS = 45_000;          // how often the ready ones are re-checked
+const BAD_FOR_MS = 5 * 60_000;      // a proxy that was dropped is left alone this long
+const STRIKES = 2;                  // failures in a row before a slow proxy is dropped
 
 // ── the pool ─────────────────────────────────────────────────
 let list = [], listAt = 0;
 const ready = [];                   // checked and accepted, best first
 const bad = new Map();              // proxy -> when it failed
 const agents = new Map();           // proxy -> ProxyAgent, so connections are reused
+const strikes = new Map();          // proxy -> failures in a row
 
 function agentFor(p) {
   let a = agents.get(p);
@@ -71,6 +77,7 @@ async function proxyList() {
 }
 
 function drop(p) {
+  strikes.delete(p);
   const i = ready.indexOf(p);
   if (i !== -1) ready.splice(i, 1);
   bad.set(p, Date.now());
@@ -80,10 +87,23 @@ function drop(p) {
   if (ready.length < KEEP) topUp();
 }
 
+let token = "", tokenAt = 0;
+async function currentToken() {
+  if (Date.now() - tokenAt < 10 * 60_000) return token;
+  tokenAt = Date.now();
+  try {
+    const body = await (await fetch(`${TOKEN_FEED}&_=${Date.now()}`, { signal: AbortSignal.timeout(10_000) })).json();
+    const exp = Number((/exp=(\d+)/.exec(body.token || "") || [])[1]);
+    token = exp * 1000 > Date.now() ? body.token : "";
+  } catch { /* keep the last one */ }
+  return token;
+}
+
 async function probe(p) {
-  const r = await get(PROBE_URL, HOTSTAR_HEADERS, p, 7000);
+  const tok = await currentToken();
+  const r = await get(PROBE_URL, tok ? { ...HOTSTAR_HEADERS, Cookie: tok } : HOTSTAR_HEADERS, p, 7000);
   r.body?.cancel().catch(() => {});
-  if (r.status === BLOCKED || r.status >= 500) throw new Error(String(r.status));
+  if (tok ? !r.ok : r.status !== 403) throw new Error(String(r.status));
   return p;
 }
 
@@ -107,9 +127,17 @@ function topUp() {
   return topping;
 }
 
+/* A request that fails could be a dead proxy or a slow one — Hotstar's DASH
+   manifests take twenty seconds through some of these — so it takes two in a
+   row to drop one. A 47x is Hotstar refusing it, and drops it at once. */
+function strike(p) {
+  const n = (strikes.get(p) || 0) + 1;
+  if (n >= STRIKES) drop(p); else strikes.set(p, n);
+}
+
 async function recheck() {
   for (const p of [...ready]) {
-    try { await probe(p); } catch { drop(p); }
+    try { await probe(p); strikes.delete(p); } catch { strike(p); }
   }
   if (ready.length < KEEP) topUp();
 }
@@ -118,22 +146,41 @@ async function recheck() {
 topUp();
 setInterval(recheck, RECHECK_MS).unref();
 
-/* The request itself goes through the best ready proxy; one that fails is
-   dropped and the next tried at once, so the player sees a slower fetch
-   rather than an error. With none ready it waits briefly for the background
-   search before giving up. */
-async function fetchThroughPool(url, headers) {
-  for (let attempt = 0; attempt < 4; attempt++) {
-    if (!ready.length) await Promise.race([topUp(), new Promise((r) => setTimeout(r, 12_000))]);
-    const p = ready[0];
-    if (!p) return null;
-    try {
-      const res = await get(url, headers, p, 12_000);
-      if (res.status === BLOCKED) { res.body?.cancel().catch(() => {}); drop(p); continue; }
-      return { res, proxy: p };
-    } catch {
-      drop(p);
-    }
+/* Public proxies die without warning, often between one request and the
+   next, so each request is sent through the first few ready ones at once and
+   the first good answer wins; the rest are cancelled. One dead proxy then
+   costs nothing instead of a timeout. The winner moves to the front, and any
+   that failed outright are dropped. With none ready it waits briefly for the
+   background search before giving up. */
+async function fetchThroughPool(url, headers, ms) {
+  for (let round = 0; round < 3; round++) {
+    if (!ready.length) await Promise.race([topUp(), new Promise((r) => setTimeout(r, 10_000))]);
+    const pick = ready.slice(0, RACE);
+    if (!pick.length) return null;
+
+    const stops = pick.map(() => new AbortController());
+    const tries = pick.map(async (p, i) => {
+      let res;
+      try {
+        res = await fetch(url, {
+          headers, dispatcher: agentFor(p),
+          signal: AbortSignal.any([stops[i].signal, AbortSignal.timeout(ms)]),
+        });
+      } catch (e) {
+        if (!stops[i].signal.aborted) strike(p);   // failed, not merely beaten
+        throw e;
+      }
+      if (blocked(res.status) || res.status >= 500) { res.body?.cancel().catch(() => {}); drop(p); throw new Error(String(res.status)); }
+      return { res, proxy: p, i };
+    });
+
+    const hit = await Promise.any(tries).catch(() => null);
+    if (!hit) continue;
+    stops.forEach((c, i) => { if (i !== hit.i) c.abort(); });
+    const at = ready.indexOf(hit.proxy);
+    strikes.delete(hit.proxy);
+    if (at > 0) { ready.splice(at, 1); ready.unshift(hit.proxy); }
+    return { res: hit.res, proxy: hit.proxy };
   }
   return null;
 }
@@ -175,7 +222,9 @@ router.get("/", async (req, res) => {
     ...(req.headers.range ? { Range: req.headers.range } : {}),
   };
 
-  const hit = await fetchThroughPool(targetUrl.toString(), headers);
+  // Manifests are the slow ones through these proxies; segments are not.
+  const manifest = /\.(mpd|m3u8)$/i.test(targetUrl.pathname);
+  const hit = await fetchThroughPool(targetUrl.toString(), headers, manifest ? 25_000 : 15_000);
   /* No proxy Hotstar accepts right now. Said plainly, so the player moves to
      the Vercel proxy instead of reading this box's own 475 as the stream. */
   if (!hit) return res.status(503).send("No Indian proxy available right now");
