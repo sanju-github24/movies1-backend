@@ -34,6 +34,7 @@ import autofillRouter from './routes/autofill.js';
 import saavnRouter, { searchSongs } from './routes/saavnRoutes.js';
 import radioRouter from './routes/radioRoutes.js';
 import trendingRouter from './routes/trendingRoutes.js';
+import { events as cricfyEvents } from './controllers/cricfyController.js';
 import bollyflixRouter from './routes/bollyflixRoutes.js';
 import hdhubRouter from './routes/hdhubRoutes.js';
 import freshRouter, { freshItems } from './routes/freshRoutes.js';
@@ -914,6 +915,7 @@ app.use('/api/fresh', freshRouter);           // what has just come out, matched
 app.use('/api/movibox', moviboxRouter);       // a title's per-language MPD/MP4 links, by TMDB id or name
 app.use('/api/i4m', india4moviesRouter);      // India4Movies: downloads, and AnchorHD's last fallback
 app.use('/api/live-now', liveNowRouter);      // admin-added lives, and the nightly shows' times
+app.get('/api/cricfy/events', cricfyEvents);  // Cricfy live match events for the /sports page
 app.use('/api/subs', subsRouter);             // subtitles searched online (SubDL), as VTT for the player
 app.use('/api/skip', skipRouter);             // intro / recap / credits timings, for Skip Intro and Next Episode
 app.use('/api/bingr', bingrRouter);           // bingr's direct servers, for AnchorHD after Singularity
