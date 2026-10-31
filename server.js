@@ -501,7 +501,9 @@ app.get('/api/hls-proxy', async (req, res) => {
 
   Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
 
-  const isM3u8 = /\.m3u8($|\?)/i.test(targetUrl);
+  // .m3u8 URLs, plus HLS playlists served without that extension (e.g.
+  // "…/load-playlist?…") so their child segments get rewritten through here.
+  const isM3u8 = /\.m3u8($|\?)/i.test(targetUrl) || /load-?playlist|\/playlist(\/|\?|$)/i.test(targetUrl);
   const upHeaders = {
     'User-Agent': HLS_PROXY_UA,
     'Accept': '*/*',
