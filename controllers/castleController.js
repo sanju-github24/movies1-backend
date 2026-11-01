@@ -226,21 +226,43 @@ function pickYear(m) {
   return y ? Number(y[0]) : null;
 }
 
-// Choose the best search hit for a title (+ optional year).
+// Choose the best search hit for a title (+ optional year). Castle's own search
+// already ranks relevant hits, so this just picks the closest — token-based and
+// forgiving, so sequels, subtitles, a trailing year, filler words ("The",
+// "Movie", a language name) or minor spelling differences still match, instead
+// of only an exact string.
+const MATCH_STOP = new Set(['the', 'a', 'an', 'of', 'and', 'part', 'movie', 'film', 'full', 'hd',
+  'hindi', 'tamil', 'telugu', 'kannada', 'malayalam', 'bengali', 'season', 'vol', 'volume']);
+function matchNorm(s) {
+  return String(s || '').toLowerCase()
+    .replace(/\(.*?\)/g, ' ')            // drop "(2024)", "(Hindi)" etc.
+    .replace(/\b(19|20)\d{2}\b/g, ' ')   // drop a bare year
+    .replace(/[^a-z0-9]+/g, ' ').trim();
+}
+const matchToks = (s) => matchNorm(s).split(' ').filter((w) => w && !MATCH_STOP.has(w));
 function bestMatch(hits, title, year) {
   if (!hits.length) return null;
-  const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-  const t = norm(title);
+  const t = matchNorm(title);
+  const q = new Set(matchToks(title));
   let best = null, bestScore = -1;
   for (const h of hits) {
-    let score = 0;
-    const ht = norm(h.title);
-    if (ht === t) score += 100;
-    else if (ht.includes(t) || t.includes(ht)) score += 60;
-    if (year && h.year && Math.abs(h.year - year) <= 1) score += 30;
+    const ht = matchNorm(h.title);
+    const hs = new Set(matchToks(h.title));
+    let score;
+    if (ht === t) score = 100;
+    else {
+      let inter = 0;
+      for (const w of q) if (hs.has(w)) inter++;
+      const dice = (q.size + hs.size) ? (2 * inter) / (q.size + hs.size) : 0;
+      score = Math.round(dice * 70)
+        + (q.size && inter === q.size ? 25 : 0)            // every query word is present
+        + (ht.startsWith(t) || t.startsWith(ht) ? 10 : 0)
+        + (t && (ht.includes(t) || t.includes(ht)) ? 10 : 0);
+    }
+    if (year && h.year && Math.abs(h.year - year) <= 1) score += 15;   // tiebreaker, not a gate
     if (score > bestScore) { bestScore = score; best = h; }
   }
-  return bestScore >= 60 ? best : null;
+  return bestScore >= 40 ? best : null;
 }
 
 // ---- 2. detail -> episodes / languages / resolutions -----------------------
