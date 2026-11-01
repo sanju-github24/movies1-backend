@@ -49,6 +49,7 @@ import bingrRouter from './routes/bingrRoutes.js';
 import mbHlsRouter from './routes/mbHlsRoutes.js';
 import serverOrderRouter from './routes/serverOrderRoutes.js';
 import siteDomainRouter from './routes/siteDomainRoutes.js';
+import anchorServerRouter from './routes/anchorServerRoutes.js';
 import iptvRouter from './routes/iptvRoutes.js';
 import tblastersRouter from './routes/tblastersRoutes.js';
 import analyticsRouter from './routes/analyticsRoutes.js';
@@ -928,6 +929,7 @@ app.use('/api/bingr', bingrRouter);           // bingr's direct servers, for Anc
 app.use('/api/mbhls', mbHlsRouter);           // MoviBox as one multi-audio HLS, segments straight off its CDN
 app.use('/api/server-order', serverOrderRouter); // a title's server order, arranged by the admin
 app.use('/api/site-domains', siteDomainRouter); // 1TamilMV / HDHub4u / India4Movies domains, changed by the admin
+app.use('/api/anchor-servers', anchorServerRouter); // AnchorHD player source order, changed by the admin
 app.use('/api/analytics', analyticsRouter);
 app.use('/api/iptv', iptvRouter);                // open IPTV channels from the darkbyteprojects feed (no DRM)
 app.use('/api/tblasters', tblastersRouter);     // 1TamilBlasters: direct .mkv downloads + playable source      // our own visitor tracking, read on Admin → Analytics
