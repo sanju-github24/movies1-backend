@@ -422,7 +422,14 @@ export const resolve = async (req, res) => {
     // Best free resolution. A premiumProPermission tier (1080p) is VIP-only and
     // stays permissionDenied, so never offer it.
     const free = tgt.res.filter((r) => !r.premium);
-    const topRes = (free[0] || tgt.res[0] || { resolution: 1 }).resolution;
+    const topResObj = free[0] || tgt.res[0] || { resolution: 1 };
+    const topRes = topResObj.resolution;
+    // Quality label, e.g. "720p" — the player reads it from the source name
+    // (Castle's m3u8 is a single media playlist with no RESOLUTION, so without
+    // this the player shows "p0").
+    const quality = (String(topResObj.label || '').match(/(\d{3,4})\s*p/i) || [])[1]
+      ? `${String(topResObj.label).match(/(\d{3,4})\s*p/i)[1]}p`
+      : (topRes >= 3 ? '1080p' : topRes === 2 ? '720p' : '480p');
 
     // One server PER LANGUAGE — getVideo2 returns that language's stream when
     // given its languageId. The player reads the language from each server's
@@ -447,7 +454,7 @@ export const resolve = async (req, res) => {
       const key = contentPath(u);
       if (seen.has(key)) continue;         // same file as a language already added
       seen.add(key);
-      servers.push({ label: l.name || det.firstLanguage || 'HD', lang: l.code || '', url: u, kind: 'hls' });
+      servers.push({ label: l.name || det.firstLanguage || 'HD', lang: l.code || '', quality, url: u, kind: 'hls' });
     }
     // All languages collapsed to one file → it's a single stream; don't label it
     // with just the first language (the manifest's own audio tracks, if any, win).
