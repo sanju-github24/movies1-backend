@@ -259,9 +259,10 @@ const APK_SIGN_KEY = process.env.CASTLE_APK_SIGN_KEY || 'ED0955EB04E67A1D9F3305B
 
 // The real play call is getVideo2 — anonymous (NO sign / NO Authorization), with
 // query params AND a JSON body whose values are ALL strings (it's a
-// HashMap<String,String>). Captured from the running app. `languageId` is
-// omitted by the app for default playback (server uses the title's first lang).
-async function getVideo({ movieId, episodeId, resolution }) {
+// HashMap<String,String>). Captured from the running app. Passing `languageId`
+// (as the app does when a language is picked) returns that language's stream;
+// omitting it gives the title's default/first language.
+async function getVideo({ movieId, episodeId, resolution, languageId }) {
   const body = {
     appMarket: APP_MARKET,
     woolUser: 'false',
@@ -277,6 +278,7 @@ async function getVideo({ movieId, episodeId, resolution }) {
     androidVersion: '11',
     networkType: 'NETWORK_WIFI',
     packageName: PKG,
+    ...(languageId != null ? { languageId: String(languageId) } : {}),
   };
   const resp = await callPool('post', '/film-api/v2.0.7/movie/getVideo2', {
     params: { clientType: 1, packageName: PKG, channel: CHANNEL, lang: 'en-US' },
@@ -395,25 +397,39 @@ export const resolve = async (req, res) => {
     const tgt = playTargets(det, episodeN);
     if (!tgt) return res.json({ ok: false, reason: 'no episode', movieId, title: det.title });
 
-    // Pick language: requested -> default -> first.
-    const wantLang = lang ? Number(lang)
-      : (tgt.langs.find((l) => l.isDefault) || tgt.langs[0] || {}).id;
-    // Top 2 free resolutions as the 2 fallback servers. A premiumProPermission
-    // one (1080p) is VIP-only and stays permissionDenied even after the unlock.
+    // Best free resolution. A premiumProPermission tier (1080p) is VIP-only and
+    // stays permissionDenied, so never offer it.
     const free = tgt.res.filter((r) => !r.premium);
-    const picks = (free.length ? free : tgt.res.length ? tgt.res : [{ resolution: 1, label: 'HD' }]).slice(0, 2);
+    const topRes = (free[0] || tgt.res[0] || { resolution: 1 }).resolution;
 
+    // One server PER LANGUAGE — getVideo2 returns that language's stream when
+    // given its languageId. The player reads the language from each server's
+    // name (default/first language first). A title with no language tracks, or a
+    // single one, just yields one server.
+    const wantLangs = lang ? tgt.langs.filter((l) => String(l.id) === String(lang)) : tgt.langs;
+    const langList = (wantLangs.length ? wantLangs : [{ id: undefined, name: '', code: '' }]).slice(0, 8);
+
+    // getVideo2 signs a fresh URL (rotating host + auth_key) every call, so two
+    // languages that are really the SAME file only match on the path. Dedup by
+    // path: distinct paths = real per-language audio; one path = a single stream
+    // for the whole title (the player reads any embedded audio from the manifest).
+    const contentPath = (u) => { try { return new URL(u).pathname; } catch { return u; } };
     const servers = [];
-    for (const p of picks) {
+    const seen = new Set();
+    for (const l of langList) {
       const vb = await getVideoUnlocked({
-        movieId, episodeId: tgt.episodeId, resolution: p.resolution, languageId: wantLang,
+        movieId, episodeId: tgt.episodeId, resolution: topRes, languageId: l.id,
       });
-      for (const u of urlsFromVideoBean(vb)) {
-        servers.push({ label: `Castle ${p.label || p.resolution}`, url: u, kind: 'hls' });
-        break; // one URL per resolution is enough; the rest are mirrors
-      }
-      if (servers.length >= 2) break;
+      const u = urlsFromVideoBean(vb)[0];
+      if (!u) continue;
+      const key = contentPath(u);
+      if (seen.has(key)) continue;         // same file as a language already added
+      seen.add(key);
+      servers.push({ label: l.name || det.firstLanguage || 'HD', lang: l.code || '', url: u, kind: 'hls' });
     }
+    // All languages collapsed to one file → it's a single stream; don't label it
+    // with just the first language (the manifest's own audio tracks, if any, win).
+    if (servers.length === 1 && langList.length > 1) servers[0].label = det.firstLanguage || 'Castle';
 
     res.set('Cache-Control', 'no-store'); // auth_key/expire URLs are short-lived
     res.json({

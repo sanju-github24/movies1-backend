@@ -134,16 +134,17 @@ const jlog = (l, o) => console.log(`\n=== ${l} ===\n` + JSON.stringify(o, null, 
   const free = vids.filter((v) => !v.premiumProPermission);
   const topRes = (free.length ? free : vids).map((v) => v.resolution).sort((a, b) => b - a)[0] || 1;
   const APK_SIGN_KEY = process.env.CASTLE_APK_SIGN_KEY || 'ED0955EB04E67A1D9F3305B95454FED485261475';
-  const getVideo = () => call('POST', '/film-api/v2.0.7/movie/getVideo2', {
+  const getVideo = (languageId) => call('POST', '/film-api/v2.0.7/movie/getVideo2', {
     params: { clientType: 1, packageName: PKG, channel: CHANNEL, lang: 'en-US' },
     body: {
       appMarket: APP_MARKET, woolUser: 'false', isp: 'Android', useVipCdn: 'false',
       movieId: String(movieId), episodeId: String(ep.id), isNewUser: 'true',
       resolution: String(topRes), mode: '1', clientType: '1', apkSignKey: APK_SIGN_KEY,
       androidVersion: '11', networkType: 'NETWORK_WIFI', packageName: PKG,
+      ...(languageId != null ? { languageId: String(languageId) } : {}),
     },
   });
-  let gv = await getVideo();
+  let gv = await getVideo(langId);
   jlog(`getVideo (resolution ${topRes})`, gv);
   if (gv?.data?.permissionDenied) {
     // The reward-ad unlock the app reports when its ad finishes.
@@ -165,4 +166,22 @@ const jlog = (l, o) => console.log(`\n=== ${l} ===\n` + JSON.stringify(o, null, 
   console.log(head.status === 200 && head.headers.get('access-control-allow-origin') === '*'
     ? '\nBROWSER-DIRECT PLAYABLE — safe to ship.'
     : '\nCheck status/CORS above.');
+
+  // Per-language: resolve each track and show its URL. Distinct URLs = languages
+  // are real selectable streams (what the player's language menu needs).
+  const tracks = ep.tracks || [];
+  if (tracks.length) {
+    console.log('\n=== languages ===');
+    const byPath = new Set();
+    for (const t of tracks) {
+      const g = await getVideo(t.languageId);
+      const u = g?.data?.videoUrl || (g?.data?.videoUrls || [])[0] || null;
+      const path = u ? new URL(u).pathname : (g?.data?.permissionDenied ? 'permissionDenied' : 'no url');
+      console.log(`  ${t.languageName} (${t.languageId}): ${path}`);   // full path = content, ignoring host/auth_key
+      if (u) byPath.add(path);
+    }
+    console.log(byPath.size > 1
+      ? `-> ${byPath.size} distinct streams → languages ARE selectable`
+      : '-> all languages returned the SAME file (one stream for the whole title)');
+  }
 })();
