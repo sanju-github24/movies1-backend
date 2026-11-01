@@ -45,6 +45,49 @@ router.post('/:site/test', async (req, res) => {
     res.json({ success: true, base, ...(await probe(site, base)) });
 });
 
+/* POST /:site/fetch — when a source is down, find a working domain on demand
+   instead of hunting for it by hand. Probes the known candidates best-first
+   (HDHub4u's live domain-of-the-day, the current override, the env/default, the
+   built-in fallback) and, if one answers as the real site, switches to it. */
+router.post('/:site/fetch', async (req, res) => {
+    const { site } = req.params;
+    if (!known(site)) return res.status(404).json({ success: false, message: 'No such site' });
+
+    const current = site === 'hdhub' ? await hdhubBase() : domainOf(site);
+    const cands = [];
+    if (site === 'hdhub') { try { cands.push(await hdhubBase()); } catch { /* lookup down */ } }
+    const o = overrideOf(site);
+    if (o?.base) cands.push(o.base);
+    cands.push(defaultBase(site));
+    if (SITES[site].fallback) cands.push(SITES[site].fallback);
+
+    const seen = new Set();
+    const tried = [];
+    let working = null;
+    for (const raw of cands) {
+        const base = normalizeBase(raw);
+        if (!base || seen.has(base)) continue;
+        seen.add(base);
+        const check = await probe(site, base);
+        tried.push({ base, ...check });
+        if (check.ok && check.looksRight) { working = base; break; }
+    }
+
+    let applied = false;
+    if (working && working !== current) {
+        await setDomain(site, working, `${await emailFrom(req) || 'admin'} (fetch)`);
+        console.log(`🌐 ${SITES[site].name} domain (fetch) → ${working}`);
+        applied = true;
+    }
+    res.json({
+        success: !!working, found: working, applied, tried,
+        message: working
+            ? (applied ? `Switched to ${working}` : `Already on a working domain (${working})`)
+            : 'None of the known domains answered — enter one manually',
+        site: await row(site),
+    });
+});
+
 router.put('/:site', async (req, res) => {
     const { site } = req.params;
     if (!known(site)) return res.status(404).json({ success: false, message: 'No such site' });
