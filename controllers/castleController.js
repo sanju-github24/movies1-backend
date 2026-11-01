@@ -419,46 +419,54 @@ export const resolve = async (req, res) => {
     const tgt = playTargets(det, episodeN);
     if (!tgt) return res.json({ ok: false, reason: 'no episode', movieId, title: det.title });
 
-    // Best free resolution. A premiumProPermission tier (1080p) is VIP-only and
-    // stays permissionDenied, so never offer it.
-    const free = tgt.res.filter((r) => !r.premium);
-    const topResObj = free[0] || tgt.res[0] || { resolution: 1 };
-    const topRes = topResObj.resolution;
-    // Quality label, e.g. "720p" — the player reads it from the source name
-    // (Castle's m3u8 is a single media playlist with no RESOLUTION, so without
-    // this the player shows "p0").
-    const quality = (String(topResObj.label || '').match(/(\d{3,4})\s*p/i) || [])[1]
-      ? `${String(topResObj.label).match(/(\d{3,4})\s*p/i)[1]}p`
-      : (topRes >= 3 ? '1080p' : topRes === 2 ? '720p' : '480p');
+    // Free resolutions LOWEST first — Castle streams are single-quality (no ABR),
+    // so starting on 480p plays smoothly and the player's quality menu offers the
+    // bigger one. A premiumProPermission tier (1080p) is VIP-only (always denied),
+    // so it's dropped. Offer up to two (e.g. 480p + 720p).
+    const free = tgt.res.filter((r) => !r.premium).sort((a, b) => (a.resolution || 0) - (b.resolution || 0));
+    const picks = (free.length ? free : [{ resolution: 1, label: 'SD 480P' }]).slice(0, 2);
+    const qualityOf = (r) => {
+      const m = String(r.label || '').match(/(\d{3,4})\s*p/i);
+      return m ? `${m[1]}p` : (r.resolution >= 3 ? '1080p' : r.resolution === 2 ? '720p' : '480p');
+    };
 
-    // One server PER LANGUAGE — getVideo2 returns that language's stream when
-    // given its languageId. The player reads the language from each server's
-    // name (default/first language first). A title with no language tracks, or a
-    // single one, just yields one server.
-    const wantLangs = lang ? tgt.langs.filter((l) => String(l.id) === String(lang)) : tgt.langs;
-    const langList = (wantLangs.length ? wantLangs : [{ id: undefined, name: '', code: '' }]).slice(0, 8);
+    // Languages, the default/first one first (so playback starts on it).
+    const all = lang ? tgt.langs.filter((l) => String(l.id) === String(lang)) : tgt.langs;
+    const ordered = [...(all || [])].sort((a, b) => (b.isDefault ? 1 : 0) - (a.isDefault ? 1 : 0));
+    const langList = (ordered.length ? ordered : [{ id: undefined, name: '', code: '' }]).slice(0, 8);
 
-    // getVideo2 signs a fresh URL (rotating host + auth_key) every call, so two
-    // languages that are really the SAME file only match on the path. Dedup by
-    // path: distinct paths = real per-language audio; one path = a single stream
-    // for the whole title (the player reads any embedded audio from the manifest).
+    // Resolve every (language × resolution) in parallel so the resolve stays fast,
+    // then order them: per language, low quality first; default language first.
+    const jobs = [];
+    for (const l of langList) for (const p of picks) jobs.push({ l, p });
+    const got = await Promise.all(jobs.map(async ({ l, p }) => {
+      const vb = await getVideoUnlocked({ movieId, episodeId: tgt.episodeId, resolution: p.resolution, languageId: l.id });
+      const u = urlsFromVideoBean(vb)[0];
+      return u ? { label: l.name || det.firstLanguage || 'HD', lang: l.code || '', quality: qualityOf(p), url: u } : null;
+    }));
+
+    // getVideo2 signs a fresh URL (rotating host + auth_key) each call, so the
+    // same file only matches on its path. Dedup by path + quality so we don't
+    // list one stream twice, but keep genuinely different languages/qualities.
+    // The path (hash/resolution/index) identifies a stream; host + auth_key vary
+    // per call. Different languages differ by index, different qualities by the
+    // resolution folder, so the plain path is the right dedup key.
     const contentPath = (u) => { try { return new URL(u).pathname; } catch { return u; } };
     const servers = [];
     const seen = new Set();
-    for (const l of langList) {
-      const vb = await getVideoUnlocked({
-        movieId, episodeId: tgt.episodeId, resolution: topRes, languageId: l.id,
-      });
-      const u = urlsFromVideoBean(vb)[0];
-      if (!u) continue;
-      const key = contentPath(u);
-      if (seen.has(key)) continue;         // same file as a language already added
+    for (const s of got) {
+      if (!s) continue;
+      const key = contentPath(s.url);
+      if (seen.has(key)) continue;
       seen.add(key);
-      servers.push({ label: l.name || det.firstLanguage || 'HD', lang: l.code || '', quality, url: u, kind: 'hls' });
+      servers.push({ ...s, kind: 'hls' });
     }
-    // All languages collapsed to one file → it's a single stream; don't label it
-    // with just the first language (the manifest's own audio tracks, if any, win).
-    if (servers.length === 1 && langList.length > 1) servers[0].label = det.firstLanguage || 'Castle';
+    // Every language collapsed to one stream → single-audio title; label it
+    // neutrally so the player doesn't claim a language it may not be.
+    const distinctLangs = new Set(servers.map((s) => s.label)).size;
+    if (distinctLangs <= 1 && langList.length > 1) {
+      for (const s of servers) s.label = det.firstLanguage || 'Castle';
+    }
 
     res.set('Cache-Control', 'no-store'); // auth_key/expire URLs are short-lived
     res.json({
