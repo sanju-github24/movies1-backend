@@ -18,7 +18,21 @@
 import crypto from 'crypto';
 import axios from 'axios';
 
-const DOMAIN = process.env.CASTLE_DOMAIN || 'https://se.mnbvcxzas.com';
+// The app rotates through a pool of API hosts (ServerConfig domain list) and
+// picks a live one; they change over time. We try them in order and remember
+// the one that answers. Override/extend with CASTLE_DOMAINS (comma-separated
+// hosts or full origins). `se.mnbvcxzas.com` was the stale bootstrap host — the
+// real content hosts are the api.* pool below.
+const DEFAULT_DOMAINS = [
+  'api.hwnou.com', 'api.hlowb.com', 'api.flwck.com',
+  'api.khmov.com', 'api.foxmvo.com', 'api.fszcxy.com', 'api.flucn.com',
+];
+const DOMAINS = (process.env.CASTLE_DOMAINS
+  ? process.env.CASTLE_DOMAINS.split(',').map((s) => s.trim()).filter(Boolean)
+  : DEFAULT_DOMAINS
+).map((h) => (/^https?:\/\//i.test(h) ? h.replace(/\/+$/, '') : `https://${h}`));
+let liveOrigin = DOMAINS[0];   // remembered working host
+
 const PKG = 'com.external.castle';
 const VERSION = '2.1.2';
 const CHANNEL = 'IndiaA';       // UMENG_CHANNEL header
@@ -26,44 +40,180 @@ const APP_MARKET = 'GuanWang';  // appMarket query/body param
 const CLIENT_TYPE = 1;          // 1 = Android
 
 const rndHex = (n) => crypto.randomBytes(n).toString('hex');
+const md5 = (s) => crypto.createHash('md5').update(s, 'utf8').digest('hex').toLowerCase();
 
 // Common headers the app's OkHttp interceptor (yb/f) adds to every request.
-// deviceId/guid are per-install ids; the server does not bind them for reads,
-// so a stable random pair per process is fine.
-const DEVICE_ID = process.env.CASTLE_DEVICE_ID || rndHex(16);
-const GUID = process.env.CASTLE_GUID || rndHex(16);
+// deviceId/guid are per-install ids; the login binds the guest token to them,
+// so the same pair is reused for the whole process.
+// `let`: the ad unlock is counted per guid, so once the server stops granting
+// unlocks we rotate to a fresh "install" (see getVideoUnlocked).
+let DEVICE_ID = process.env.CASTLE_DEVICE_ID || rndHex(16);
+let GUID = process.env.CASTLE_GUID || rndHex(16);
 
-function baseHeaders() {
-  return {
+// A guest session. The app logs in anonymously (noPasswdLogin) on first launch
+// and signs every POST with the returned uid+token; GET stays unauthenticated.
+let guest = null;   // { uid, token, apikey }
+
+// apikey derivation from the uid (yb/f.java): sum the digits, i = (sum+1)%8,
+// then apikey = last-i digits + first-(12-i) digits of the uid.
+function apikeyFromUid(uid) {
+  const s = String(uid);
+  const sum = [...s].reduce((a, c) => a + (Number(c) || 0), 0);
+  const i = (sum + 1) % 8;
+  return s.slice(s.length - i) + s.slice(0, 12 - i);
+}
+
+// The sign over a request (w.h): sorted "k=v&" of the fields, skipping empty
+// values, md5 lowercase. For a POST it's the body fields + apikey + nonce + ts.
+function signParams(obj) {
+  const m = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v === null || v === undefined) continue;
+    m[k] = typeof v === 'object' ? JSON.stringify(v) : String(v);
+  }
+  const s = Object.keys(m).sort()
+    .filter((k) => m[k] !== '' && m[k] !== 'null')
+    .map((k) => `${k}=${m[k]}`).join('&');
+  return md5(s);
+}
+
+function baseHeaders(nonce, ts) {
+  const h = {
     version: VERSION,
     clientType: String(CLIENT_TYPE),
     channel: CHANNEL,
     deviceId: DEVICE_ID,
     guid: GUID,
-    timestamp: String(Date.now()),
-    nonce: rndHex(16),
+    timestamp: String(ts),
+    nonce,
     'User-Agent': 'okhttp/4.9.0',
   };
+  if (guest && guest.token) h.Authorization = guest.token;   // yb/a interceptor
+  return h;
 }
 
-const client = axios.create({ timeout: 15000, validateStatus: () => true });
+const client = axios.create({ timeout: 15000, validateStatus: () => true, responseType: 'text', transformResponse: [(x) => x] });
+
+// --- Response decryption ----------------------------------------------------
+// Most responses come back base64(AES-128-CBC/PKCS5). The key = the server
+// "security key" (base64) decoded, then a 6-char native suffix appended, and
+// that 16-byte string is used as BOTH the AES key and the IV (ac/w.java e()).
+// A plaintext response already starts with "{" and is returned as-is.
+const NATIVE_SUFFIX = 'T!BgJB';                         // DqNativeSignUtil.signKeyFromJNI()
+let securityKeyB64 = process.env.CASTLE_SECURITY_KEY || 'ZkpBVG0qa2dmSg==';
+
+function aesKey(secB64) {
+  // base64-decode the security key, append the native suffix → 16 bytes.
+  const k = Buffer.concat([Buffer.from(secB64, 'base64'), Buffer.from(NATIVE_SUFFIX, 'utf8')]);
+  return k.subarray(0, 16);
+}
+function decryptBody(text, secB64) {
+  const key = aesKey(secB64);
+  const d = crypto.createDecipheriv('aes-128-cbc', key, key); // IV == key
+  return Buffer.concat([d.update(Buffer.from(text, 'base64')), d.final()]).toString('utf8');
+}
+// Movie/episode ids are 17-digit snowflakes — bigger than Number.MAX_SAFE_INTEGER,
+// so a plain JSON.parse silently rounds them (…943 -> …944) and the detail call
+// then 500s ("Movie doesn't exist"). Quote any 16+ digit integer so it survives
+// as a string before parsing.
+function jsonBig(text) {
+  return JSON.parse(text.replace(/(?<=[:\[,]\s*)(\d{16,})(?=\s*[,\]}])/g, '"$1"'));
+}
+// Turn a raw response body into an object: plaintext JSON as-is, else decrypt.
+function parseBody(text) {
+  const t = (text || '').trim();
+  if (!t) return null;
+  if (t[0] === '{' || t[0] === '[') return jsonBig(t);
+  // encrypted — try the current key, then a freshly-fetched one.
+  try { return jsonBig(decryptBody(t, securityKeyB64).trim()); }
+  catch { return { __encrypted: t }; }   // signal caller to refresh the key
+}
+
+// Fetch the current security key (its own response is plaintext).
+async function refreshSecurityKey() {
+  try {
+    const r = await client.get(`${liveOrigin}/v0.1/system/getSecurityKey/1`, { headers: baseHeaders(rndHex(16), Date.now()) });
+    const j = JSON.parse((r.data || '').trim());
+    if (j && j.data) { securityKeyB64 = String(j.data); return true; }
+  } catch { /* keep the old key */ }
+  return false;
+}
+
+// Make a request against the host pool: try the remembered host first, then the
+// rest, until one answers with a usable BaseResp. A POST is signed (yb/f): the
+// `sign` header is md5 over the body fields + apikey + nonce + timestamp, with
+// the SAME nonce/timestamp carried in the headers.
+// `longKeys` names body fields the app sends as a Java long: 17-digit ids that
+// a JS Number can't hold, so they go out as bare digits in the JSON text.
+const longJson = (obj, keys) => keys.reduce(
+  (s, k) => s.replace(new RegExp(`"${k}":"(\\d+)"`), `"${k}":$1`), JSON.stringify(obj));
+
+async function callPool(method, path, { params, data, longKeys } = {}, _retried = false) {
+  const order = [liveOrigin, ...DOMAINS.filter((o) => o !== liveOrigin)];
+  let lastErr = null;
+  for (const origin of order) {
+    try {
+      const nonce = rndHex(16); const ts = Date.now();
+      const headers = { ...baseHeaders(nonce, ts) };
+      if (data) {
+        headers['Content-Type'] = 'application/json;charset=utf-8';
+        if (guest && guest.apikey) {
+          headers.sign = signParams({ ...data, apikey: guest.apikey, nonce, timestamp: String(ts) });
+        }
+      }
+      const r = await client.request({
+        method, url: `${origin}${path}`, params,
+        data: data ? (longKeys ? longJson(data, longKeys) : JSON.stringify(data)) : undefined, headers,
+      });
+      if (r.status !== 200 || !r.data) { lastErr = `${origin} -> ${r.status}`; continue; }
+      const body = parseBody(r.data);
+      if (body && body.__encrypted) {
+        if (!_retried && await refreshSecurityKey()) {
+          return callPool(method, path, { params, data, longKeys }, true);  // retry once with fresh key
+        }
+        lastErr = `${origin} -> undecryptable`; continue;
+      }
+      if (body && typeof body === 'object' && 'code' in body) { liveOrigin = origin; return body; }
+      lastErr = `${origin} -> unexpected body`;
+    } catch (e) { lastErr = `${origin} -> ${e.message}`; }
+  }
+  const err = new Error(`no live Castle host (${lastErr})`); err.pool = true;
+  throw err;
+}
+
+// Anonymous guest login (noPasswdLogin) — returns a User{uid, token}. The first
+// call is unsigned (no guest yet); afterwards every POST is signed. Cached for
+// the process.
+async function ensureGuest() {
+  if (guest && guest.token) return guest;
+  const body = {
+    channel: CHANNEL, channelName: CHANNEL, clientType: CLIENT_TYPE,
+    countryCode: 'IN', deviceId: DEVICE_ID, deviceModel: 'Android',
+    deviceName: 'Android', deviceType: 1, guid: GUID, invitationCode: '',
+    packageName: PKG, token: '', userId: 0, version: VERSION,
+  };
+  const resp = await callPool('post', '/film-passport//v1.9.5/user/noPasswdLogin', { data: body });
+  const u = resp && resp.data;
+  if (u && u.uid && u.token) {
+    guest = { uid: String(u.uid), token: u.token, apikey: apikeyFromUid(u.uid) };
+    return guest;
+  }
+  throw new Error(`guest login failed: ${resp && resp.msg} (code ${resp && resp.code})`);
+}
 
 // ---- 1. search title -> movieId --------------------------------------------
 async function search(keyword) {
-  const url = `${DOMAIN}/film-api/v2.1.2/movie/searchByKeyword`;
-  const r = await client.get(url, {
-    headers: baseHeaders(),
+  const resp = await callPool('get', '/film-api/v2.1.2/movie/searchByKeyword', {
     params: {
-      keyword, page: 1, size: 20, mode: 1,
-      clientType: CLIENT_TYPE, packageName: PKG, appMarket: APP_MARKET,
+      keyword, page: 1, size: 20, mode: 1, secure: 0,
+      channel: CHANNEL, appMarket: APP_MARKET, packageName: PKG, clientType: CLIENT_TYPE,
     },
   });
-  if (r.status !== 200 || !r.data) return [];
-  // BaseResp { code, msg, data: { list|records|films:[ { id/movieId, title, ... } ] } }
-  const d = r.data.data || r.data;
-  const list = d.list || d.records || d.films || d.content || (Array.isArray(d) ? d : []);
+  const d = resp.data || {};
+  // SearchKeyWordBean { rows:[ SearchKeyWord{ id, title, publishTime, movieType } ] }
+  const list = d.rows || d.list || d.records || (Array.isArray(d) ? d : []);
   return (list || []).map((m) => ({
-    movieId: String(m.movieId || m.id || ''),
+    movieId: String(m.id || m.movieId || ''),
     title: m.title || m.name || '',
     year: pickYear(m),
     type: m.movieType ?? m.type,
@@ -95,40 +245,81 @@ function bestMatch(hits, title, year) {
 
 // ---- 2. detail -> episodes / languages / resolutions -----------------------
 async function detail(movieId) {
-  const url = `${DOMAIN}/film-api/v2.1.2/movie`;
-  const r = await client.get(url, {
-    headers: baseHeaders(),
+  const resp = await callPool('get', '/film-api/v2.1.2/movie', {
     params: { movieId, clientType: CLIENT_TYPE, packageName: PKG },
   });
-  if (r.status !== 200 || !r.data) return null;
-  return r.data.data || r.data;
+  return resp.data || null;
 }
 
 // ---- 3. getVideo -> the m3u8 URL -------------------------------------------
 // VideoBody as the app builds it; extra fields are harmless. Guest = no sign.
-async function getVideo({ movieId, episodeId, resolution, languageId, nextEpisodeId }) {
-  const url = `${DOMAIN}/film-api/v2.0.7/movie/getVideo`;
+// An app signing-cert SHA1 the server accepts (not strictly validated — the
+// emulator install's own cert works too). Overridable via env.
+const APK_SIGN_KEY = process.env.CASTLE_APK_SIGN_KEY || 'ED0955EB04E67A1D9F3305B95454FED485261475';
+
+// The real play call is getVideo2 — anonymous (NO sign / NO Authorization), with
+// query params AND a JSON body whose values are ALL strings (it's a
+// HashMap<String,String>). Captured from the running app. `languageId` is
+// omitted by the app for default playback (server uses the title's first lang).
+async function getVideo({ movieId, episodeId, resolution }) {
   const body = {
+    appMarket: APP_MARKET,
+    woolUser: 'false',
+    isp: 'Android',
+    useVipCdn: 'false',
     movieId: String(movieId),
     episodeId: String(episodeId),
-    resolution: Number(resolution) || 1,
-    languageId: languageId != null ? Number(languageId) : null,
-    nextEpisodeId: nextEpisodeId != null ? String(nextEpisodeId) : null,
-    clientType: CLIENT_TYPE,
-    channel: CHANNEL,
-    appMarket: APP_MARKET,
-    mode: 1,
-    download: false,
-    useVipCdn: false,
-    secure: 0,
-    networkType: 'WIFI',
+    isNewUser: 'true',
+    resolution: String(Number(resolution) || 1),
+    mode: '1',
+    clientType: '1',
+    apkSignKey: APK_SIGN_KEY,
     androidVersion: '11',
+    networkType: 'NETWORK_WIFI',
+    packageName: PKG,
   };
-  const r = await client.post(url, body, {
-    headers: { ...baseHeaders(), 'Content-Type': 'application/json;charset=utf-8' },
+  const resp = await callPool('post', '/film-api/v2.0.7/movie/getVideo2', {
+    params: { clientType: 1, packageName: PKG, channel: CHANNEL, lang: 'en-US' },
+    data: body,
   });
-  if (r.status !== 200 || !r.data) return null;
-  return r.data.data || r.data; // VideoBean
+  return resp.data || null; // VideoBean
+}
+
+// ---- 3b. ad unlock -----------------------------------------------------------
+// A new guid gets `permissionDenied:true` from getVideo2 until it has "watched"
+// the reward ad. When the ad finishes the app just reports it
+// (FilmDetailViewModel.saveFilmAdUnLock -> usermovie/adUnlock, FilmAdUnLockBody);
+// from then on getVideo2 returns the URL for that guid.
+const unlocked = new Set();   // `${movieId}:${episodeId}` already unlocked for GUID
+
+async function adUnlock(movieId, episodeId) {
+  const body = {
+    movieId: String(movieId), episodeId: String(episodeId), guid: GUID,
+    packageName: PKG, channel: CHANNEL, clientType: CLIENT_TYPE,
+  };
+  const resp = await callPool('post', '/film-api/v2.0.6/usermovie/adUnlock', {
+    data: body, longKeys: ['movieId', 'episodeId'],
+  });
+  return !!resp && resp.code === 200;
+}
+
+// getVideo, and on permissionDenied: unlock, then ask again. If the unlock is
+// refused or doesn't stick (that guid's count is used up), start over as a
+// fresh install once.
+async function getVideoUnlocked(args) {
+  let vb = await getVideo(args);
+  if (urlsFromVideoBean(vb).length || !(vb && vb.permissionDenied)) return vb;
+  const key = `${args.movieId}:${args.episodeId}`;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (attempt > 0 || unlocked.has(key)) {
+      DEVICE_ID = rndHex(16); GUID = rndHex(16); guest = null; unlocked.clear();
+    }
+    if (!(await adUnlock(args.movieId, args.episodeId))) continue;
+    unlocked.add(key);
+    vb = await getVideo(args);
+    if (urlsFromVideoBean(vb).length) return vb;
+  }
+  return vb;
 }
 
 // Pull playable HLS URLs out of a VideoBean (videoUrl + videoUrls mirrors).
@@ -157,7 +348,7 @@ function playTargets(det, episode) {
   }));
   // resolutions, highest first (resolution int: higher = better)
   const res = (ep.videos || []).map((v) => ({
-    resolution: v.resolution, label: v.resolutionDescription,
+    resolution: v.resolution, label: v.resolutionDescription, premium: !!v.premiumProPermission,
   })).sort((a, b) => (b.resolution || 0) - (a.resolution || 0));
   return { episodeId: String(ep.id), langs, res };
 }
@@ -207,12 +398,14 @@ export const resolve = async (req, res) => {
     // Pick language: requested -> default -> first.
     const wantLang = lang ? Number(lang)
       : (tgt.langs.find((l) => l.isDefault) || tgt.langs[0] || {}).id;
-    // Top 2 resolutions as the 2 fallback servers.
-    const picks = (tgt.res.length ? tgt.res : [{ resolution: 1, label: 'HD' }]).slice(0, 2);
+    // Top 2 free resolutions as the 2 fallback servers. A premiumProPermission
+    // one (1080p) is VIP-only and stays permissionDenied even after the unlock.
+    const free = tgt.res.filter((r) => !r.premium);
+    const picks = (free.length ? free : tgt.res.length ? tgt.res : [{ resolution: 1, label: 'HD' }]).slice(0, 2);
 
     const servers = [];
     for (const p of picks) {
-      const vb = await getVideo({
+      const vb = await getVideoUnlocked({
         movieId, episodeId: tgt.episodeId, resolution: p.resolution, languageId: wantLang,
       });
       for (const u of urlsFromVideoBean(vb)) {
