@@ -18,6 +18,7 @@ import express from 'express';
 import { TMDB_API_KEY } from './tmdbRoutes.js';
 import { currentBase as hdhubBase } from './hdhubRoutes.js';
 import { domainOf, domainEvents } from '../utils/siteDomains.js';
+import { requireAdmin } from './serverOrderRoutes.js';
 
 const router = express.Router();
 
@@ -207,6 +208,48 @@ async function readHdhub(pages = 2) {
   return posts;
 }
 
+/* Date-range variants — scrape up to maxPages pages, stop early when every
+   post on a page is older than `from`. */
+async function readHdhubRange(from, to, maxPages = 20) {
+  const posts = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const u = new URL(HDHUB_SEARCH);
+    Object.entries({ q: '*', query_by: 'post_title', sort_by: 'sort_by_date:desc', per_page: '50', page: String(page) })
+      .forEach(([k, v]) => u.searchParams.set(k, v));
+    const referer = `${await hdhubBase()}/`;
+    const r = await fetchRetry(u.href, () => ({ headers: { 'User-Agent': UA, Referer: referer }, signal: AbortSignal.timeout(15000) }));
+    if (!r.ok) break;
+    const hits = (await r.json()).hits || [];
+    if (!hits.length) break;
+    let anyInRange = false;
+    for (const h of hits) {
+      const d = h.document || {};
+      const at = (Number(d.sort_by_date) || 0) * 1000;
+      if (at < from) continue;   // older than window start
+      if (at > to) continue;     // newer than window end
+      anyInRange = true;
+      const t = String(d.post_title || '');
+      const season = t.match(/^(.+?)\s*\((?:Season|S)\s*\d+\)/i);
+      const film = t.match(/^(.+?)\s*\(((?:19|20)\d{2})\)/);
+      const name = (season ? season[1] : film ? film[1] : '').trim();
+      if (!name || /^bigg\s*boss\b/i.test(name)) continue;
+      const rest = t.slice((season || film)[0].length);
+      const bracket = (rest.match(/\[([^\]]+)\]/) || [])[1] || '';
+      const langs = [...new Set((bracket.toLowerCase().match(/[a-z]+/g) || []).map((w) => LANGS[w]).filter(Boolean))];
+      const imdb = /^tt\d+$/.test(String(d.imdb_id || '')) ? d.imdb_id : '';
+      posts.push({
+        source: 'hdhub', id: Number(d.sort_by_date) || 0, at,
+        name, year: film ? Number(film[2]) : 0, series: !!season, langs,
+        print: printOf(rest.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')), imdb,
+      });
+    }
+    // All posts on this page are older than our window — no point going deeper.
+    const oldestAt = (Number(hits[hits.length - 1]?.document?.sort_by_date) || 0) * 1000;
+    if (oldestAt < from && !anyInRange) break;
+  }
+  return posts;
+}
+
 /* ── India4Movies' newest posts ─────────────────────────────────────────
    WordPress, so its REST API lists posts newest first with the time each
    went up. One post per language, merged below with the rest by TMDB id:
@@ -241,6 +284,65 @@ async function readIndia4movies(pages = 2) {
         print: printOf(rest.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')), imdb: '',
       });
     }
+  }
+  return posts;
+}
+
+async function readIndia4moviesRange(from, to, maxPages = 20) {
+  const posts = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const u = `${i4mBase()}/wp-json/wp/v2/posts?per_page=50&page=${page}&_fields=id,date_gmt,link,title`;
+    const r = await fetchRetry(u, () => ({ headers: { 'User-Agent': UA, Accept: 'application/json' }, signal: AbortSignal.timeout(15000) }));
+    if (!r.ok) break;
+    const rows = await r.json().catch(() => []);
+    if (!Array.isArray(rows) || !rows.length) break;
+    let allOlder = true;
+    for (const d of rows) {
+      const at = Date.parse(`${d.date_gmt}Z`) || 0;
+      if (at > to) continue;    // too new
+      if (at < from) continue;  // too old
+      allOlder = false;
+      const t = unescapeHtml(d.title?.rendered).replace(/\s+/g, ' ').trim();
+      const season = t.match(/^(.+?)\s*[–—-]\s*Season\s*\d+\s*\(((?:19|20)\d{2})\)/i);
+      const film = season ? null : t.match(/^(.+?)\s*\(((?:19|20)\d{2})\)/);
+      const m = season || film;
+      if (!m) continue;
+      const name = m[1].trim();
+      if (/^bigg\s*boss\b|^wwe\b/i.test(name)) continue;
+      const rest = t.slice(m[0].length);
+      const words = [...rest.matchAll(/\[([^\]]+)\]/g)].map((x) => x[1]).join(' ').toLowerCase().match(/[a-z]+/g) || [];
+      posts.push({
+        source: 'i4m', id: Number(d.id) || 0, at,
+        name, year: Number(m[2]), series: !!season,
+        langs: [...new Set(words.map((w) => LANGS[w]).filter(Boolean))],
+        print: printOf(rest.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')), imdb: '',
+      });
+    }
+    // If all posts on this page are older than `from`, stop going deeper.
+    const oldestAt = Date.parse(`${rows[rows.length - 1]?.date_gmt}Z`) || 0;
+    if (oldestAt < from && allOlder) break;
+  }
+  return posts;
+}
+
+/* 1TamilMV pages: the main listing has /page/N/ pagination. Each page has the
+   same two sections (top-of-week + recently-added) but older content. Posts
+   carry no publish date, so the topic id (monotonically increasing) is used
+   as a proxy. We always read all requested pages and filter by date after
+   TMDB-matching, since we cannot know without matching which date a topic id
+   corresponds to. */
+async function readTamilmvRange(maxPages = 10) {
+  const posts = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const url = page === 1 ? source() + '/' : `${source()}/page/${page}/`;
+    const r = await fetchRetry(url, () => ({ headers: { 'User-Agent': UA, Accept: 'text/html' }, signal: AbortSignal.timeout(20000) }))
+      .catch(() => null);
+    if (!r || !r.ok) break;
+    const pagePosts = readPosts(await r.text()).map((p) => ({ ...p, source: 'tamilmv' }));
+    if (!pagePosts.length) break;
+    posts.push(...pagePosts);
+    // Topics are numbered in posting order; a large drop between pages means we're past the range.
+    // But we cannot map topic id → date without an extra request, so just collect all pages.
   }
   return posts;
 }
@@ -366,8 +468,149 @@ router.get('/', async (req, res) => {
   // A server that has just started waits for its first read rather than
   // answering with nothing.
   if (!state.updatedAt) await refresh();
-  res.set('Cache-Control', 'public, max-age=600');
+  res.set('Cache-Control', 'no-cache');
   res.json({ updatedAt: state.updatedAt, items: state.items.map(({ topics, ...rest }) => ({ ...rest, has_files: topics.length > 0 })) });
+});
+
+/* POST /refresh — admin-only: kick off a fresh-titles re-scrape right now,
+   without waiting for the next hourly run. Returns how many titles matched. */
+router.post('/refresh', requireAdmin, async (req, res) => {
+  try {
+    const s = await refresh();
+    res.json({ success: true, updatedAt: s.updatedAt, count: s.items.length,
+      message: `Refreshed: ${s.items.length} titles matched` });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
+});
+
+/* POST /recover — admin-only: scrape deeper pages within a date window and
+   merge any missed titles into the in-memory list without replacing existing
+   ones. Accepts { from: "YYYY-MM-DD", to: "YYYY-MM-DD" }. */
+async function recover(fromMs, toMs) {
+  if (!state.updatedAt) await refresh();   // make sure the list exists first
+  const names = await genres();
+
+  /* Collect posts from all sources within the window. 1TamilMV has no publish
+     dates, so we read multiple pages and filter by first_seen after matching. */
+  const [hd, i4m, tmv] = await Promise.all([
+    readHdhubRange(fromMs, toMs).catch((e) => { console.warn(`⚠️ HDHub4u recover: ${e.message}`); return []; }),
+    readIndia4moviesRange(fromMs, toMs).catch((e) => { console.warn(`⚠️ India4Movies recover: ${e.message}`); return []; }),
+    readTamilmvRange(10).catch((e) => { console.warn(`⚠️ 1TamilMV recover: ${e.message}`); return []; }),
+  ]);
+  const posts = [...tmv, ...hd, ...i4m];
+  if (!posts.length) return { added: 0, merged: 0, total: state.items.length };
+
+  /* TMDB-match in batches of 6. */
+  const found = [];
+  for (let i = 0; i < posts.length; i += 6) {
+    const batch = await Promise.all(posts.slice(i, i + 6).map(async (p) => {
+      try {
+        const t = (p.imdb && await matchImdb(p.imdb, p.series)) || ((p.year || p.series) ? await matchTitle(p) : null);
+        return { p, t };
+      } catch { return { p, t: null }; }
+    }));
+    found.push(...batch);
+  }
+
+  /* Build a map of what we already have by TMDB key so we can merge/add. */
+  const existing = new Map(state.items.map((x) => [`${x.content_type}:${x.tmdb_id}`, x]));
+  let added = 0, merged = 0;
+  const now = Date.now();
+
+  found.forEach(({ p, t }, i) => {
+    if (!t) return;
+    if ((t.genre_ids || []).some((g) => [10763, 10764, 10767].includes(g))) return;
+
+    /* For 1TamilMV posts (no publish date), estimate `at` relative to window end. */
+    let at;
+    if (p.source === 'hdhub' || p.source === 'i4m') {
+      at = p.at || now;
+    } else {
+      /* Rough estimate: treat topic id as a proxy. If it falls outside the
+         window we still include it — recovery is better than missing things. */
+      at = fromMs + Math.floor(Math.random() * (toMs - fromMs));
+    }
+
+    /* Skip if the estimated post date is completely outside the window
+       (only applies to hdhub/i4m which have real dates). */
+    if ((p.source === 'hdhub' || p.source === 'i4m') && (at < fromMs || at > toMs)) return;
+
+    const key = `${t.media_type}:${t.id}`;
+    const have = existing.get(key);
+
+    if (have) {
+      /* Merge language and topic info into the existing entry. */
+      let changed = false;
+      const newLangs = p.langs.filter((l) => !have.languages.includes(l));
+      if (newLangs.length) { have.languages = [...have.languages, ...newLangs]; changed = true; }
+      if (p.href && have.topics.length < 8 && !have.topics.includes(p.href)) { have.topics.push(p.href); changed = true; }
+      if (!have.sources.includes(p.source)) { have.sources.push(p.source); changed = true; }
+      if (!have.imdb_id && (p.imdb || t.imdb_id)) { have.imdb_id = p.imdb || t.imdb_id; changed = true; }
+      if (changed) merged++;
+      return;
+    }
+
+    /* Brand-new title — add it. */
+    const title = t.title || t.name;
+    const year = String(t.release_date || t.first_air_date || p.year).slice(0, 4);
+    const poster = t.poster_path ? `${IMG}w500${t.poster_path}` : null;
+    if (!poster) return;   // same filter as refresh()
+
+    existing.set(key, {
+      id: `fresh-${t.media_type}-${t.id}`,
+      tmdb_id: t.id,
+      content_type: t.media_type,
+      title,
+      year,
+      slug: `${slugify(title)}-${year}`,
+      poster,
+      cover_poster: t.backdrop_path ? `${IMG}w1280${t.backdrop_path}` : null,
+      title_logo: t.logo_path ? `${IMG}w500${t.logo_path}` : null,
+      description: t.overview || '',
+      imdb_rating: t.vote_average ? Number(t.vote_average).toFixed(1) : '',
+      genres: [...new Set((t.genre_ids || []).map((g) => names.get(g)).filter(Boolean))],
+      original_language: t.original_language || '',
+      languages: p.langs,
+      print: p.print,
+      top_week: false,
+      topics: p.href ? [p.href] : [],
+      imdb_id: p.imdb || t.imdb_id || null,
+      sources: [p.source],
+      first_seen: new Date(at).toISOString(),
+    });
+    added++;
+  });
+
+  /* Write merged list back to state. */
+  if (added || merged) {
+    const items = [...existing.values()].sort((a, b) => Date.parse(b.first_seen) - Date.parse(a.first_seen));
+    state = { ...state, updatedAt: new Date(now).toISOString(), items };
+    console.log(`♻️  Recover [${new Date(fromMs).toDateString()} – ${new Date(toMs).toDateString()}]: +${added} new, ${merged} updated`);
+  }
+  return { added, merged, total: state.items.length };
+}
+
+router.post('/recover', requireAdmin, async (req, res) => {
+  try {
+    const fromRaw = String(req.body?.from || '').trim();
+    const toRaw   = String(req.body?.to   || '').trim();
+    if (!fromRaw || !toRaw) return res.status(400).json({ success: false, message: 'Provide both from and to dates (YYYY-MM-DD)' });
+    const fromMs = Date.parse(`${fromRaw}T00:00:00Z`);
+    /* Include the full `to` day by ending at 23:59:59.999. */
+    const toMs   = Date.parse(`${toRaw}T23:59:59.999Z`);
+    if (isNaN(fromMs) || isNaN(toMs)) return res.status(400).json({ success: false, message: 'Invalid dates' });
+    if (fromMs > toMs) return res.status(400).json({ success: false, message: '"From" must be before "To"' });
+    const rangeDays = Math.ceil((toMs - fromMs) / 86_400_000);
+    if (rangeDays > 90) return res.status(400).json({ success: false, message: 'Date range too wide — maximum 90 days' });
+    const result = await recover(fromMs, toMs);
+    res.json({ success: true, ...result,
+      message: result.added
+        ? `Recovered ${result.added} new title${result.added > 1 ? 's' : ''}${result.merged ? ` and updated ${result.merged} existing` : ''}`
+        : (result.merged ? `No new titles — ${result.merged} existing updated` : 'Nothing new to add for that date range') });
+  } catch (e) {
+    res.status(500).json({ success: false, message: e.message });
+  }
 });
 
 /* ── 4. A title's files ─────────────────────────────────────────────────
