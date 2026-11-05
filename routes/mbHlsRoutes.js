@@ -93,11 +93,14 @@ async function signedFolder(subjectId, se, ep) {
     await ensureToken();
     let d = await tv('/wefeed-tv-bff/subject/play-info/v2', { params: { subjectId, vipLevel: '2', ...(se ? { se, ep } : {}) } });
     if (d.code === 401 || /jwt|token/i.test(String(d.message || ''))) { tvToken = ''; await ensureToken(); d = await tv('/wefeed-tv-bff/subject/play-info/v2', { params: { subjectId, vipLevel: '2', ...(se ? { se, ep } : {}) } }); }
-    const s = (d.data?.streams || []).find((x) => /\.mpd(\?|$)/.test(x.url || '') && x.signCookie);
+    const isNotice = (u) => /index_4\d\d\.m3u8/i.test(u || '') || /notice|warning|flonub\.com.*index_/i.test(u || '');
+    const s = (d.data?.streams || [])
+        .filter((x) => !isNotice(x.url))
+        .find((x) => /\.mpd(\?|$)/.test(x.url || '') && x.signCookie);
     /* The H.264 MP4s beside it, signed in their URLs and served with CORS:
        what a dub without DASH has, and what a browser without HEVC plays. */
     const mp4 = (d.data?.resources || []).map((x) => ({ url: x.url || x.resourceLink, resolution: parseInt(x.resolution, 10) || 0, codec: String(x.codec || '') }))
-        .filter((x) => /^https:/.test(x.url || '') && !/hevc|h265/i.test(x.codec)).sort((a, b) => b.resolution - a.resolution);
+        .filter((x) => /^https:/.test(x.url || '') && !/hevc|h265/i.test(x.codec) && !isNotice(x.url)).sort((a, b) => b.resolution - a.resolution);
     let value = null;
     if (s) {
         const c = Object.fromEntries(String(s.signCookie).split(';').map((x) => x.trim()).filter(Boolean)
@@ -250,12 +253,15 @@ async function buildTitle({ tmdb, title, year, type, se, ep }) {
     const read = await mapLimit(versions, 3, async (v) => {
         const f = await signedFolder(v.subjectId, se, ep);
         if (!f) return null;
-        for (const x of f.mp4 || []) mp4.push({ subjectId: v.subjectId, name: nameFrom(v, '', origName), code: v.code || '', resolution: x.resolution, url: x.url, original: v.original });
+        for (const x of f.mp4 || []) {
+            if (/index_4\d\d\.m3u8/i.test(x.url || '') || /notice|warning/i.test(x.url || '')) continue;
+            mp4.push({ subjectId: v.subjectId, name: nameFrom(v, '', origName), code: v.code || '', resolution: x.resolution, url: x.url, original: v.original });
+        }
         if (!f.mpd) return null;
         const r = await fetch(`${f.mpd}?${f.q}`, { signal: AbortSignal.timeout(20000) });
         if (!r.ok) return null;
         const mpd = parseMpd(await r.text());
-        if (!mpd.video.length || !mpd.audio.length) return null;
+        if (!mpd.video.length || !mpd.audio.length || (mpd.total && mpd.total < 180)) return null;
         const name = nameFrom(v, mpd.audio[0].lang, origName);
         return { v, f, mpd, name, code: CODE_OF[name] || mpd.audio[0].lang || v.code || 'und' };
     });

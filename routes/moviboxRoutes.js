@@ -122,6 +122,8 @@ async function findSubject(titles, year, type, lastYear = 0) {
   return null;
 }
 
+const isNotice = (u) => /index_4\d\d\.m3u8/i.test(u || '') || /notice|warning|flonub\.com.*index_/i.test(u || '');
+
 async function streamsFor(dub, se, ep) {
   const watchPage = `${BASE()}/movies/${dub.detailPath}?id=${dub.subjectId}&type=/movie/detail&detailSe=${se || ''}&detailEp=${ep || ''}&lang=en`;
   const d = await mb(`/subject/play?subjectId=${dub.subjectId}&se=${se || 0}&ep=${ep || 0}&detailPath=${dub.detailPath}&streamSignType=1`, { referer: watchPage });
@@ -129,8 +131,9 @@ async function streamsFor(dub, se, ep) {
   const signed = (x) => ({ Referer: REFERER(), ...(x?.signHeaderKey && x?.signCookie ? { [x.signHeaderKey]: x.signCookie } : {}) });
   return {
     available: !!d.hasResource,
-    mpd: dash ? { url: dash.url, resolutions: dash.resolutions, codec: dash.codecName, size: Number(dash.size) || null, headers: signed(dash) } : null,
-    mp4: (d.streams || []).map((s) => ({ url: s.url, resolution: `${s.resolutions}p`, size: Number(s.size) || null, codec: s.codecName, headers: signed(s) }))
+    mpd: dash && !isNotice(dash.url) ? { url: dash.url, resolutions: dash.resolutions, codec: dash.codecName, size: Number(dash.size) || null, headers: signed(dash) } : null,
+    mp4: (d.streams || []).filter((s) => !isNotice(s.url))
+      .map((s) => ({ url: s.url, resolution: `${s.resolutions}p`, size: Number(s.size) || null, codec: s.codecName, headers: signed(s) }))
       .sort((a, b) => parseInt(b.resolution, 10) - parseInt(a.resolution, 10)),
   };
 }
