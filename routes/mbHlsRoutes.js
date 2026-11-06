@@ -176,7 +176,9 @@ function parseMpd(xml) {
             });
         }
     }
-    return { total, video: reps.filter((r) => r.type === 'video').sort((a, b) => b.height - a.height), audio: reps.filter((r) => r.type === 'audio') };
+    const segTotal = reps.find((r) => r.type === 'video')?.segs?.reduce((sum, s) => sum + (s.dur || 0), 0) || 0;
+    const finalTotal = total || segTotal;
+    return { total: finalTotal, video: reps.filter((r) => r.type === 'video').sort((a, b) => b.height - a.height), audio: reps.filter((r) => r.type === 'audio') };
 }
 
 // ── Titles → streams ───────────────────────────────────────────────────
@@ -261,7 +263,7 @@ async function buildTitle({ tmdb, title, year, type, se, ep }) {
         const r = await fetch(`${f.mpd}?${f.q}`, { signal: AbortSignal.timeout(20000) });
         if (!r.ok) return null;
         const mpd = parseMpd(await r.text());
-        if (!mpd.video.length || !mpd.audio.length || (mpd.total && mpd.total < 180)) return null;
+        if (!mpd.video.length || !mpd.audio.length || (mpd.total > 0 && mpd.total < 180)) return null;
         const name = nameFrom(v, mpd.audio[0].lang, origName);
         return { v, f, mpd, name, code: CODE_OF[name] || mpd.audio[0].lang || v.code || 'und' };
     });
