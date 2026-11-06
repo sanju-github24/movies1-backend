@@ -93,7 +93,7 @@ async function signedFolder(subjectId, se, ep) {
     await ensureToken();
     let d = await tv('/wefeed-tv-bff/subject/play-info/v2', { params: { subjectId, vipLevel: '2', ...(se ? { se, ep } : {}) } });
     if (d.code === 401 || /jwt|token/i.test(String(d.message || ''))) { tvToken = ''; await ensureToken(); d = await tv('/wefeed-tv-bff/subject/play-info/v2', { params: { subjectId, vipLevel: '2', ...(se ? { se, ep } : {}) } }); }
-    const isNotice = (u) => /index_4\d\d\.m3u8/i.test(u || '') || /notice|warning|flonub\.com.*index_/i.test(u || '');
+    const isNotice = (u) => /index_4\d\d\.m3u8/i.test(u || '') || /notice|warning|flonub\.com/i.test(u || '') || /hls_mps\/[a-f0-9]{20,}\//i.test(u || '');
     const s = (d.data?.streams || [])
         .filter((x) => !isNotice(x.url))
         .find((x) => /\.mpd(\?|$)/.test(x.url || '') && x.signCookie);
@@ -254,7 +254,7 @@ async function buildTitle({ tmdb, title, year, type, se, ep }) {
         const f = await signedFolder(v.subjectId, se, ep);
         if (!f) return null;
         for (const x of f.mp4 || []) {
-            if (/index_4\d\d\.m3u8/i.test(x.url || '') || /notice|warning/i.test(x.url || '')) continue;
+            if (/index_4\d\d\.m3u8/i.test(x.url || '') || /notice|warning|flonub\.com/i.test(x.url || '') || /hls_mps\/[a-f0-9]{20,}\//i.test(x.url || '')) continue;
             mp4.push({ subjectId: v.subjectId, name: nameFrom(v, '', origName), code: v.code || '', resolution: x.resolution, url: x.url, original: v.original });
         }
         if (!f.mpd) return null;
