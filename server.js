@@ -9,9 +9,9 @@ import { delimiter as pathDelimiter, resolve as resolvePath } from 'path';
 process.env.PYTHONPATH = [resolvePath('.pydeps'), process.env.PYTHONPATH].filter(Boolean).join(pathDelimiter);
 import cookieParser from 'cookie-parser';
 import axios from 'axios';
-import fs from 'fs';       
-import path from 'path';     
-import { fileURLToPath } from 'url'; 
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { spawn } from 'child_process';
 import { Readable } from 'stream';
@@ -53,6 +53,7 @@ import anchorServerRouter from './routes/anchorServerRoutes.js';
 import iptvRouter from './routes/iptvRoutes.js';
 import tblastersRouter from './routes/tblastersRoutes.js';
 import analyticsRouter from './routes/analyticsRoutes.js';
+import qrLoginRouter from './routes/qrLoginRoutes.js';
 import hotstarProxy from './routes/hotstarProxy.js';
 import hsDirect from './routes/hsDirect.js';
 
@@ -77,7 +78,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 function makeUUID() {
   const h = () => Math.floor(Math.random() * 16).toString(16);
   const s = (n) => Array.from({ length: n }, h).join('');
-  const variant = ['8','9','a','b'][Math.floor(Math.random() * 4)];
+  const variant = ['8', '9', 'a', 'b'][Math.floor(Math.random() * 4)];
   return `${s(8)}-${s(4)}-4${s(3)}-${variant}${s(3)}-${s(12)}`;
 }
 
@@ -87,14 +88,14 @@ function makeUUID() {
 // look in PLAYWRIGHT_BROWSERS_PATH; Playwright's Chromium is a different build
 // (often headless_shell) and handing it to Puppeteer is not reliable.
 const getChromiumPath = () => {
-    for (const root of ['/app/pw-browsers', process.env.PUPPETEER_CACHE_DIR].filter(Boolean)) {
-        try {
-            if (!fs.existsSync(root)) continue;
-            const found = execSync(`find ${root} -name chrome -type f | head -n 1`).toString().trim();
-            if (found) return found;
-        } catch (e) { /* try the next root */ }
-    }
-    return null;
+  for (const root of ['/app/pw-browsers', process.env.PUPPETEER_CACHE_DIR].filter(Boolean)) {
+    try {
+      if (!fs.existsSync(root)) continue;
+      const found = execSync(`find ${root} -name chrome -type f | head -n 1`).toString().trim();
+      if (found) return found;
+    } catch (e) { /* try the next root */ }
+  }
+  return null;
 };
 
 const __filename = fileURLToPath(import.meta.url);
@@ -133,11 +134,11 @@ const dataPath = path.join(__dirname, 'data', 'all_south_indian_movies.json');
 let cleanedMovieData = [];
 
 try {
-    const rawData = fs.readFileSync(dataPath, 'utf-8');
-    cleanedMovieData = JSON.parse(rawData);
-    console.log(`✅ Cleaned movie data loaded: ${cleanedMovieData.length} movies.`);
+  const rawData = fs.readFileSync(dataPath, 'utf-8');
+  cleanedMovieData = JSON.parse(rawData);
+  console.log(`✅ Cleaned movie data loaded: ${cleanedMovieData.length} movies.`);
 } catch (error) {
-    console.error("❌ ERROR: Failed to load cleaned movie data.", error.message);
+  console.error("❌ ERROR: Failed to load cleaned movie data.", error.message);
 }
 
 // -------------------- CORS --------------------
@@ -197,30 +198,30 @@ app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
 app.use((req, res, next) => {
-    const origin = req.headers.origin;
+  const origin = req.headers.origin;
 
-    if (req.path.startsWith('/api/live-stream-proxy')) {
-        res.setHeader('Access-Control-Allow-Origin', '*');
-        res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Authorization');
-        res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type');
-        return next();
-    }
+  if (req.path.startsWith('/api/live-stream-proxy')) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type, Authorization');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Length, Content-Range, Content-Type');
+    return next();
+  }
 
-    if (
-      origin && (
-        allowedOrigins.includes(origin) ||
-        origin.startsWith('http://localhost:') ||
-        origin.startsWith('http://127.0.0.1:')
-      )
-    ) {
-        res.setHeader('Access-Control-Allow-Origin', origin);
-        res.setHeader('Access-Control-Allow-Credentials', 'true');
-        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-        res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    }
+  if (
+    origin && (
+      allowedOrigins.includes(origin) ||
+      origin.startsWith('http://localhost:') ||
+      origin.startsWith('http://127.0.0.1:')
+    )
+  ) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  }
 
-    next();
+  next();
 });
 
 app.use(express.json());
@@ -271,35 +272,35 @@ app.use('/api', rssProxy);
 // =====================================
 app.options('/search', cors(corsOptions));
 app.get('/search', (req, res) => {
-    const movie  = req.query.movie  || "777 Charlie";
-    const lang   = req.query.lang   || "Kannada";
-    const source = req.query.source || "both";
+  const movie = req.query.movie || "777 Charlie";
+  const lang = req.query.lang || "Kannada";
+  const source = req.query.source || "both";
 
-    console.log(`🔍 Torrent search: movie="${movie}" lang="${lang}" source="${source}"`);
+  console.log(`🔍 Torrent search: movie="${movie}" lang="${lang}" source="${source}"`);
 
-    const pythonProcess = spawn('python3', ['./scrapers/scraper.py', movie, lang, source]);
+  const pythonProcess = spawn('python3', ['./scrapers/scraper.py', movie, lang, source]);
 
-    let output = "";
-    let errorOutput = "";
+  let output = "";
+  let errorOutput = "";
 
-    pythonProcess.stdout.on('data', (data) => { output += data.toString(); });
-    pythonProcess.stderr.on('data', (data) => { errorOutput += data.toString(); });
+  pythonProcess.stdout.on('data', (data) => { output += data.toString(); });
+  pythonProcess.stderr.on('data', (data) => { errorOutput += data.toString(); });
 
-    pythonProcess.on('close', (code) => {
-        if (errorOutput) console.error("🐍 Python stderr:", errorOutput);
-        try {
-            const results = JSON.parse(output);
-            res.json(results);
-        } catch (e) {
-            console.error("❌ JSON parse failed:", output);
-            res.status(500).json({ error: "Scraping failed", detail: output });
-        }
-    });
+  pythonProcess.on('close', (code) => {
+    if (errorOutput) console.error("🐍 Python stderr:", errorOutput);
+    try {
+      const results = JSON.parse(output);
+      res.json(results);
+    } catch (e) {
+      console.error("❌ JSON parse failed:", output);
+      res.status(500).json({ error: "Scraping failed", detail: output });
+    }
+  });
 });
 
 // -------------------- Cleaned Movies --------------------
 app.get('/api/cleaned-movies', (req, res) => {
-    res.json(cleanedMovieData);
+  res.json(cleanedMovieData);
 });
 
 // =====================================
@@ -361,17 +362,17 @@ function proxyHeadersFor(target) {
 }
 
 const ICC_PROXY_HEADERS = {
-  'Referer':         'https://www.icc-cricket.com/',
-  'Origin':          'https://www.icc-cricket.com',
-  'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-  'Accept':          '*/*',
+  'Referer': 'https://www.icc-cricket.com/',
+  'Origin': 'https://www.icc-cricket.com',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+  'Accept': '*/*',
   'Accept-Language': 'en-IN,en-GB;q=0.9,en-US;q=0.8,en;q=0.7',
 };
 
 const CORS_HEADERS = {
-  'Access-Control-Allow-Origin':   '*',
-  'Access-Control-Allow-Methods':  'GET, HEAD, OPTIONS',
-  'Access-Control-Allow-Headers':  '*',
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
+  'Access-Control-Allow-Headers': '*',
   'Access-Control-Expose-Headers': 'Content-Length, Content-Range, Content-Type',
 };
 
@@ -387,12 +388,12 @@ app.options('/api/live-stream-proxy', (req, res) => {
 
 app.get('/api/live-stream-proxy', async (req, res) => {
   let targetUrl = req.query.url || '';
-  try { targetUrl = decodeURIComponent(targetUrl); } catch {}
+  try { targetUrl = decodeURIComponent(targetUrl); } catch { }
   if (!targetUrl) return res.status(400).json({ error: 'Missing ?url=' });
 
   Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
 
-  const isMpd  = /\.mpd($|\?)/i.test(targetUrl) || targetUrl.includes('manifest.mpd');
+  const isMpd = /\.mpd($|\?)/i.test(targetUrl) || targetUrl.includes('manifest.mpd');
   const isM3u8 = /\.m3u8($|\?)/i.test(targetUrl);
   const isText = isMpd || isM3u8;
 
@@ -402,8 +403,8 @@ app.get('/api/live-stream-proxy', async (req, res) => {
 
   try {
     const upstream = await axios({
-      method:       'GET',
-      url:          targetUrl,
+      method: 'GET',
+      url: targetUrl,
       responseType: isText ? 'text' : 'stream',
       // ── CRITICAL FIX ──────────────────────────────────────────────────────
       // Without this, axios's default transformResponse tries JSON.parse on
@@ -411,8 +412,8 @@ app.get('/api/live-stream-proxy', async (req, res) => {
       // interact badly with certain axios versions / interceptors and has
       // been observed to alter XML payloads. Force pass-through instead.
       transformResponse: isText ? [(data) => data] : undefined,
-      headers:      proxyHeadersFor(targetUrl),
-      timeout:      30000,
+      headers: proxyHeadersFor(targetUrl),
+      timeout: 30000,
       maxRedirects: 5,
       validateStatus: () => true, // never throw — we want to log+inspect ALL statuses
     });
@@ -432,7 +433,7 @@ app.get('/api/live-stream-proxy', async (req, res) => {
         return res.status(upstream.status).send(bodyStr);
       }
 
-      const looksLikeXml  = bodyStr.trim().startsWith('<?xml') || bodyStr.trim().startsWith('<MPD');
+      const looksLikeXml = bodyStr.trim().startsWith('<?xml') || bodyStr.trim().startsWith('<MPD');
       const looksLikeM3u8 = bodyStr.trim().startsWith('#EXTM3U');
       if (isMpd && !looksLikeXml) {
         console.log(`[Proxy] ⚠️  Expected MPD XML but body doesn't start with <?xml or <MPD!`);
@@ -494,13 +495,13 @@ app.options('/api/hls-proxy', (req, res) => {
 
 app.get('/api/hls-proxy', async (req, res) => {
   let targetUrl = req.query.url || '';
-  try { targetUrl = decodeURIComponent(targetUrl); } catch {}
+  try { targetUrl = decodeURIComponent(targetUrl); } catch { }
   if (!/^https?:\/\//i.test(targetUrl)) return res.status(400).json({ error: 'Missing/invalid ?url=' });
 
   let ref = req.query.ref || '';
-  try { ref = decodeURIComponent(ref); } catch {}
+  try { ref = decodeURIComponent(ref); } catch { }
   let referer = ref, origin = '';
-  try { const o = new URL(ref || targetUrl); referer = ref || `${o.origin}/`; origin = o.origin; } catch {}
+  try { const o = new URL(ref || targetUrl); referer = ref || `${o.origin}/`; origin = o.origin; } catch { }
 
   Object.entries(CORS_HEADERS).forEach(([k, v]) => res.setHeader(k, v));
 
@@ -552,8 +553,8 @@ app.get('/api/hls-proxy', async (req, res) => {
     const cl = upstream.headers['content-length'];
     if (ct) res.setHeader('Content-Type', ct);
     if (cl) res.setHeader('Content-Length', cl);
-    if (upstream.headers['accept-ranges'])  res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
-    if (upstream.headers['content-range'])  res.setHeader('Content-Range', upstream.headers['content-range']);
+    if (upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
+    if (upstream.headers['content-range']) res.setHeader('Content-Range', upstream.headers['content-range']);
     res.status(upstream.status);   // 200 or 206
     upstream.data.pipe(res);
     upstream.data.on('error', () => { if (!res.headersSent) res.status(502).end(); });
@@ -578,9 +579,9 @@ app.get('/api/icc/video/:videoId', async (req, res) => {
       {
         headers: {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-          'Referer':    'https://www.icc-cricket.com/',
-          'Origin':     'https://www.icc-cricket.com',
-          'Accept':     'application/json',
+          'Referer': 'https://www.icc-cricket.com/',
+          'Origin': 'https://www.icc-cricket.com',
+          'Accept': 'application/json',
         },
       }
     );
@@ -606,7 +607,7 @@ app.get('/api/icc/video/:videoId', async (req, res) => {
 const ICC_HDRS = {
   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
   'Referer': 'https://www.icc-cricket.com/',
-  'Origin':  'https://www.icc-cricket.com',
+  'Origin': 'https://www.icc-cricket.com',
 };
 const ICC_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const _iccBaseCache = new Map(); // videoId -> { base, exp }
@@ -897,22 +898,22 @@ app.get('/api/icc/highlights', async (req, res) => {
       }
       return;
     }
-  } catch {}
+  } catch { }
   // Fallback: seed only (table missing / empty)
   const slice = ICC_SEED.slice(offset, offset + limit);
   res.json({ success: true, videos: slice, total: ICC_SEED.length, hasMore: offset + slice.length < ICC_SEED.length });
 });
 
 // -------------------- Routes --------------------
-app.use("/api/bms",    bmsRouter);
-app.use('/api/auth',   authRouter);
-app.use('/api/user',   userRouter);
+app.use("/api/bms", bmsRouter);
+app.use('/api/auth', authRouter);
+app.use('/api/user', userRouter);
 app.use('/api/movies', movieRouter);
-app.use('/api',        popadsRoute);
-app.use('/api',        tmdbRouter);
+app.use('/api', popadsRoute);
+app.use('/api', tmdbRouter);
 // The music pages' only data source — a port of github.com/anxkhn/jiosaavn-api.
-app.use('/api/saavn',  saavnRouter);
-app.use('/api/radio',  radioRouter);
+app.use('/api/saavn', saavnRouter);
+app.use('/api/radio', radioRouter);
 app.use('/api/trending', trendingRouter);
 app.use('/api/bollyflix', bollyflixRouter);   // download sources for the download page
 app.use('/api/hdhub', hdhubRouter);           // more of them, wait pages skipped
@@ -931,29 +932,30 @@ app.use('/api/server-order', serverOrderRouter); // a title's server order, arra
 app.use('/api/site-domains', siteDomainRouter); // 1TamilMV / HDHub4u / India4Movies domains, changed by the admin
 app.use('/api/anchor-servers', anchorServerRouter); // AnchorHD player source order, changed by the admin
 app.use('/api/analytics', analyticsRouter);
+app.use('/api/qr-login', qrLoginRouter);       // scan to sign in: a signed-in phone approves a new browser
 app.use('/api/iptv', iptvRouter);                // open IPTV channels from the darkbyteprojects feed (no DRM)
 app.use('/api/tblasters', tblastersRouter);     // 1TamilBlasters: direct .mkv downloads + playable source      // our own visitor tracking, read on Admin → Analytics
 
 async function fetchBCCI(url) {
-    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
-    if (!r.ok) throw new Error(`BCCI status ${r.status}`);
-    const text = await r.text();
-    const jsonStr = text.replace(/^[a-zA-Z0-9_]+\s*\(/, '').replace(/\);?$/, '');
-    return JSON.parse(jsonStr);
+  const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+  if (!r.ok) throw new Error(`BCCI status ${r.status}`);
+  const text = await r.text();
+  const jsonStr = text.replace(/^[a-zA-Z0-9_]+\s*\(/, '').replace(/\);?$/, '');
+  return JSON.parse(jsonStr);
 }
 
 app.get('/api/bcci/match/:id/summary', async (req, res) => {
-    try {
-        const data = await fetchBCCI(`https://scores.bcci.tv/ipl/feeds/${req.params.id}-matchsummary.js`);
-        res.json(data);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const data = await fetchBCCI(`https://scores.bcci.tv/ipl/feeds/${req.params.id}-matchsummary.js`);
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 app.get('/api/bcci/match/:id/squad', async (req, res) => {
-    try {
-        const data = await fetchBCCI(`https://scores.bcci.tv/ipl/feeds/${req.params.id}-squads.js`);
-        res.json(data);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+  try {
+    const data = await fetchBCCI(`https://scores.bcci.tv/ipl/feeds/${req.params.id}-squads.js`);
+    res.json(data);
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // -------------------- Stream URL (Signed) --------------------
@@ -983,10 +985,10 @@ app.get("/api/bms", async (req, res) => {
 
     if (error || !data) return res.status(404).json({ success: false, message: "Movie not found in DB" });
 
-    const browser = await puppeteer.launch({ 
-      headless: true, 
+    const browser = await puppeteer.launch({
+      headless: true,
       executablePath: findChromeExecutable() || undefined,   // same reason as the ICC harvester
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process'] 
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--single-process']
     });
     const page = await browser.newPage();
     await page.goto(`https://in.bookmyshow.com/bengaluru/movies?q=${encodeURIComponent(data.title)}`, { waitUntil: "networkidle2" });
@@ -995,11 +997,11 @@ app.get("/api/bms", async (req, res) => {
       const card = document.querySelector("a[data-testid='card']");
       if (!card) return null;
       return {
-        title:       card.querySelector("[data-testid='movie-name']")?.innerText    || "N/A",
-        language:    card.querySelector("[data-testid='movie-language']")?.innerText || "N/A",
-        releaseDate: card.querySelector("[data-testid='release-date']")?.innerText  || "N/A",
-        rating:      card.querySelector("[data-testid='rating']")?.innerText        || "N/A",
-        poster:      card.querySelector("img")?.src || null,
+        title: card.querySelector("[data-testid='movie-name']")?.innerText || "N/A",
+        language: card.querySelector("[data-testid='movie-language']")?.innerText || "N/A",
+        releaseDate: card.querySelector("[data-testid='release-date']")?.innerText || "N/A",
+        rating: card.querySelector("[data-testid='rating']")?.innerText || "N/A",
+        poster: card.querySelector("img")?.src || null,
       };
     });
 
@@ -1020,24 +1022,24 @@ const IPL_BASE = "https://scores.iplt20.com/ipl/feeds";
 const IPL_LOGO_BASE = "https://scores.iplt20.com/ipl/teamlogos";
 const IPL_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-  "Referer":    "https://www.iplt20.com/",
-  "Origin":     "https://www.iplt20.com",
+  "Referer": "https://www.iplt20.com/",
+  "Origin": "https://www.iplt20.com",
 };
 
 const FIRST_MATCH_ID = 2485;
 
 const TEAM_CODE_MAP = {
-  "Chennai Super Kings":          "CSK",
-  "Mumbai Indians":               "MI",
-  "Royal Challengers Bengaluru":  "RCB",
-  "Royal Challengers Bangalore":  "RCB",
-  "Kolkata Knight Riders":        "KKR",
-  "Delhi Capitals":               "DC",
-  "Punjab Kings":                 "PBKS",
-  "Rajasthan Royals":             "RR",
-  "Sunrisers Hyderabad":          "SRH",
-  "Gujarat Titans":               "GT",
-  "Lucknow Super Giants":         "LSG",
+  "Chennai Super Kings": "CSK",
+  "Mumbai Indians": "MI",
+  "Royal Challengers Bengaluru": "RCB",
+  "Royal Challengers Bangalore": "RCB",
+  "Kolkata Knight Riders": "KKR",
+  "Delhi Capitals": "DC",
+  "Punjab Kings": "PBKS",
+  "Rajasthan Royals": "RR",
+  "Sunrisers Hyderabad": "SRH",
+  "Gujarat Titans": "GT",
+  "Lucknow Super Giants": "LSG",
 };
 
 function toTeamCode(name = "") {
@@ -1110,7 +1112,7 @@ app.get("/api/match/:id", async (req, res) => {
     if (Array.isArray(ms)) ms = ms[0] || {};
     const curInn = String(ms.CurrentInnings || "1");
     let innings = null;
-    try { innings = await fetchIPL(`${req.params.id}-Innings${curInn}.js`); } catch (_) {}
+    try { innings = await fetchIPL(`${req.params.id}-Innings${curInn}.js`); } catch (_) { }
     res.json({ ok: true, data: { summary, innings, currentInnings: curInn } });
   } catch (e) {
     console.error(`❌ IPL match error [${req.params.id}]:`, e.message);
@@ -1125,28 +1127,28 @@ app.get("/api/match/:id", async (req, res) => {
 // Confirmed by user: 2008 → 1000–1058, 2026 → 2417–2538
 // For other years the S3 JSON feed (ipl-{year}-matches.json) is tried first.
 const IPL_SEASON_CONFIG = {
-  2008: { first: 1000,  last: 1058  },
-  2009: { first: 1059,  last: 1122  },
-  2010: { first: 1123,  last: 1186  },
-  2011: { first: 1187,  last: 1250  },
-  2012: { first: 1251,  last: 1320  },
-  2013: { first: 1321,  last: 1390  },
-  2014: { first: 1391,  last: 1455  },
-  2015: { first: 1456,  last: 1515  },
-  2016: { first: 1516,  last: 1590  },
-  2017: { first: 1591,  last: 1655  },
-  2018: { first: 1656,  last: 1720  },
-  2019: { first: 1721,  last: 1790  },
-  2020: { first: 1791,  last: 1856  },
-  2021: { first: 1857,  last: 1930  },
-  2022: { first: 1931,  last: 2020  },
-  2023: { first: 2021,  last: 2110  },
-  2024: { first: 2111,  last: 2220  },
-  2025: { first: 2221,  last: 2416  },
-  2026: { first: 2417,  last: 2538  },
+  2008: { first: 1000, last: 1058 },
+  2009: { first: 1059, last: 1122 },
+  2010: { first: 1123, last: 1186 },
+  2011: { first: 1187, last: 1250 },
+  2012: { first: 1251, last: 1320 },
+  2013: { first: 1321, last: 1390 },
+  2014: { first: 1391, last: 1455 },
+  2015: { first: 1456, last: 1515 },
+  2016: { first: 1516, last: 1590 },
+  2017: { first: 1591, last: 1655 },
+  2018: { first: 1656, last: 1720 },
+  2019: { first: 1721, last: 1790 },
+  2020: { first: 1791, last: 1856 },
+  2021: { first: 1857, last: 1930 },
+  2022: { first: 1931, last: 2020 },
+  2023: { first: 2021, last: 2110 },
+  2024: { first: 2111, last: 2220 },
+  2025: { first: 2221, last: 2416 },
+  2026: { first: 2417, last: 2538 },
 };
 const IPL_2026_FIRST_SM_MATCH_ID = IPL_SEASON_CONFIG[2026].first;
-const IPL_2026_LAST_SM_MATCH_ID  = IPL_SEASON_CONFIG[2026].last;
+const IPL_2026_LAST_SM_MATCH_ID = IPL_SEASON_CONFIG[2026].last;
 
 app.get("/api/ipl/schedule", async (req, res) => {
   const targetDate = req.query.date || todayIST();
@@ -1185,11 +1187,11 @@ app.get("/api/ipl/schedule", async (req, res) => {
           team1: team1Code, team2: team2Code,
           team1Logo: `${IPL_LOGO_BASE}/${team1Code}.png`,
           team2Logo: `${IPL_LOGO_BASE}/${team2Code}.png`,
-          time:   startTime ? toISTTimeStr(startTime) : (m.MatchTime || "19:30"),
-          venue:  m.VenueName || m.Venue || m.GroundName || "",
+          time: startTime ? toISTTimeStr(startTime) : (m.MatchTime || "19:30"),
+          venue: m.VenueName || m.Venue || m.GroundName || "",
           status,
-          score1: m.HomeScore  || m.Team1Score  || "",
-          score2: m.AwayScore  || m.Team2Score  || "",
+          score1: m.HomeScore || m.Team1Score || "",
+          score2: m.AwayScore || m.Team2Score || "",
           result: m.MatchResult || m.WinningTeam || "",
         };
       });
@@ -1199,9 +1201,9 @@ app.get("/api/ipl/schedule", async (req, res) => {
   } catch (err) {
     console.error("❌ IPL Schedule error:", err.message);
     const seasonStart = new Date("2025-03-22T00:00:00+05:30");
-    const target      = new Date(`${targetDate}T00:00:00+05:30`);
-    const dayOffset   = Math.max(0, Math.floor((target - seasonStart) / 86400000));
-    const fallbackId  = FIRST_MATCH_ID + dayOffset;
+    const target = new Date(`${targetDate}T00:00:00+05:30`);
+    const dayOffset = Math.max(0, Math.floor((target - seasonStart) / 86400000));
+    const fallbackId = FIRST_MATCH_ID + dayOffset;
     return res.json({
       ok: true,
       data: [{ matchId: fallbackId, matchNum: dayOffset + 1, team1: "TBD", team2: "TBD", team1Logo: "", team2Logo: "", time: "19:30", venue: "", status: "upcoming", score1: "", score2: "", result: "" }],
@@ -1221,17 +1223,17 @@ function _parseIplMatchRow(m) {
   const now = new Date();
   const smMatchId = m.MatchID;
   // RowNo and MatchRow both exist in some feeds
-  const matchNum  = parseInt(m.RowNo || m.MatchRow || "0", 10);
+  const matchNum = parseInt(m.RowNo || m.MatchRow || "0", 10);
   // Cast broadly — individual files use "Post", schedule uses "2", flags use "1"
-  const isDone    = m.MatchStatus === "Post" ||
-                    String(m.MatchStatus) === "2" ||
-                    String(m.MatchStatus) === "3" ||
-                    String(m.IsMatchComplete) === "1" ||
-                    m.MatchStatus === "complete" ||
-                    // If result/winner text is set the match is obviously over
-                    !!(m.Comments || m.Commentss || m.WinningTeamID) ||
-                    // CurrentInnings "2" and 2FallScore set means innings 2 is done
-                    (String(m.CurrentInnings) === "2" && !!m["2FallScore"] && !!m["2FallWickets"]);
+  const isDone = m.MatchStatus === "Post" ||
+    String(m.MatchStatus) === "2" ||
+    String(m.MatchStatus) === "3" ||
+    String(m.IsMatchComplete) === "1" ||
+    m.MatchStatus === "complete" ||
+    // If result/winner text is set the match is obviously over
+    !!(m.Comments || m.Commentss || m.WinningTeamID) ||
+    // CurrentInnings "2" and 2FallScore set means innings 2 is done
+    (String(m.CurrentInnings) === "2" && !!m["2FallScore"] && !!m["2FallWickets"]);
   const startTime = parseISTDateTime(
     m.MatchDateNew || m.MatchDate || "",
     m.MatchTime || "19:30"
@@ -1239,18 +1241,18 @@ function _parseIplMatchRow(m) {
   const isLive = !isDone && !!startTime && now >= startTime;
   return {
     matchNum, smMatchId,
-    team1:     toTeamCode(m.HomeTeamName || m.Team1 || ""),
-    team2:     toTeamCode(m.AwayTeamName || m.Team2 || ""),
-    team1Logo: m.MatchHomeTeamLogo || m.HomeTeamLogo || `${IPL_LOGO_BASE}/${toTeamCode(m.HomeTeamName||m.Team1||"?")}.png`,
-    team2Logo: m.MatchAwayTeamLogo || m.AwayTeamLogo || `${IPL_LOGO_BASE}/${toTeamCode(m.AwayTeamName||m.Team2||"?")}.png`,
+    team1: toTeamCode(m.HomeTeamName || m.Team1 || ""),
+    team2: toTeamCode(m.AwayTeamName || m.Team2 || ""),
+    team1Logo: m.MatchHomeTeamLogo || m.HomeTeamLogo || `${IPL_LOGO_BASE}/${toTeamCode(m.HomeTeamName || m.Team1 || "?")}.png`,
+    team2Logo: m.MatchAwayTeamLogo || m.AwayTeamLogo || `${IPL_LOGO_BASE}/${toTeamCode(m.AwayTeamName || m.Team2 || "?")}.png`,
     matchDate: m.MatchDateNew || m.MatchDate || "",
-    time:      startTime ? toISTTimeStr(startTime) : (m.MatchTime || "19:30"),
-    venue:     m.GroundName || m.city || "",
-    score1:    m["1FallScore"] ? `${m["1FallScore"]}/${m["1FallWickets"]} (${m["1FallOvers"]} ov)` : m.FirstBattingSummary || m["1Summary"] || "",
-    score2:    m["2FallScore"] ? `${m["2FallScore"]}/${m["2FallWickets"]} (${m["2FallOvers"]} ov)` : m.SecondBattingSummary || m["2Summary"] || "",
-    result:    m.Comments || m.Commentss || "",
+    time: startTime ? toISTTimeStr(startTime) : (m.MatchTime || "19:30"),
+    venue: m.GroundName || m.city || "",
+    score1: m["1FallScore"] ? `${m["1FallScore"]}/${m["1FallWickets"]} (${m["1FallOvers"]} ov)` : m.FirstBattingSummary || m["1Summary"] || "",
+    score2: m["2FallScore"] ? `${m["2FallScore"]}/${m["2FallWickets"]} (${m["2FallOvers"]} ov)` : m.SecondBattingSummary || m["2Summary"] || "",
+    result: m.Comments || m.Commentss || "",
     matchLabel: String(m.MatchOrder || ""),
-    status:    isDone ? "completed" : isLive ? "live" : "upcoming",
+    status: isDone ? "completed" : isLive ? "live" : "upcoming",
   };
 }
 
@@ -1265,7 +1267,7 @@ app.get("/api/ipl/:year/all-matches", async (req, res) => {
     return res.status(404).json({ ok: false, error: `IPL ${year} not supported` });
   }
   const cacheKey = `ipl_season_${year}`;
-  const cached   = app._iplSeasonCache[cacheKey];
+  const cached = app._iplSeasonCache[cacheKey];
   if (cached && Date.now() - cached.ts < 600000) return res.json(cached.data);
 
   const yearStr = String(year);
@@ -1284,8 +1286,8 @@ app.get("/api/ipl/:year/all-matches", async (req, res) => {
   try {
     const r = await fetch(s3Url, { headers: IPL_HEADERS, signal: AbortSignal.timeout(8000) });
     if (r.ok) {
-      const raw  = await r.json();
-      const arr  = raw?.Matchsummary || raw?.MatchSummary || raw?.matches || [];
+      const raw = await r.json();
+      const arr = raw?.Matchsummary || raw?.MatchSummary || raw?.matches || [];
       if (Array.isArray(arr) && arr.length) {
         const matches = arr.map(_parseIplMatchRow).filter(m => m.matchNum > 0);
         const payload = { ok: true, matches, source: `s3:${year}` };
@@ -1294,7 +1296,7 @@ app.get("/api/ipl/:year/all-matches", async (req, res) => {
         return res.json(payload);
       }
     }
-  } catch (_) {}
+  } catch (_) { }
 
   // ── Strategy 2: MatchSchedule.js / Matchsummary.js JSONP (current-season feeds)
   for (const file of ["MatchSchedule.js", "Matchsummary.js"]) {
@@ -1313,7 +1315,7 @@ app.get("/api/ipl/:year/all-matches", async (req, res) => {
           return res.json(payload);
         }
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   // ── Strategy 3: Parallel individual match ID scan using known ranges
@@ -1326,7 +1328,7 @@ app.get("/api/ipl/:year/all-matches", async (req, res) => {
     results.forEach(r => {
       if (r.status !== "fulfilled") return;
       const ms = r.value?.MatchSummary || r.value?.Matchsummary;
-      const m  = Array.isArray(ms) ? ms[0] : ms;
+      const m = Array.isArray(ms) ? ms[0] : ms;
       if (!m || !m.MatchID) return;
       // For confirmed ranges (2008, 2026) all IDs should be IPL; for others trust CompetitionName
       if (year !== 2008 && year !== 2026 && !matchBelongsToYear(m)) return;
@@ -1348,14 +1350,14 @@ app.get("/api/ipl/:year/all-matches", async (req, res) => {
 // Real API: https://apiipl.iplt20.com/api/v1/pages/getcontentbymatchid
 // Returns: thumbnail_image, mediaId, short_code, titleUrlSegment
 // =====================================
-const BC_ACCOUNT_ID    = "3588749423001";
+const BC_ACCOUNT_ID = "3588749423001";
 // Real policy key, read from the account's own Brightcove player bundle
 // (players.brightcove.net/<account>/default_default/index.min.js). The previous
 // value was a placeholder: every Playback API call came back 401
 // INVALID_POLICY_KEY, so /api/ipl/stream always fell through to "Stream not found".
-const BC_POLICY_KEY    = "BCpkADawqM1HAZVeYx6iS1Oqr12hCyvC8IGQSuDaTfRbJK_pYnfZoexbte9KOmx0moKY-9kcDMp-YPmJaBTdmZi_SYqnWJs-qANYeAOvpjncLe86hNPaG5XEdSCTTFk-ktvWxZhbK4Yel9UX";
+const BC_POLICY_KEY = "BCpkADawqM1HAZVeYx6iS1Oqr12hCyvC8IGQSuDaTfRbJK_pYnfZoexbte9KOmx0moKY-9kcDMp-YPmJaBTdmZi_SYqnWJs-qANYeAOvpjncLe86hNPaG5XEdSCTTFk-ktvWxZhbK4Yel9UX";
 const BC_PLAYBACK_BASE = `https://edge.api.brightcove.com/playback/v1/accounts/${BC_ACCOUNT_ID}`;
-const IPL_API_BASE     = "https://apiipl.iplt20.com/api/v1/pages";
+const IPL_API_BASE = "https://apiipl.iplt20.com/api/v1/pages";
 
 function smMatchIdToMatchNum(smMatchId) {
   return parseInt(smMatchId, 10) - IPL_2026_FIRST_SM_MATCH_ID + 1;
@@ -1369,10 +1371,10 @@ app.get("/api/ipl/highlight-videos", async (req, res) => {
     const url = `${IPL_API_BASE}/getcontentbymatchid?smMatchId=${smMatchId}&type=video`;
     const r = await fetch(url, {
       headers: {
-        "User-Agent":  IPL_HEADERS["User-Agent"],
-        "Referer":     "https://www.iplt20.com/",
-        "Origin":      "https://www.iplt20.com",
-        "Accept":      "application/json",
+        "User-Agent": IPL_HEADERS["User-Agent"],
+        "Referer": "https://www.iplt20.com/",
+        "Origin": "https://www.iplt20.com",
+        "Accept": "application/json",
       },
       signal: AbortSignal.timeout(10000),
     });
@@ -1382,13 +1384,13 @@ app.get("/api/ipl/highlight-videos", async (req, res) => {
     if (!Array.isArray(raw) || !raw.length) return res.json({ ok: true, videos: [] });
 
     const videos = raw.map(v => ({
-      id:              String(v.id || v.ID || ""),
-      title:           v.title || "Untitled",
-      thumbnail:       v.thumbnail_image || v.imageBackup || v.imageUrl || null,
-      duration:        v.duration || 0,
-      views:           v.views_count || v.views || 0,
-      mediaId:         String(v.mediaId || ""),          // Brightcove video ID → direct stream
-      shortCode:       v.short_code || null,             // fallback ref: lookup
+      id: String(v.id || v.ID || ""),
+      title: v.title || "Untitled",
+      thumbnail: v.thumbnail_image || v.imageBackup || v.imageUrl || null,
+      duration: v.duration || 0,
+      views: v.views_count || v.views || 0,
+      mediaId: String(v.mediaId || ""),          // Brightcove video ID → direct stream
+      shortCode: v.short_code || null,             // fallback ref: lookup
       titleUrlSegment: v.titleUrlSegment || null,
     }));
 
@@ -1408,7 +1410,7 @@ app.get("/api/ipl/highlight-videos", async (req, res) => {
 // an https page, so picking the http one gets blocked as mixed content.
 function pickBrightcoveM3u8(sources = []) {
   const srcs = sources.map(s => s?.src).filter(Boolean);
-  const masters    = srcs.filter(s => s.includes("master.m3u8") && !s.includes("rendition"));
+  const masters = srcs.filter(s => s.includes("master.m3u8") && !s.includes("rendition"));
   const renditions = srcs.filter(s => s.includes("rendition.m3u8"));
   for (const group of [masters, renditions]) {
     if (!group.length) continue;
@@ -1434,7 +1436,7 @@ app.get("/api/ipl/stream", async (req, res) => {
         const m3u8 = pickBrightcoveM3u8(data.sources);
         if (m3u8) return res.json({ ok: true, url: m3u8, source: "bc:mediaId" });
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   // Fall back to ref:{shortCode}
@@ -1450,7 +1452,7 @@ app.get("/api/ipl/stream", async (req, res) => {
         const m3u8 = pickBrightcoveM3u8(data.sources);
         if (m3u8) return res.json({ ok: true, url: m3u8, source: "bc:shortCode" });
       }
-    } catch (_) {}
+    } catch (_) { }
   }
 
   return res.status(502).json({ ok: false, error: "Stream not found" });
@@ -1575,10 +1577,10 @@ app.get("/api/match/:id/full", async (req, res) => {
 // =====================================
 const WT20_CLIENT_ID = "tPZJbRgIub3Vua93/DWtyQ==";
 const WT20_HEADERS = {
-  "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-  "Accept":          "application/json, text/plain, */*",
-  "Referer":         "https://www.icc-cricket.com/",
-  "Origin":          "https://www.icc-cricket.com",
+  "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
+  "Accept": "application/json, text/plain, */*",
+  "Referer": "https://www.icc-cricket.com/",
+  "Origin": "https://www.icc-cricket.com",
   "Accept-Language": "en-US,en;q=0.9",
 };
 
@@ -1643,7 +1645,7 @@ app.get("/api/movie-stream", (req, res) => {
   const secret = process.env.SIGNING_SECRET || "";
   if (!base || !secret) return res.status(500).json({ success: false, error: "streaming not configured" });
   // accept a bare slug, a full path, or a full URL — normalise to movies/<slug>/master.m3u8
-  if (/^https?:\/\//i.test(p)) { try { p = new URL(p).pathname.replace(/^\/+/, ""); } catch {} }
+  if (/^https?:\/\//i.test(p)) { try { p = new URL(p).pathname.replace(/^\/+/, ""); } catch { } }
   if (!p.includes("/")) p = `movies/${p}/master.m3u8`;
   else if (!p.endsWith(".m3u8")) p = `${p.replace(/\/+$/, "")}/master.m3u8`;
   // "b2/movies/<slug>/..." routes to Backblaze on the Worker, but the token is
@@ -1767,7 +1769,7 @@ app.get("/api/download-link", (req, res) => {
   if (!base || !secret) return res.status(500).json({ success: false, error: "downloads not configured" });
 
   // A full URL is accepted too, so a stored link can be re-signed as it stands.
-  if (/^https?:\/\//i.test(p)) { try { p = new URL(p).pathname.replace(/^\/+/, ""); } catch {} }
+  if (/^https?:\/\//i.test(p)) { try { p = new URL(p).pathname.replace(/^\/+/, ""); } catch { } }
   if (!p || p.includes("..") || !p.includes("/")) {
     return res.status(400).json({ success: false, error: "path must look like <prefix>/<slug>/<file>" });
   }
@@ -1783,9 +1785,9 @@ app.get("/api/download-link", (req, res) => {
 
 const BCCI_HEADERS = {
   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36",
-  "Accept":     "application/json, text/plain, */*",
-  "Referer":    "https://www.bcci.tv/",
-  "Origin":     "https://www.bcci.tv",
+  "Accept": "application/json, text/plain, */*",
+  "Referer": "https://www.bcci.tv/",
+  "Origin": "https://www.bcci.tv",
 };
 
 // ─────────────────────────────────────────────────────────────────────
@@ -1821,7 +1823,7 @@ const BCCI_HEADERS = {
    scroll — so one request returns the whole server-rendered set and this
    paginates over that locally, keeping the route's existing contract. */
 const BCCI_HL_URL = "https://www.bcci.tv/videos?tags=men";
-const BCCI_HL_UA  = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
+const BCCI_HL_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36";
 
 function bcciParseHighlightCards(html) {
   const out = [];
@@ -1848,17 +1850,17 @@ function bcciParseHighlightCards(html) {
 
     seen.add(href);
     out.push({
-      id:        img[2],                                    // StayLive asset id
+      id: img[2],                                    // StayLive asset id
       title,
-      image:     img[1].split("?")[0],       // drop the resize query
+      image: img[1].split("?")[0],       // drop the resize query
       // The page, not a media file: playback is resolved on click through the
       // stream extractor, the same way the hero opens a highlight.
       video_url: `https://www.bcci.tv${href}`,
-      share:     `https://www.bcci.tv${href}`,
-      slug:      href.replace("/videos/", ""),
-      date:      "",
-      duration:  "",
-      views:     "",
+      share: `https://www.bcci.tv${href}`,
+      slug: href.replace("/videos/", ""),
+      date: "",
+      duration: "",
+      views: "",
     });
   }
   return out;
@@ -1922,7 +1924,7 @@ async function bcciUpsertHighlights(items, baseSort) {
    worth assuming will happen again. */
 app.get("/api/bcci/highlights", async (req, res) => {
   const page = Math.max(parseInt(req.query.page) || 1, 1);
-  const PER  = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 50);
+  const PER = Math.min(Math.max(parseInt(req.query.limit) || 20, 1), 50);
   const from = (page - 1) * PER;
 
   /* Top up the stored catalogue with anything new BCCI has published, then
@@ -2302,7 +2304,7 @@ app.get("/api/bcci/matchsummary", async (req, res) => {
 // 🖼️ IMAGE SEARCH (Tavily + Gemini)
 // =====================================
 const STATIC_EMERGENCY_FALLBACKS = {
-  cricket:  ["https://images.unsplash.com/photo-1531415074968-036ba1b575da?q=80&w=1200&auto=format&fit=crop"],
+  cricket: ["https://images.unsplash.com/photo-1531415074968-036ba1b575da?q=80&w=1200&auto=format&fit=crop"],
   football: ["https://images.unsplash.com/photo-1508098682722-e99c43a406b2?q=80&w=1200&auto=format&fit=crop"],
 };
 
@@ -2353,7 +2355,7 @@ app.get('/api/search-image', async (req, res) => {
   try {
     const rawQuery = req.query.q;
     if (!rawQuery) return res.status(400).json({ error: "Missing query" });
-    const decoded   = decodeURIComponent(rawQuery).trim();
+    const decoded = decodeURIComponent(rawQuery).trim();
     const sportType = detectSport(decoded);
     const optimizedQuery = await optimizeQueryWithGemini(decoded);
     const images = await searchViaTavily(optimizedQuery);
@@ -2381,7 +2383,7 @@ app.post("/api/icc/play", async (req, res) => {
       return res.status(400).json({ success: false, error: "VideoId and VideoSource are required" });
     }
 
-    const sessionId         = crypto.randomUUID();
+    const sessionId = crypto.randomUUID();
     const playbackSessionId = crypto.randomUUID().toUpperCase();
 
     console.log('[ICC] Requesting entitlement — VideoId:', VideoId);
@@ -2414,7 +2416,7 @@ app.post("/api/icc/play", async (req, res) => {
       {
         headers: {
           "Content-Type": "application/json",
-          "Origin":  "https://www.icc-cricket.com",
+          "Origin": "https://www.icc-cricket.com",
           "Referer": "https://www.icc-cricket.com/",
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36",
           "Accept": "*/*",
@@ -2525,24 +2527,24 @@ app.get("/api/bcci/highlight", async (req, res) => {
 // NOTE: only returns a stream if this backend egresses from a residential Indian IP;
 // from a datacenter MX blanks the stream and this responds success:false.
 app.get('/api/mx/resolve', (req, res) => {
-    const webUrl = req.query.url || '';
-    if (!/^https?:\/\/(www\.)?mxplayer\.in\//.test(webUrl)) {
-        return res.status(400).json({ success: false, error: 'Missing/invalid MX ?url=' });
+  const webUrl = req.query.url || '';
+  if (!/^https?:\/\/(www\.)?mxplayer\.in\//.test(webUrl)) {
+    return res.status(400).json({ success: false, error: 'Missing/invalid MX ?url=' });
+  }
+  console.log(`🎬 MX resolve requested for: ${webUrl}`);
+  const pythonProcess = spawn('python3', ['./scrapers/index.py', '--mx', webUrl]);
+  let output = '', errorOutput = '';
+  pythonProcess.stdout.on('data', (d) => { output += d.toString(); });
+  pythonProcess.stderr.on('data', (d) => { errorOutput += d.toString(); });
+  pythonProcess.on('close', (code) => {
+    try {
+      const data = JSON.parse(output.trim());
+      return res.json(data);
+    } catch (e) {
+      console.error(`❌ MX resolve failed (code ${code}). Stderr: ${errorOutput.slice(0, 300)}`);
+      return res.status(502).json({ success: false, error: 'MX resolve failed', details: errorOutput.slice(0, 300) });
     }
-    console.log(`🎬 MX resolve requested for: ${webUrl}`);
-    const pythonProcess = spawn('python3', ['./scrapers/index.py', '--mx', webUrl]);
-    let output = '', errorOutput = '';
-    pythonProcess.stdout.on('data', (d) => { output += d.toString(); });
-    pythonProcess.stderr.on('data', (d) => { errorOutput += d.toString(); });
-    pythonProcess.on('close', (code) => {
-        try {
-            const data = JSON.parse(output.trim());
-            return res.json(data);
-        } catch (e) {
-            console.error(`❌ MX resolve failed (code ${code}). Stderr: ${errorOutput.slice(0, 300)}`);
-            return res.status(502).json({ success: false, error: 'MX resolve failed', details: errorOutput.slice(0, 300) });
-        }
-    });
+  });
 });
 
 // ── MX Player detail/episodes (residential fetch; returns empty from datacenter) ──
@@ -3192,23 +3194,23 @@ app.get('/api/mx/shelf', async (req, res) => {
 // song reopened, same artist across tracks, many users) into zero-cost hits.
 // =====================================
 const ytCache = new Map(); // key -> { value, expires }
-const YT_TTL_HIT   = 7 * 24 * 60 * 60 * 1000; // 7 days for real results
+const YT_TTL_HIT = 7 * 24 * 60 * 60 * 1000; // 7 days for real results
 const YT_TTL_EMPTY = 60 * 60 * 1000;          // 1 hour for "no match"
 const YT_CACHE_MAX = 5000;
 
 function ytCacheGet(key) {
-    const e = ytCache.get(key);
-    if (!e) return undefined;
-    if (Date.now() > e.expires) { ytCache.delete(key); return undefined; }
-    ytCache.delete(key); ytCache.set(key, e); // refresh LRU recency
-    return e.value;
+  const e = ytCache.get(key);
+  if (!e) return undefined;
+  if (Date.now() > e.expires) { ytCache.delete(key); return undefined; }
+  ytCache.delete(key); ytCache.set(key, e); // refresh LRU recency
+  return e.value;
 }
 function ytCacheSet(key, value, ttl) {
-    if (ytCache.size >= YT_CACHE_MAX) {
-        const oldest = ytCache.keys().next().value;
-        if (oldest !== undefined) ytCache.delete(oldest);
-    }
-    ytCache.set(key, { value, expires: Date.now() + ttl });
+  if (ytCache.size >= YT_CACHE_MAX) {
+    const oldest = ytCache.keys().next().value;
+    if (oldest !== undefined) ytCache.delete(oldest);
+  }
+  ytCache.set(key, { value, expires: Date.now() + ttl });
 }
 
 
@@ -3217,86 +3219,86 @@ function ytCacheSet(key, value, ttl) {
 // Returns { videoId, startSeconds, ytTitle } for the MiniYouTubePlayer
 // =====================================
 app.get('/api/songs/youtube-preview', async (req, res) => {
-    const q = (req.query.q || '').trim();
-    if (!q) return res.status(400).json({ error: 'Missing q parameter' });
+  const q = (req.query.q || '').trim();
+  if (!q) return res.status(400).json({ error: 'Missing q parameter' });
 
-    // Serve from cache when possible — no quota spent.
-    const cacheKey = `preview:${q.toLowerCase()}`;
-    const cached = ytCacheGet(cacheKey);
-    if (cached !== undefined) return res.json(cached);
+  // Serve from cache when possible — no quota spent.
+  const cacheKey = `preview:${q.toLowerCase()}`;
+  const cached = ytCacheGet(cacheKey);
+  if (cached !== undefined) return res.json(cached);
 
-    const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
-    if (!YOUTUBE_API_KEY) {
-        console.error('❌ YOUTUBE_API_KEY not set in environment');
-        return res.status(503).json({ error: 'YouTube API not configured' });
+  const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY;
+  if (!YOUTUBE_API_KEY) {
+    console.error('❌ YOUTUBE_API_KEY not set in environment');
+    return res.status(503).json({ error: 'YouTube API not configured' });
+  }
+
+  try {
+    // Bias the query toward the official upload and fetch enough
+    // candidates to score them properly.
+    const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoCategoryId=10&maxResults=10&q=${encodeURIComponent(q + ' official video')}&key=${YOUTUBE_API_KEY}`;
+    const ytRes = await fetch(searchUrl);
+    if (!ytRes.ok) {
+      const errText = await ytRes.text();
+      console.error(`❌ YouTube API error ${ytRes.status}: ${errText}`);
+      // Degrade gracefully (no background video) and DON'T cache a quota
+      // error, so it recovers automatically once the quota resets.
+      return res.json({ videoId: null });
+    }
+    const data = await ytRes.json();
+    const items = (data.items || []).filter(i => i.id?.videoId && i.snippet?.title);
+    if (!items.length) {
+      const empty = { videoId: null };
+      ytCacheSet(cacheKey, empty, YT_TTL_EMPTY);
+      return res.json(empty);
     }
 
-    try {
-        // Bias the query toward the official upload and fetch enough
-        // candidates to score them properly.
-        const searchUrl = `https://www.googleapis.com/youtube/v3/search?part=snippet&type=video&videoCategoryId=10&maxResults=10&q=${encodeURIComponent(q + ' official video')}&key=${YOUTUBE_API_KEY}`;
-        const ytRes = await fetch(searchUrl);
-        if (!ytRes.ok) {
-            const errText = await ytRes.text();
-            console.error(`❌ YouTube API error ${ytRes.status}: ${errText}`);
-            // Degrade gracefully (no background video) and DON'T cache a quota
-            // error, so it recovers automatically once the quota resets.
-            return res.json({ videoId: null });
-        }
-        const data = await ytRes.json();
-        const items = (data.items || []).filter(i => i.id?.videoId && i.snippet?.title);
-        if (!items.length) {
-            const empty = { videoId: null };
-            ytCacheSet(cacheKey, empty, YT_TTL_EMPTY);
-            return res.json(empty);
-        }
+    // ── Score candidates so the real official music video wins ──
+    const qTokens = q.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+    const scoreItem = (item) => {
+      const title = (item.snippet.title || '').toLowerCase();
+      const channel = (item.snippet.channelTitle || '').toLowerCase();
+      let score = 0;
 
-        // ── Score candidates so the real official music video wins ──
-        const qTokens = q.toLowerCase().split(/\s+/).filter(w => w.length > 2);
-        const scoreItem = (item) => {
-            const title   = (item.snippet.title || '').toLowerCase();
-            const channel = (item.snippet.channelTitle || '').toLowerCase();
-            let score = 0;
+      // Strong signals of the official upload
+      if (/official\s*(music\s*)?video/.test(title)) score += 50;
+      else if (/\bofficial\b/.test(title)) score += 30;
+      if (/\b(full\s*video|video\s*song)\b/.test(title)) score += 15;
+      if (/\bofficial\b/.test(channel)
+        || /\b(records|music|series|films|audio)\b/.test(channel)) score += 10;
 
-            // Strong signals of the official upload
-            if (/official\s*(music\s*)?video/.test(title))      score += 50;
-            else if (/\bofficial\b/.test(title))                score += 30;
-            if (/\b(full\s*video|video\s*song)\b/.test(title))  score += 15;
-            if (/\bofficial\b/.test(channel)
-                || /\b(records|music|series|films|audio)\b/.test(channel)) score += 10;
+      // Auto-generated "Topic" channels are audio-only album art —
+      // a static image makes a poor background video.
+      if (channel.endsWith(' - topic')) score -= 25;
 
-            // Auto-generated "Topic" channels are audio-only album art —
-            // a static image makes a poor background video.
-            if (channel.endsWith(' - topic')) score -= 25;
+      // Fan uploads / derivatives are not the official video
+      if (/\b(cover|remix|slowed|reverb|8d|16d|live|concert|reaction|shorts|status|mashup|karaoke|instrumental|teaser|trailer|dance|choreo|tutorial|ringtone|whatsapp|bgm)\b/.test(title)) score -= 40;
+      // Lyric videos are acceptable but rank below the real video
+      if (/\b(lyrics?|lyrical)\b/.test(title)) score -= 10;
 
-            // Fan uploads / derivatives are not the official video
-            if (/\b(cover|remix|slowed|reverb|8d|16d|live|concert|reaction|shorts|status|mashup|karaoke|instrumental|teaser|trailer|dance|choreo|tutorial|ringtone|whatsapp|bgm)\b/.test(title)) score -= 40;
-            // Lyric videos are acceptable but rank below the real video
-            if (/\b(lyrics?|lyrical)\b/.test(title)) score -= 10;
+      // Reward overlap with the actual song title / artist tokens
+      qTokens.forEach(t => {
+        if (title.includes(t)) score += 4;
+        if (channel.includes(t)) score += 3;
+      });
+      return score;
+    };
 
-            // Reward overlap with the actual song title / artist tokens
-            qTokens.forEach(t => {
-                if (title.includes(t))   score += 4;
-                if (channel.includes(t)) score += 3;
-            });
-            return score;
-        };
+    const best = items
+      .map(i => [scoreItem(i), i])
+      .sort((a, b) => b[0] - a[0])[0][1];
 
-        const best = items
-            .map(i => [scoreItem(i), i])
-            .sort((a, b) => b[0] - a[0])[0][1];
-
-        const result = {
-            videoId:      best.id.videoId,
-            ytTitle:      best.snippet?.title || q,
-            startSeconds: 60,   // skip intro, land near first chorus
-        };
-        ytCacheSet(cacheKey, result, YT_TTL_HIT);
-        return res.json(result);
-    } catch (err) {
-        console.error('❌ YouTube preview fetch error:', err);
-        return res.status(500).json({ error: 'Internal error fetching YouTube preview' });
-    }
+    const result = {
+      videoId: best.id.videoId,
+      ytTitle: best.snippet?.title || q,
+      startSeconds: 60,   // skip intro, land near first chorus
+    };
+    ytCacheSet(cacheKey, result, YT_TTL_HIT);
+    return res.json(result);
+  } catch (err) {
+    console.error('❌ YouTube preview fetch error:', err);
+    return res.status(500).json({ error: 'Internal error fetching YouTube preview' });
+  }
 });
 
 
@@ -3307,45 +3309,45 @@ app.get('/api/songs/youtube-preview', async (req, res) => {
 // Pendujatt-style ids, which only resolved while that scraper existed.)
 // =====================================
 app.get('/api/songs/singer', async (req, res) => {
-    const singerName = (req.query.name || '').trim();
-    if (!singerName) return res.status(400).json({ songs: [], error: 'Missing name parameter' });
+  const singerName = (req.query.name || '').trim();
+  if (!singerName) return res.status(400).json({ songs: [], error: 'Missing name parameter' });
 
-    // The artist→songs mapping is stable, so reuse the existing result cache.
-    const cacheKey = `singer:${singerName.toLowerCase()}`;
-    const cached = ytCacheGet(cacheKey);
-    if (cached !== undefined) return res.json(cached);
+  // The artist→songs mapping is stable, so reuse the existing result cache.
+  const cacheKey = `singer:${singerName.toLowerCase()}`;
+  const cached = ytCacheGet(cacheKey);
+  if (cached !== undefined) return res.json(cached);
 
-    try {
-        // songdata=false: the autocomplete rows carry title, artwork and artists,
-        // which is everything a card shows — no per-song lookup needed.
-        const results = await searchSongs(singerName, { fullData: false });
-        // The same recording comes back once per pressing (the single, the
-        // album, a compilation), each with its own id, so deduping on id alone
-        // still leaves the card repeated three times. Key on the title instead.
-        const seen = new Set();
-        const songs = results.filter(s => {
-            const key = (s.song || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
-            if (!key || seen.has(key)) return false;
-            seen.add(key);
-            return true;
-        }).map(s => ({
-            id:     s.id,
-            title:  s.song,
-            poster: s.image,
-            // A single's album is its own title; repeating it on the card says
-            // nothing, so fall back to the artists.
-            label:  s.album && s.album !== s.song ? s.album : (s.primary_artists || singerName),
-            artist: s.primary_artists || s.singers || singerName,
-        }));
+  try {
+    // songdata=false: the autocomplete rows carry title, artwork and artists,
+    // which is everything a card shows — no per-song lookup needed.
+    const results = await searchSongs(singerName, { fullData: false });
+    // The same recording comes back once per pressing (the single, the
+    // album, a compilation), each with its own id, so deduping on id alone
+    // still leaves the card repeated three times. Key on the title instead.
+    const seen = new Set();
+    const songs = results.filter(s => {
+      const key = (s.song || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }).map(s => ({
+      id: s.id,
+      title: s.song,
+      poster: s.image,
+      // A single's album is its own title; repeating it on the card says
+      // nothing, so fall back to the artists.
+      label: s.album && s.album !== s.song ? s.album : (s.primary_artists || singerName),
+      artist: s.primary_artists || s.singers || singerName,
+    }));
 
-        console.log(`🎵 Singer recs for "${singerName}": ${songs.length} results`);
-        const result = { songs };
-        ytCacheSet(cacheKey, result, songs.length ? YT_TTL_HIT : YT_TTL_EMPTY);
-        return res.json(result);
-    } catch (err) {
-        console.error(`❌ Singer recommendations failed for "${singerName}": ${err.message}`);
-        return res.status(500).json({ songs: [], error: 'Internal error fetching recommendations' });
-    }
+    console.log(`🎵 Singer recs for "${singerName}": ${songs.length} results`);
+    const result = { songs };
+    ytCacheSet(cacheKey, result, songs.length ? YT_TTL_HIT : YT_TTL_EMPTY);
+    return res.json(result);
+  } catch (err) {
+    console.error(`❌ Singer recommendations failed for "${singerName}": ${err.message}`);
+    return res.status(500).json({ songs: [], error: 'Internal error fetching recommendations' });
+  }
 });
 
 
@@ -3363,16 +3365,16 @@ app.get('/api/songs/singer', async (req, res) => {
 // This file imports fetch from 'node-fetch', so every segment request was
 // dying in the catch and answering 502 — no audio or video ever loaded.
 function pipeBody(body, res) {
-    if (typeof body.pipe === 'function') return body.pipe(res);
-    return Readable.fromWeb(body).pipe(res);
+  if (typeof body.pipe === 'function') return body.pipe(res);
+  return Readable.fromWeb(body).pipe(res);
 }
 
 // saavncdn only serves a request that looks like it came from the JioSaavn site.
 const MUSIC_PROXY_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Referer': 'https://www.jiosaavn.com/',
-    'Origin':  'https://www.jiosaavn.com',
-    'Accept':  '*/*',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Referer': 'https://www.jiosaavn.com/',
+  'Origin': 'https://www.jiosaavn.com',
+  'Accept': '*/*',
 };
 
 // ?download=<name> turns a stream request into a save. The page normally
@@ -3382,42 +3384,42 @@ const MUSIC_PROXY_HEADERS = {
 // The name is rebuilt from scratch rather than trimmed — a header this ends up
 // in must not carry CR/LF or a quote from the query string.
 function attachmentName(raw) {
-    const cleaned = String(raw || '')
-        .normalize('NFKD')
-        .replace(/[^\w\s.()-]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .slice(0, 120);
-    return cleaned || 'track.m4a';
+  const cleaned = String(raw || '')
+    .normalize('NFKD')
+    .replace(/[^\w\s.()-]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+  return cleaned || 'track.m4a';
 }
 
 // Range-aware byte passthrough — used for segments and for whole audio files.
 async function proxyPassthrough(url, req, res) {
-    const headers = { ...MUSIC_PROXY_HEADERS };
-    if (req.headers.range) headers['Range'] = req.headers.range;
-    const r = await fetch(url, { headers });
+  const headers = { ...MUSIC_PROXY_HEADERS };
+  if (req.headers.range) headers['Range'] = req.headers.range;
+  const r = await fetch(url, { headers });
 
-    res.status(r.status);
-    res.set('Access-Control-Allow-Origin', '*');
-    if (req.query.download) {
-        res.set('Content-Disposition', `attachment; filename="${attachmentName(req.query.download)}"`);
-    }
-    for (const h of ['content-type', 'content-range', 'accept-ranges']) {
-        const v = r.headers.get(h);
-        if (v) res.set(h, v);
-    }
-    // fetch already decompressed the body, so upstream's Content-Length describes
-    // the *compressed* bytes. Forwarding it truncates the response at that many
-    // bytes — a gzipped page arrives cut off mid-way. Only pass it through when
-    // the body was not encoded (media files, which is where seeking needs it).
-    if (!r.headers.get('content-encoding')) {
-        const cl = r.headers.get('content-length');
-        if (cl) res.set('Content-Length', cl);
-    }
-    if (!r.headers.get('accept-ranges')) res.set('Accept-Ranges', 'bytes');
-    res.set('Cache-Control', 'no-store');
-    if (!r.body) return res.end();
-    return pipeBody(r.body, res);
+  res.status(r.status);
+  res.set('Access-Control-Allow-Origin', '*');
+  if (req.query.download) {
+    res.set('Content-Disposition', `attachment; filename="${attachmentName(req.query.download)}"`);
+  }
+  for (const h of ['content-type', 'content-range', 'accept-ranges']) {
+    const v = r.headers.get(h);
+    if (v) res.set(h, v);
+  }
+  // fetch already decompressed the body, so upstream's Content-Length describes
+  // the *compressed* bytes. Forwarding it truncates the response at that many
+  // bytes — a gzipped page arrives cut off mid-way. Only pass it through when
+  // the body was not encoded (media files, which is where seeking needs it).
+  if (!r.headers.get('content-encoding')) {
+    const cl = r.headers.get('content-length');
+    if (cl) res.set('Content-Length', cl);
+  }
+  if (!r.headers.get('accept-ranges')) res.set('Accept-Ranges', 'bytes');
+  res.set('Cache-Control', 'no-store');
+  if (!r.body) return res.end();
+  return pipeBody(r.body, res);
 }
 
 // Only allow proxying JioSaavn's own hosts — never an open relay. Exact host or
@@ -3425,73 +3427,73 @@ async function proxyPassthrough(url, req, res) {
 // like saavncdn.evil.com.
 const MUSIC_PROXY_HOSTS = ['jiosaavn.com', 'saavn.com', 'saavncdn.com'];
 function musicProxyAllowed(u) {
-    try {
-        const host = new URL(u).hostname.toLowerCase();
-        return MUSIC_PROXY_HOSTS.some(d => host === d || host.endsWith('.' + d));
-    } catch (_) {
-        return false;
-    }
+  try {
+    const host = new URL(u).hostname.toLowerCase();
+    return MUSIC_PROXY_HOSTS.some(d => host === d || host.endsWith('.' + d));
+  } catch (_) {
+    return false;
+  }
 }
 
 // Rewrite every child URI in an HLS manifest to route back through this proxy.
 // /api/gaana/* is the path this lived at while Gaana was a source; it stays as
 // an alias so stream URLs already cached in a browser keep playing.
 app.get(['/api/music/stream', '/api/gaana/hls'], async (req, res) => {
-    const url = req.query.url;
-    if (!url || !musicProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
-    try {
-        // The frontend routes every music stream through here, but a JioSaavn
-        // track is a plain audio file, not a manifest. Rewriting its bytes as
-        // playlist lines would corrupt it, so pass it through byte-for-byte with
-        // Range support (seeking needs it).
-        if (!/\.m3u8(\?|$)/i.test(url)) return await proxyPassthrough(url, req, res);
+  const url = req.query.url;
+  if (!url || !musicProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
+  try {
+    // The frontend routes every music stream through here, but a JioSaavn
+    // track is a plain audio file, not a manifest. Rewriting its bytes as
+    // playlist lines would corrupt it, so pass it through byte-for-byte with
+    // Range support (seeking needs it).
+    if (!/\.m3u8(\?|$)/i.test(url)) return await proxyPassthrough(url, req, res);
 
-        const r = await fetch(url, { headers: MUSIC_PROXY_HEADERS });
-        if (!r.ok) {
-            console.error(`❌ Music stream proxy upstream ${r.status} for ${url}`);
-            return res.status(r.status).send(`Upstream ${r.status}`);
-        }
-        const text = await r.text();
-        const base = new URL(url);
-
-        const rewritten = text.split('\n').map(line => {
-            const t = line.trim();
-            if (!t) return line;
-            if (t.startsWith('#')) {
-                // Rewrite URI="..." inside tags like EXT-X-KEY / EXT-X-MAP.
-                return line.replace(/URI="([^"]+)"/g, (_m, uri) => {
-                    const abs = new URL(uri, base).href;
-                    return `URI="/api/music/seg?url=${encodeURIComponent(abs)}"`;
-                });
-            }
-            // A media segment or a child playlist line.
-            const abs = new URL(t, base).href;
-            const isChildManifest = /\.m3u8(\?|$)/i.test(abs);
-            const proxyPath = isChildManifest ? '/api/music/stream' : '/api/music/seg';
-            return `${proxyPath}?url=${encodeURIComponent(abs)}`;
-        }).join('\n');
-
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Content-Type', 'application/vnd.apple.mpegurl');
-        res.set('Cache-Control', 'no-store');
-        return res.send(rewritten);
-    } catch (e) {
-        console.error('❌ Music stream proxy error:', e.message);
-        return res.status(502).send('Proxy error');
+    const r = await fetch(url, { headers: MUSIC_PROXY_HEADERS });
+    if (!r.ok) {
+      console.error(`❌ Music stream proxy upstream ${r.status} for ${url}`);
+      return res.status(r.status).send(`Upstream ${r.status}`);
     }
+    const text = await r.text();
+    const base = new URL(url);
+
+    const rewritten = text.split('\n').map(line => {
+      const t = line.trim();
+      if (!t) return line;
+      if (t.startsWith('#')) {
+        // Rewrite URI="..." inside tags like EXT-X-KEY / EXT-X-MAP.
+        return line.replace(/URI="([^"]+)"/g, (_m, uri) => {
+          const abs = new URL(uri, base).href;
+          return `URI="/api/music/seg?url=${encodeURIComponent(abs)}"`;
+        });
+      }
+      // A media segment or a child playlist line.
+      const abs = new URL(t, base).href;
+      const isChildManifest = /\.m3u8(\?|$)/i.test(abs);
+      const proxyPath = isChildManifest ? '/api/music/stream' : '/api/music/seg';
+      return `${proxyPath}?url=${encodeURIComponent(abs)}`;
+    }).join('\n');
+
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Content-Type', 'application/vnd.apple.mpegurl');
+    res.set('Cache-Control', 'no-store');
+    return res.send(rewritten);
+  } catch (e) {
+    console.error('❌ Music stream proxy error:', e.message);
+    return res.status(502).send('Proxy error');
+  }
 });
 
 // Stream a single segment (or key / init) through, forwarding Range for byte-range requests.
 app.get(['/api/music/seg', '/api/gaana/seg'], async (req, res) => {
-    const url = req.query.url;
-    if (!url || !musicProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
-    try {
-        await proxyPassthrough(url, req, res);
-    } catch (e) {
-        console.error('❌ Music segment proxy error:', e.message);
-        if (!res.headersSent) return res.status(502).send('Proxy error');
-        return res.end();
-    }
+  const url = req.query.url;
+  if (!url || !musicProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
+  try {
+    await proxyPassthrough(url, req, res);
+  } catch (e) {
+    console.error('❌ Music segment proxy error:', e.message);
+    if (!res.headersSent) return res.status(502).send('Proxy error');
+    return res.end();
+  }
 });
 
 
@@ -3504,94 +3506,94 @@ app.get(['/api/music/seg', '/api/gaana/seg'], async (req, res) => {
 // re-serve same-origin with CORS.
 // =====================================
 const MUX_PROXY_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    'Referer': 'https://www.iplt20.com/',
-    'Origin':  'https://www.iplt20.com',
-    'Accept':  '*/*',
+  'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+  'Referer': 'https://www.iplt20.com/',
+  'Origin': 'https://www.iplt20.com',
+  'Accept': '*/*',
 };
 
 // Only Mux hosts — never an open relay. Manifests redirect to *.fastly.mux.com.
 function muxProxyAllowed(u) {
-    try {
-        const host = new URL(u).hostname.toLowerCase();
-        return host === 'mux.com' || host.endsWith('.mux.com');
-    } catch (_) {
-        return false;
-    }
+  try {
+    const host = new URL(u).hostname.toLowerCase();
+    return host === 'mux.com' || host.endsWith('.mux.com');
+  } catch (_) {
+    return false;
+  }
 }
 
 app.get('/api/mux/hls', async (req, res) => {
-    const url = req.query.url;
-    if (!url || !muxProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
-    try {
-        const r = await fetch(url, { headers: MUX_PROXY_HEADERS });
-        if (!r.ok) {
-            console.error(`❌ Mux HLS proxy upstream ${r.status} for ${url}`);
-            return res.status(r.status).send(`Upstream ${r.status}`);
-        }
-        const text = await r.text();
-        // Mux redirects the master to a regional host; resolve children against
-        // the final URL, not the requested one, or the relative paths break.
-        const base = new URL(r.url || url);
-
-        const rewritten = text.split('\n').map(line => {
-            const t = line.trim();
-            if (!t) return line;
-            if (t.startsWith('#')) {
-                return line.replace(/URI="([^"]+)"/g, (_m, uri) => {
-                    const abs = new URL(uri, base).href;
-                    return `URI="/api/mux/seg?url=${encodeURIComponent(abs)}"`;
-                });
-            }
-            const abs = new URL(t, base).href;
-            const isChildManifest = /\.m3u8(\?|$)/i.test(abs);
-            const proxyPath = isChildManifest ? '/api/mux/hls' : '/api/mux/seg';
-            return `${proxyPath}?url=${encodeURIComponent(abs)}`;
-        }).join('\n');
-
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Content-Type', 'application/vnd.apple.mpegurl');
-        res.set('Cache-Control', 'no-store');
-        return res.send(rewritten);
-    } catch (e) {
-        console.error('❌ Mux HLS proxy error:', e.message);
-        return res.status(502).send('Proxy error');
+  const url = req.query.url;
+  if (!url || !muxProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
+  try {
+    const r = await fetch(url, { headers: MUX_PROXY_HEADERS });
+    if (!r.ok) {
+      console.error(`❌ Mux HLS proxy upstream ${r.status} for ${url}`);
+      return res.status(r.status).send(`Upstream ${r.status}`);
     }
+    const text = await r.text();
+    // Mux redirects the master to a regional host; resolve children against
+    // the final URL, not the requested one, or the relative paths break.
+    const base = new URL(r.url || url);
+
+    const rewritten = text.split('\n').map(line => {
+      const t = line.trim();
+      if (!t) return line;
+      if (t.startsWith('#')) {
+        return line.replace(/URI="([^"]+)"/g, (_m, uri) => {
+          const abs = new URL(uri, base).href;
+          return `URI="/api/mux/seg?url=${encodeURIComponent(abs)}"`;
+        });
+      }
+      const abs = new URL(t, base).href;
+      const isChildManifest = /\.m3u8(\?|$)/i.test(abs);
+      const proxyPath = isChildManifest ? '/api/mux/hls' : '/api/mux/seg';
+      return `${proxyPath}?url=${encodeURIComponent(abs)}`;
+    }).join('\n');
+
+    res.set('Access-Control-Allow-Origin', '*');
+    res.set('Content-Type', 'application/vnd.apple.mpegurl');
+    res.set('Cache-Control', 'no-store');
+    return res.send(rewritten);
+  } catch (e) {
+    console.error('❌ Mux HLS proxy error:', e.message);
+    return res.status(502).send('Proxy error');
+  }
 });
 
 app.get('/api/mux/seg', async (req, res) => {
-    const url = req.query.url;
-    if (!url || !muxProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
-    try {
-        const headers = { ...MUX_PROXY_HEADERS };
-        if (req.headers.range) headers['Range'] = req.headers.range;
-        const r = await fetch(url, { headers });
+  const url = req.query.url;
+  if (!url || !muxProxyAllowed(url)) return res.status(400).send('Invalid or disallowed url');
+  try {
+    const headers = { ...MUX_PROXY_HEADERS };
+    if (req.headers.range) headers['Range'] = req.headers.range;
+    const r = await fetch(url, { headers });
 
-        res.status(r.status);
-        res.set('Access-Control-Allow-Origin', '*');
-        const ct = r.headers.get('content-type');
-        if (ct) res.set('Content-Type', ct);
-        const cr = r.headers.get('content-range');
-        if (cr) res.set('Content-Range', cr);
-        const cl = r.headers.get('content-length');
-        if (cl) res.set('Content-Length', cl);
-        res.set('Accept-Ranges', 'bytes');
+    res.status(r.status);
+    res.set('Access-Control-Allow-Origin', '*');
+    const ct = r.headers.get('content-type');
+    if (ct) res.set('Content-Type', ct);
+    const cr = r.headers.get('content-range');
+    if (cr) res.set('Content-Range', cr);
+    const cl = r.headers.get('content-length');
+    if (cl) res.set('Content-Length', cl);
+    res.set('Accept-Ranges', 'bytes');
 
-        // Stream through instead of buffering the segment in memory.
-        if (!r.body) return res.end();
-        pipeBody(r.body, res);
-    } catch (e) {
-        console.error('❌ Mux segment proxy error:', e.message);
-        if (!res.headersSent) return res.status(502).send('Proxy error');
-        return res.end();
-    }
+    // Stream through instead of buffering the segment in memory.
+    if (!r.body) return res.end();
+    pipeBody(r.body, res);
+  } catch (e) {
+    console.error('❌ Mux segment proxy error:', e.message);
+    if (!res.headersSent) return res.status(502).send('Proxy error');
+    return res.end();
+  }
 });
 
 // Wrap a Mux URL so the browser fetches it through our proxy instead of direct.
 // Absolute, because the player runs on the frontend's origin, not this one.
 function toMuxProxyUrl(req, m3u8) {
-    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
-    return `${proto}://${req.get('host')}/api/mux/hls?url=${encodeURIComponent(m3u8)}`;
+  const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+  return `${proto}://${req.get('host')}/api/mux/hls?url=${encodeURIComponent(m3u8)}`;
 }
 
 // =====================================
@@ -3650,87 +3652,87 @@ app.get('/api/bcci/play', async (req, res) => {
 });
 
 async function bcciDirectMp4(pageUrl) {
-    const r = await withTimeout(fetch(pageUrl, {
-        redirect: 'follow',            // /bccilink/videos/<code> → /video/<id>/<slug>
-        headers: { 'User-Agent': BCCI_HEADERS['User-Agent'], 'Referer': 'https://www.bcci.tv/' },
-    }), 12000);
-    if (!r.ok) return null;
-    const html = await r.text();
+  const r = await withTimeout(fetch(pageUrl, {
+    redirect: 'follow',            // /bccilink/videos/<code> → /video/<id>/<slug>
+    headers: { 'User-Agent': BCCI_HEADERS['User-Agent'], 'Referer': 'https://www.bcci.tv/' },
+  }), 12000);
+  if (!r.ok) return null;
+  const html = await r.text();
 
-    // The page also lists related clips, each with its own mp4 — so anchor on
-    // the main player rather than taking the first mp4 on the page, or every
-    // video resolves to whatever happens to be top of the sidebar.
-    const player = html.indexOf('id="mypagePlayers"');
-    if (player !== -1) {
-        const m = html.slice(player).match(/<source\s+src="([^"]+\.mp4[^"]*)"/i);
-        if (m) return m[1];
-    }
-    // Fall back to the poster, which embeds the same media id:
-    // .../output/input/<mediaId>-<ts>.jpg
-    const poster = html.match(/poster="[^"]*\/(\d{10,})-\d+\.jpg"/i);
-    if (poster) {
-        return `https://brightcove-videos-bcci-ipl.s3.ap-south-1.amazonaws.com/videos-BCCI/${poster[1]}.mp4`;
-    }
-    return null;
+  // The page also lists related clips, each with its own mp4 — so anchor on
+  // the main player rather than taking the first mp4 on the page, or every
+  // video resolves to whatever happens to be top of the sidebar.
+  const player = html.indexOf('id="mypagePlayers"');
+  if (player !== -1) {
+    const m = html.slice(player).match(/<source\s+src="([^"]+\.mp4[^"]*)"/i);
+    if (m) return m[1];
+  }
+  // Fall back to the poster, which embeds the same media id:
+  // .../output/input/<mediaId>-<ts>.jpg
+  const poster = html.match(/poster="[^"]*\/(\d{10,})-\d+\.jpg"/i);
+  if (poster) {
+    return `https://brightcove-videos-bcci-ipl.s3.ap-south-1.amazonaws.com/videos-BCCI/${poster[1]}.mp4`;
+  }
+  return null;
 }
 
 app.get('/api/get-stream', async (req, res) => {
-    let targetUrl = req.query.url || '';
-    try { targetUrl = decodeURIComponent(targetUrl).trim(); } catch {}
+  let targetUrl = req.query.url || '';
+  try { targetUrl = decodeURIComponent(targetUrl).trim(); } catch { }
 
-    if (!targetUrl) {
-        return res.status(400).json({ success: false, error: 'Missing ?url= parameter' });
+  if (!targetUrl) {
+    return res.status(400).json({ success: false, error: 'Missing ?url= parameter' });
+  }
+
+  console.log(`📡 Stream extraction requested for: ${targetUrl}`);
+
+  if (/(^|\.)bcci\.tv$/i.test((() => { try { return new URL(targetUrl).hostname; } catch { return ''; } })())) {
+    try {
+      // The rebuilt site: its Mux stream, read from the page.
+      const mux = await bcciPlaybackUrl(targetUrl).catch(() => null);
+      if (mux) return res.json({ success: true, url: mux, source: 'bcci:mux' });
+      const mp4 = await bcciDirectMp4(targetUrl);
+      if (mp4) {
+        console.log(`✅ bcci direct mp4: ${mp4}`);
+        return res.json({ success: true, url: mp4, source: 'bcci:source-tag' });
+      }
+      console.warn('⚠️  bcci page had no <source> mp4, falling back to scraper');
+    } catch (e) {
+      console.warn('⚠️  bcci direct extraction failed, falling back:', e.message);
+    }
+  }
+
+  // Adjusting target to look into your scrapers folder ('./scrapers/index.py')
+  const pythonProcess = spawn('python3', ['./scrapers/index.py', targetUrl]);
+
+  let output = '';
+  let errorOutput = '';
+
+  pythonProcess.stdout.on('data', (data) => { output += data.toString(); });
+  pythonProcess.stderr.on('data', (data) => { errorOutput += data.toString(); });
+
+  pythonProcess.on('close', (code) => {
+    const cleanOutput = output.trim();
+
+    if (code !== 0 || !cleanOutput || cleanOutput.toLowerCase().includes('error')) {
+      console.error(`❌ Scraper script failed with exit code ${code}`);
+      if (errorOutput) console.error(`🐍 Python stderr layout:\n${errorOutput}`);
+      return res.status(502).json({
+        success: false,
+        error: 'Could not extract dynamic streaming manifest link behind compliance walls.',
+        details: errorOutput || cleanOutput
+      });
     }
 
-    console.log(`📡 Stream extraction requested for: ${targetUrl}`);
+    // Mux tokens are domain-restricted, so hand back the proxied URL — the
+    // raw one 403s in the browser. Everything else plays direct.
+    const finalUrl = muxProxyAllowed(cleanOutput)
+      ? toMuxProxyUrl(req, cleanOutput)
+      : cleanOutput;
 
-    if (/(^|\.)bcci\.tv$/i.test((() => { try { return new URL(targetUrl).hostname; } catch { return ''; } })())) {
-        try {
-            // The rebuilt site: its Mux stream, read from the page.
-            const mux = await bcciPlaybackUrl(targetUrl).catch(() => null);
-            if (mux) return res.json({ success: true, url: mux, source: 'bcci:mux' });
-            const mp4 = await bcciDirectMp4(targetUrl);
-            if (mp4) {
-                console.log(`✅ bcci direct mp4: ${mp4}`);
-                return res.json({ success: true, url: mp4, source: 'bcci:source-tag' });
-            }
-            console.warn('⚠️  bcci page had no <source> mp4, falling back to scraper');
-        } catch (e) {
-            console.warn('⚠️  bcci direct extraction failed, falling back:', e.message);
-        }
-    }
-
-    // Adjusting target to look into your scrapers folder ('./scrapers/index.py')
-    const pythonProcess = spawn('python3', ['./scrapers/index.py', targetUrl]);
-
-    let output = '';
-    let errorOutput = '';
-
-    pythonProcess.stdout.on('data', (data) => { output += data.toString(); });
-    pythonProcess.stderr.on('data', (data) => { errorOutput += data.toString(); });
-
-    pythonProcess.on('close', (code) => {
-        const cleanOutput = output.trim();
-
-        if (code !== 0 || !cleanOutput || cleanOutput.toLowerCase().includes('error')) {
-            console.error(`❌ Scraper script failed with exit code ${code}`);
-            if (errorOutput) console.error(`🐍 Python stderr layout:\n${errorOutput}`);
-            return res.status(502).json({ 
-                success: false, 
-                error: 'Could not extract dynamic streaming manifest link behind compliance walls.',
-                details: errorOutput || cleanOutput 
-            });
-        }
-
-        // Mux tokens are domain-restricted, so hand back the proxied URL — the
-        // raw one 403s in the browser. Everything else plays direct.
-        const finalUrl = muxProxyAllowed(cleanOutput)
-            ? toMuxProxyUrl(req, cleanOutput)
-            : cleanOutput;
-
-        console.log(`✅ Successfully extracted fresh token manifest: ${finalUrl}`);
-        return res.json({ success: true, url: finalUrl });
-    });
+    console.log(`✅ Successfully extracted fresh token manifest: ${finalUrl}`);
+    return res.json({ success: true, url: finalUrl });
+  });
 });
 
 // -------------------- Test route --------------------
@@ -3779,7 +3781,7 @@ function _touchRenderBrowser() {
     if (_rendersInFlight > 0) return _touchRenderBrowser();
     const b = _renderBrowser;
     _renderBrowser = null;
-    try { await b?.close(); } catch (_) {}
+    try { await b?.close(); } catch (_) { }
     console.log('🖨️  prerender browser closed (idle)');
   }, RENDER_IDLE_MS);
 }
@@ -3994,8 +3996,8 @@ function inningsHtml(inn, n) {
   return `<section class="seo-innings">`
     + `<h2>${esc(ex.BattingTeamName || `Innings ${n}`)} innings${ex.Total ? ` — ${esc(ex.Total)}` : ''}</h2>`
     + (ex.BowlingTeamName ? `<p>${esc(ex.BattingTeamName)} batting, ${esc(ex.BowlingTeamName)} bowling.`
-        + ` Run rate ${esc(ex.CurrentRunRate)}. Extras ${esc(ex.TotalExtras)}`
-        + ` (b ${esc(ex.Byes)}, lb ${esc(ex.LegByes)}, w ${esc(ex.Wides)}, nb ${esc(ex.NoBalls)}).</p>` : '')
+      + ` Run rate ${esc(ex.CurrentRunRate)}. Extras ${esc(ex.TotalExtras)}`
+      + ` (b ${esc(ex.Byes)}, lb ${esc(ex.LegByes)}, w ${esc(ex.Wides)}, nb ${esc(ex.NoBalls)}).</p>` : '')
     + `<h3>Batting</h3><table><thead><tr><th>Batter</th><th>Dismissal</th><th>R</th>`
     + `<th>B</th><th>4s</th><th>6s</th><th>SR</th></tr></thead><tbody>${rows}</tbody></table>`
     + `<h3>Bowling</h3><table><thead><tr><th>Bowler</th><th>O</th><th>M</th><th>R</th>`
@@ -4135,7 +4137,7 @@ app.get('/api/render', async (req, res) => {
     _renderBrowser = null;   // A dead browser shouldn't be handed to the next request.
     return res.status(502).type('text/plain').send(`Render failed: ${e.message}`);
   } finally {
-    try { await page?.close(); } catch (_) {}
+    try { await page?.close(); } catch (_) { }
     _rendersInFlight--;
   }
 });
@@ -4343,9 +4345,9 @@ function urlEntry({ loc, lastmod, changefreq, priority, image }) {
   return [
     '  <url>',
     `    <loc>${xmlEscape(loc)}</loc>`,
-    lastmod    ? `    <lastmod>${lastmod}</lastmod>` : '',
+    lastmod ? `    <lastmod>${lastmod}</lastmod>` : '',
     changefreq ? `    <changefreq>${changefreq}</changefreq>` : '',
-    priority   ? `    <priority>${priority}</priority>` : '',
+    priority ? `    <priority>${priority}</priority>` : '',
     /* The poster, so a result can carry the artwork instead of being a line of
        blue text. Only an absolute URL is valid here; a relative one is dropped
        rather than emitted as something a crawler cannot resolve. */
@@ -4359,8 +4361,8 @@ app.get('/sitemap.xml', async (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
   const urls = [
     { loc: `${SITE_ORIGIN}/sports`, changefreq: 'hourly', priority: '0.9', lastmod: today },
-    { loc: `${SITE_ORIGIN}/blogs`,  changefreq: 'daily',  priority: '0.8', lastmod: today },
-    { loc: `${SITE_ORIGIN}/music`,  changefreq: 'daily',  priority: '0.7', lastmod: today },
+    { loc: `${SITE_ORIGIN}/blogs`, changefreq: 'daily', priority: '0.8', lastmod: today },
+    { loc: `${SITE_ORIGIN}/music`, changefreq: 'daily', priority: '0.7', lastmod: today },
   ];
 
   // ── Blog posts (original writing — the pages most worth indexing) ──
@@ -4509,7 +4511,7 @@ app.get('/sitemap.xml', async (req, res) => {
   }
   const watchSlugs = new Set(
     urls.filter((u) => u.loc.includes('/watch/'))
-        .map((u) => { try { return decodeURIComponent(u.loc.split('/watch/')[1]); } catch { return u.loc.split('/watch/')[1]; } })
+      .map((u) => { try { return decodeURIComponent(u.loc.split('/watch/')[1]); } catch { return u.loc.split('/watch/')[1]; } })
   );
   const deduped = urls.filter((u) => {
     if (!u.loc.includes('/movie/')) return true;
@@ -4521,7 +4523,7 @@ app.get('/sitemap.xml', async (req, res) => {
   const body = [
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"'
-      + ' xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">',
+    + ' xmlns:image="http://www.google.com/schemas/sitemap-image/1.1">',
     ...deduped.map(urlEntry),
     '</urlset>',
   ].join('\n');
@@ -4543,7 +4545,7 @@ app.get('/sitemap.xml', async (req, res) => {
    an ad network's push script, and registering it would hand our visitors'
    push subscriptions to them. Ours lives at /push-sw.js.
    ───────────────────────────────────────────────────────────────────── */
-const VAPID_PUBLIC  = process.env.VAPID_PUBLIC_KEY || '';
+const VAPID_PUBLIC = process.env.VAPID_PUBLIC_KEY || '';
 const VAPID_PRIVATE = process.env.VAPID_PRIVATE_KEY || '';
 
 /* A subscription is a credential: endpoint plus keys is everything needed to
@@ -4565,7 +4567,7 @@ if (pushReady) {
   console.warn('⚠️  push notifications are off — need VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY'
     + ' and SUPABASE_SERVICE_ROLE_KEY'
     + ` (have: ${[VAPID_PUBLIC && 'vapid-public', VAPID_PRIVATE && 'vapid-private',
-        supabaseAdmin && 'service-key'].filter(Boolean).join(', ') || 'none'})`);
+    supabaseAdmin && 'service-key'].filter(Boolean).join(', ') || 'none'})`);
 }
 
 /* The browser needs the public key to subscribe. Served rather than baked into
@@ -4734,7 +4736,7 @@ app.post('/api/push/prune-host', async (req, res) => {
    to the channel (@name, or the -100… id for a private one) and add the bot
    as an administrator with "post messages". Unset, this does nothing.
    ───────────────────────────────────────────────────────────────────── */
-const TELEGRAM_TOKEN   = process.env.BOT_TOKEN || '';
+const TELEGRAM_TOKEN = process.env.BOT_TOKEN || '';
 const TELEGRAM_CHANNEL = process.env.TELEGRAM_CHANNEL || '';
 const telegramReady = !!(TELEGRAM_TOKEN && TELEGRAM_CHANNEL);
 if (!telegramReady) {
@@ -4773,11 +4775,11 @@ function releaseFacets(blocks = [], fallbackName = '') {
   };
   const res = pick(['2160p', '4K', '1080p', '720p', '480p'], /\b(2160p|4K|1080p|720p|480p)\b/gi);
   const src = pick(['WEB-DL', 'WEBRip', 'BluRay', 'HDRip', 'HDTV', 'PreDVD'],
-                   /\b(WEB[\s-]?DL|WEB[\s-]?Rip|BluRay|HDRip|HDTV|PreDVD)\b/gi);
+    /\b(WEB[\s-]?DL|WEB[\s-]?Rip|BluRay|HDRip|HDTV|PreDVD)\b/gi);
   const LANGS = [['Tamil', /\b(Tamil|Tam)\b/i], ['Telugu', /\b(Telugu|Tel)\b/i],
-                 ['Hindi', /\b(Hindi|Hin)\b/i], ['Malayalam', /\b(Malayalam|Mal)\b/i],
-                 ['Kannada', /\b(Kannada|Kan)\b/i], ['English', /\b(English|Eng)\b/i],
-                 ['Korean', /\b(Korean|Kor)\b/i]];
+  ['Hindi', /\b(Hindi|Hin)\b/i], ['Malayalam', /\b(Malayalam|Mal)\b/i],
+  ['Kannada', /\b(Kannada|Kan)\b/i], ['English', /\b(English|Eng)\b/i],
+  ['Korean', /\b(Korean|Kor)\b/i]];
   const episodes = Math.max(0, ...(blocks || []).map((b) => ((b?.links || []).length > 1 ? b.links.length : 0)));
   return {
     quality: [res.join(', '), src[0] || ''].filter(Boolean).join(' '),
@@ -5003,7 +5005,7 @@ let liveAlertsPrimed = false;
 const LIVE_FEEDS = [
   { name: 'SonyLIV', url: 'https://jtv-proxy.sanjusanjay0444.workers.dev/?feed=sonyliv' },
   { name: 'FanCode', url: 'https://jtv-proxy.sanjusanjay0444.workers.dev/?feed=fancode' },
-  { name: 'Prime',   url: 'https://jtv-proxy.sanjusanjay0444.workers.dev/?feed=willow'  },
+  { name: 'Prime', url: 'https://jtv-proxy.sanjusanjay0444.workers.dev/?feed=willow' },
 ];
 
 /* One fixture, however many rows carry it.
@@ -5114,8 +5116,8 @@ async function checkLiveMatches() {
       try {
         await tg('sendMessage', {
           text: [`🔴 <b>${tgEscape(m.title)}</b> is live now`,
-                 m.sub ? tgEscape(m.sub) : '',
-                 '', `📺 ${tgEscape(url)}`].filter(Boolean).join('\n'),
+          m.sub ? tgEscape(m.sub) : '',
+            '', `📺 ${tgEscape(url)}`].filter(Boolean).join('\n'),
           parse_mode: 'HTML',
           reply_markup: { inline_keyboard: [[{ text: '▶ Watch now', url }]] },
         });
