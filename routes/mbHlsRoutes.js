@@ -93,14 +93,28 @@ async function signedFolder(subjectId, se, ep) {
     await ensureToken();
     let d = await tv('/wefeed-tv-bff/subject/play-info/v2', { params: { subjectId, vipLevel: '2', ...(se ? { se, ep } : {}) } });
     if (d.code === 401 || /jwt|token/i.test(String(d.message || ''))) { tvToken = ''; await ensureToken(); d = await tv('/wefeed-tv-bff/subject/play-info/v2', { params: { subjectId, vipLevel: '2', ...(se ? { se, ep } : {}) } }); }
-    const isNotice = (u) => /index_4\d\d\.m3u8/i.test(u || '') || /notice|warning|flonub\.com/i.test(u || '') || /hls_mps\/[a-f0-9]{20,}\//i.test(u || '');
+    const isNotice = (u) => /index_4\d\d\.m3u8/i.test(u || '')
+        || /notice|warning|flonub\.com/i.test(u || '')
+        || /hls_mps\/[a-f0-9]{20,}\//i.test(u || '')
+        || /55518dd33236404e200a606811ea4da4/i.test(u || '')
+        || /(?:^|\.)aoneroom\.com\/other\//i.test(u || '')
+        || (/macdn\.aoneroom\.com/i.test(u || '') && /\/other\//i.test(u || ''))
+        || /\/other\/\d{4}\/\d{2}\/\d{2}\/.*\.mp4/i.test(u || '');
     const s = (d.data?.streams || [])
         .filter((x) => !isNotice(x.url))
         .find((x) => /\.mpd(\?|$)/.test(x.url || '') && x.signCookie);
     /* The H.264 MP4s beside it, signed in their URLs and served with CORS:
        what a dub without DASH has, and what a browser without HEVC plays. */
-    const mp4 = (d.data?.resources || []).map((x) => ({ url: x.url || x.resourceLink, resolution: parseInt(x.resolution, 10) || 0, codec: String(x.codec || '') }))
-        .filter((x) => /^https:/.test(x.url || '') && !/hevc|h265/i.test(x.codec) && !isNotice(x.url)).sort((a, b) => b.resolution - a.resolution);
+    const mp4 = (d.data?.resources || []).map((x) => ({
+        url: x.url || x.resourceLink,
+        resolution: parseInt(x.resolution, 10) || 0,
+        codec: String(x.codec || ''),
+        duration: Number(x.duration || x.durationSecond || x.duration_second || 0),
+        size: Number(x.size || 0)
+    }))
+        .filter((x) => /^https:/.test(x.url || '') && !/hevc|h265/i.test(x.codec) && !isNotice(x.url)
+            && (!x.duration || x.duration >= 30)
+            && (!x.size || x.size >= 10 * 1024 * 1024)).sort((a, b) => b.resolution - a.resolution);
     let value = null;
     if (s) {
         const c = Object.fromEntries(String(s.signCookie).split(';').map((x) => x.trim()).filter(Boolean)
@@ -256,14 +270,14 @@ async function buildTitle({ tmdb, title, year, type, se, ep }) {
         const f = await signedFolder(v.subjectId, se, ep);
         if (!f) return null;
         for (const x of f.mp4 || []) {
-            if (/index_4\d\d\.m3u8/i.test(x.url || '') || /notice|warning|flonub\.com/i.test(x.url || '') || /hls_mps\/[a-f0-9]{20,}\//i.test(x.url || '')) continue;
+            if (isNotice(x.url || '') || (x.duration && x.duration < 30) || (x.size && x.size < 10 * 1024 * 1024)) continue;
             mp4.push({ subjectId: v.subjectId, name: nameFrom(v, '', origName), code: v.code || '', resolution: x.resolution, url: x.url, original: v.original });
         }
         if (!f.mpd) return null;
         const r = await fetch(`${f.mpd}?${f.q}`, { signal: AbortSignal.timeout(20000) });
         if (!r.ok) return null;
         const mpd = parseMpd(await r.text());
-        if (!mpd.video.length || !mpd.audio.length || (mpd.total > 0 && mpd.total < 180)) return null;
+        if (!mpd.video.length || !mpd.audio.length || (mpd.total > 0 && (mpd.total < 30 || mpd.total < 180))) return null;
         const name = nameFrom(v, mpd.audio[0].lang, origName);
         return { v, f, mpd, name, code: CODE_OF[name] || mpd.audio[0].lang || v.code || 'und' };
     });
