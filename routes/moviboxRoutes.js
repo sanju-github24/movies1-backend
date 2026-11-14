@@ -97,13 +97,26 @@ async function tmdbTitle(id, type) {
   throw new Error('TMDB has no title with that id');
 }
 
+/* Manual overrides for titles MoviBox lists under a different name than
+   TMDB's. Keyed by TMDB id (string). Each value is the detailPath and
+   subjectId taken straight from a working MoviBox URL. When a match is
+   here the search is skipped entirely — no risk of hitting the wrong one.
+   Keep in sync with m3u8-player/api/movibox.js's MB_OVERRIDES. */
+const MB_OVERRIDES = {
+  // "Student of the Year: After Dark" (TMDB TV 334412) → "Student of the Year 3" (MoviBox)
+  "334412": { detailPath: "student-of-the-year-3-Ol6BuNQgDga", subjectId: "8618161652330021112", title: "Student of the Year 3" },
+};
+
 /* The MoviBox title that is this one: the same name (any language's version
    — they all list the others) and the same year give or take one. A series
    used to skip the year, and a short name then found someone else's show —
    "#Love" (Tamil, 2026) has a US "Love" and a Korean one beside it. A
    series may be dated by a later season, so for one its year may fall
    anywhere from its first air year to its last (TMDB's), give or take one. */
-async function findSubject(titles, year, type, lastYear = 0) {
+async function findSubject(titles, year, type, lastYear = 0, tmdbId = '') {
+  // Check manual overrides first.
+  const ov = MB_OVERRIDES[String(tmdbId)];
+  if (ov) return { detailPath: ov.detailPath, subjectId: ov.subjectId, title: ov.title };
   await ensureGuest();
   const want = titles.map(norm).filter(Boolean);
   const subjectType = type === 'tv' ? 2 : 1;
@@ -160,7 +173,7 @@ export async function moviboxDubs({ tmdb, title, year = 0, type = '' }) {
   const key = `${titles[0]}|${year}|${kind}`;
   const hit = dubsCache.get(key);
   if (hit && Date.now() - hit.at < 3600e3) return hit.value;
-  const subject = await findSubject(titles, year, kind || 'movie', lastYear);
+  const subject = await findSubject(titles, year, kind || 'movie', lastYear, tmdb);
   if (!subject) return null;
   const detail = await mb(`/detail?detailPath=${subject.detailPath}`);
   const dubs = detail?.subject?.dubs || detail?.dubs || [];
@@ -189,7 +202,7 @@ router.get('/', async (req, res) => {
     const hit = cache.get(key);
     if (hit && Date.now() - hit.at < 20 * 60e3) return res.json(hit.value);
 
-    const subject = await findSubject(titles, year, kind || 'movie', lastYear);
+    const subject = await findSubject(titles, year, kind || 'movie', lastYear, req.query.tmdb || '');
     if (!subject) return res.status(404).json({ error: 'MoviBox has no title by that name', title: titles[0], year });
 
     const detail = await mb(`/detail?detailPath=${subject.detailPath}`);
