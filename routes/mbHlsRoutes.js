@@ -32,7 +32,7 @@
 
 import express from 'express';
 import crypto from 'crypto';
-import { moviboxDubs, streamsFor as webStreams } from './moviboxRoutes.js';
+import { moviboxDubs } from './moviboxRoutes.js';
 import { TMDB_API_KEY } from './tmdbRoutes.js';
 
 const router = express.Router();
@@ -196,19 +196,15 @@ function parseMpd(xml) {
 }
 
 // ── Titles → streams ───────────────────────────────────────────────────
-const LANG = {
-    hin: 'Hindi', tam: 'Tamil', tel: 'Telugu', kan: 'Kannada', mal: 'Malayalam', eng: 'English', ben: 'Bengali',
+const LANG = { hin: 'Hindi', tam: 'Tamil', tel: 'Telugu', kan: 'Kannada', mal: 'Malayalam', eng: 'English', ben: 'Bengali',
     mar: 'Marathi', pan: 'Punjabi', guj: 'Gujarati', urd: 'Urdu', jpn: 'Japanese', kor: 'Korean', chi: 'Chinese', zho: 'Chinese',
-    spa: 'Spanish', fre: 'French', fra: 'French', rus: 'Russian', ara: 'Arabic', ind: 'Indonesian', tha: 'Thai'
-};
+    spa: 'Spanish', fre: 'French', fra: 'French', rus: 'Russian', ara: 'Arabic', ind: 'Indonesian', tha: 'Thai' };
 /* The original's language is TMDB's, not the tag on MoviBox's audio: the
    Tamil film "29" has its original track tagged English, which listed the
    Tamil audio as "English" and Tamil again from the dub. */
-const ISO1 = {
-    ta: 'Tamil', te: 'Telugu', hi: 'Hindi', ml: 'Malayalam', kn: 'Kannada', en: 'English', bn: 'Bengali', mr: 'Marathi',
+const ISO1 = { ta: 'Tamil', te: 'Telugu', hi: 'Hindi', ml: 'Malayalam', kn: 'Kannada', en: 'English', bn: 'Bengali', mr: 'Marathi',
     pa: 'Punjabi', gu: 'Gujarati', ur: 'Urdu', ja: 'Japanese', ko: 'Korean', zh: 'Chinese', cn: 'Chinese', es: 'Spanish',
-    fr: 'French', ru: 'Russian', ar: 'Arabic', id: 'Indonesian', th: 'Thai', de: 'German', it: 'Italian', pt: 'Portuguese', tr: 'Turkish'
-};
+    fr: 'French', ru: 'Russian', ar: 'Arabic', id: 'Indonesian', th: 'Thai', de: 'German', it: 'Italian', pt: 'Portuguese', tr: 'Turkish' };
 const CODE_OF = Object.fromEntries(Object.entries(LANG).map(([c, n]) => [n, c]));
 const nameFrom = (version, mpdLang, origName = '') => {
     const own = String(version.language || '').replace(/\s*dub$/i, '').trim();
@@ -243,9 +239,7 @@ async function findVersions({ tmdb, title, year, type }) {
             if (r.ok) {
                 const d = await r.json();
                 if (Array.isArray(d.languages) && d.languages.length) {
-                    // AnchorMB's answer is each language's watch page: /movies/<detailPath>?id=…
-                    const pathOf = (l) => l.detailPath || (String(l.url || '').match(/\/movies\/([^?#]+)/) || [])[1] || '';
-                    return { title: d.title, versions: d.languages.map((l) => ({ subjectId: String(l.subjectId), detailPath: pathOf(l), language: l.language || '', code: l.code || '', original: !!l.original })) };
+                    return { title: d.title, versions: d.languages.map((l) => ({ subjectId: String(l.subjectId), language: l.language || '', code: l.code || '', original: !!l.original })) };
                 }
             }
         } catch { /* fall back */ }
@@ -272,8 +266,7 @@ async function buildTitle({ tmdb, title, year, type, se, ep }) {
     // A subtitled copy ("Arabic sub") has the original's audio: nothing to add.
     const versions = dubs.versions.filter((v) => !/\bsub\b/i.test(v.language));
     const mp4 = [];   // { name, code, resolution, url } — every version's, the player picks
-    let webUsed = false;
-    const readTv = async (v) => {
+    const read = await mapLimit(versions, 3, async (v) => {
         const f = await signedFolder(v.subjectId, se, ep);
         if (!f) return null;
         for (const x of f.mp4 || []) {
@@ -287,26 +280,6 @@ async function buildTitle({ tmdb, title, year, type, se, ep }) {
         if (!mpd.video.length || !mpd.audio.length || (mpd.total > 0 && (mpd.total < 30 || mpd.total < 180))) return null;
         const name = nameFrom(v, mpd.audio[0].lang, origName);
         return { v, f, mpd, name, code: CODE_OF[name] || mpd.audio[0].lang || v.code || 'und' };
-    };
-    /* A version the TV app's API has nothing for — no DASH, no MP4 — is what
-       AnchorMB still plays: MoviBox's website API has its MP4s. They are the
-       same h264 files, but their CDN wants movibox.net as the Referer, which
-       the browser cannot send, so they are marked `web` and played through
-       the relay (see moviboxHls in anchorTmdb.js). */
-    const addWeb = async (v) => {
-        if (!v.detailPath) return;
-        try {
-            const w = await webStreams({ subjectId: v.subjectId, detailPath: v.detailPath }, se, ep);
-            for (const x of w.mp4 || []) {
-                mp4.push({ subjectId: v.subjectId, name: nameFrom(v, '', origName), code: v.code || '', resolution: parseInt(x.resolution, 10) || 0, url: x.url, original: v.original, web: true });
-                webUsed = true;
-            }
-        } catch { /* nothing more to try for this version */ }
-    };
-    const read = await mapLimit(versions, 3, async (v) => {
-        const r = await readTv(v).catch(() => null);
-        if (!r && !mp4.some((x) => x.subjectId === v.subjectId)) await addWeb(v);
-        return r;
     });
     const ok = read.filter(Boolean);
     // Same cut, same stream. The original leads its group; else the best video.
@@ -329,8 +302,7 @@ async function buildTitle({ tmdb, title, year, type, se, ep }) {
     const mp4s = mp4.sort((a, b) => Number(b.original) - Number(a.original) || b.resolution - a.resolution)
         .filter((x) => { const k = `${x.name}|${x.resolution}`; if (seenMp4.has(k)) return false; seenMp4.add(k); return true; })
         .map(({ original, subjectId, ...x }) => ({ ...x, inStream: out.some((st) => st.languages.some((l) => l.name === x.name)) }));
-    // Website links are signed too and run out sooner: kept for about an hour, not six.
-    return { title: dubs.title, streams: out, mp4: mp4s, expMs: Math.min(...ok.map((m) => m.f.expMs), Date.now() + (webUsed ? 2 : 6) * 3600e3) };
+    return { title: dubs.title, streams: out, mp4: mp4s, expMs: Math.min(...ok.map((m) => m.f.expMs), Date.now() + 6 * 3600e3) };
 }
 
 router.get('/title', async (req, res) => {
