@@ -29,7 +29,7 @@ const router = express.Router();
 
 router.get('/', async (_req, res) => {
   const doc = await AnchorServerConfig.findById('anchorServers').lean().catch(() => null);
-  res.set('Cache-Control', 'public, max-age=30');
+  res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
   res.json({ order: doc?.order?.length ? doc.order : DEFAULT_ORDER, keys: SERVER_KEYS, default: DEFAULT_ORDER });
 });
 
