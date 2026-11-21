@@ -15,7 +15,7 @@
 // =====================================================================
 
 import express from 'express';
-import { TMDB_API_KEY } from './tmdbRoutes.js';
+import { TMDB_API_KEY, fetchImdbRating } from './tmdbRoutes.js';
 import { currentBase as hdhubBase } from './hdhubRoutes.js';
 import { domainOf, domainEvents } from '../utils/siteDomains.js';
 import { requireAdmin } from './serverOrderRoutes.js';
@@ -445,6 +445,18 @@ async function refresh() {
     });
     const items = [...byId.values()].filter((x) => x.poster)
       .sort((a, b) => Date.parse(b.first_seen) - Date.parse(a.first_seen));
+
+    // Batch-fetch real IMDb ratings (6 at a time, non-blocking)
+    for (let i = 0; i < items.length; i += 6) {
+      const chunk = items.slice(i, i + 6);
+      await Promise.all(chunk.map(async (it) => {
+        if (it.imdb_id) {
+          const real = await fetchImdbRating(it.imdb_id);
+          if (real) it.imdb_rating = real;
+        }
+      }));
+    }
+
     state = { updatedAt: new Date(now).toISOString(), items, error: null };
     console.log(`🆕 Fresh titles: ${items.length} matched from ${tmv.length} 1TamilMV + ${hd.length} HDHub4u + ${i4m.length} India4Movies posts`);
     return state;
@@ -585,6 +597,15 @@ async function recover(fromMs, toMs) {
   /* Write merged list back to state. */
   if (added || merged) {
     const items = [...existing.values()].sort((a, b) => Date.parse(b.first_seen) - Date.parse(a.first_seen));
+    // Batch-fetch real IMDb ratings for newly added items
+    const needRating = items.filter(it => it.imdb_id && (!it.imdb_rating || it.imdb_rating === '0.0'));
+    for (let i = 0; i < needRating.length; i += 6) {
+      const chunk = needRating.slice(i, i + 6);
+      await Promise.all(chunk.map(async (it) => {
+        const real = await fetchImdbRating(it.imdb_id);
+        if (real) it.imdb_rating = real;
+      }));
+    }
     state = { ...state, updatedAt: new Date(now).toISOString(), items };
     console.log(`♻️  Recover [${new Date(fromMs).toDateString()} – ${new Date(toMs).toDateString()}]: +${added} new, ${merged} updated`);
   }

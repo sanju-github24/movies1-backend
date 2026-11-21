@@ -18,6 +18,56 @@ const DATA_FILE_PATH = './data/data/all_south_indian_movies.json';
 const CASTHQ_API_BASE = 'https://casthq.to/api'; 
 const DEFAULT_CASTHQ_KEY = '154lzcrtrw3lelu26zf';
 
+// ── OMDb / IMDb real rating ───────────────────────────────────────────────────
+// Free key from https://www.omdbapi.com/apikey.aspx  (1 000 req/day on free tier)
+const OMDB_API_KEY = process.env.OMDB_API_KEY || '';
+
+/** In-memory cache: imdbId → { rating, ts } — refreshed every 24 h */
+const _imdbCache = new Map();
+const IMDB_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 h
+
+/**
+ * Fetch the **real IMDb rating** for a given IMDb ID.
+ * Strategy: OMDb API if key is set, otherwise fall back to TMDB vote_average.
+ * Returns e.g. "8.7" or null.
+ */
+export const fetchImdbRating = async (imdbId) => {
+  if (!imdbId) return null;
+  const cached = _imdbCache.get(imdbId);
+  if (cached && Date.now() - cached.ts < IMDB_CACHE_TTL) return cached.rating;
+
+  let rating = null;
+
+  // Try OMDb API (returns real IMDb rating)
+  if (OMDB_API_KEY) {
+    try {
+      const r = await axios.get('https://www.omdbapi.com/', {
+        params: { i: imdbId, apikey: OMDB_API_KEY },
+        timeout: 4000,
+      });
+      if (r.data?.Response === 'True' && r.data.imdbRating && r.data.imdbRating !== 'N/A') {
+        rating = r.data.imdbRating; // e.g. "8.7"
+      }
+    } catch (e) { /* OMDb down or quota exhausted — fall through */ }
+  }
+
+  // Fallback: fetch rating from TMDB's own find-by-imdb endpoint
+  if (!rating) {
+    try {
+      const r = await axiosWithRetry({
+        method: 'get',
+        url: `${BASE_URL}find/${imdbId}`,
+        params: { api_key: TMDB_API_KEY, external_source: 'imdb_id' },
+      });
+      const hit = r.data?.movie_results?.[0] || r.data?.tv_results?.[0];
+      if (hit?.vote_average) rating = Number(hit.vote_average).toFixed(1);
+    } catch (e) { /* silent */ }
+  }
+
+  if (rating) _imdbCache.set(imdbId, { rating, ts: Date.now() });
+  return rating;
+};
+
 // ── Axios with retry ──────────────────────────────────────────────────────────
 const axiosWithRetry = async (config, retries = 3, delay = 500) => {
   for (let i = 0; i < retries; i++) {
@@ -310,7 +360,11 @@ router.get('/tmdb-details', async (req, res) => {
       title_logo,
       images,
       original_language: details.original_language,
-      imdb_rating:      details.vote_average ? details.vote_average.toFixed(1) : "0.0",
+      imdb_rating:      await (async () => {
+        const iid = details.external_ids?.imdb_id || details.imdb_id || null;
+        const real = await fetchImdbRating(iid);
+        return real || (details.vote_average ? details.vote_average.toFixed(1) : "0.0");
+      })(),
       vote_count:       details.vote_count || 0,
       cast:             cast_list,
       genres:           (details.genres || []).map(g => g.name),
